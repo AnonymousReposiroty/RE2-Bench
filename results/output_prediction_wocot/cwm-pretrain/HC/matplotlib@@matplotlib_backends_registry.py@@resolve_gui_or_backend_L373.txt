@@ -1,0 +1,509 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+import os
+
+def getbasename(derivedpath):
+    directory, derivedpath = os.path.splitdrive(derivedpath)
+    derivedpath, filename = os.path.split(derivedpath)
+    return derivedpath or directory
+
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+os.path.splitdrive
+
+def splitdrive(p):
+    """
+    Split the path p into the drive specification (if any) and the rest of the path, or the empty string if drive letters are unknown or unsupported.
+
+    Parameters
+    ----------
+    p : str
+
+    Returns
+    -------
+    drive, rest
+    """
+    p_drive, p_path = p, ''
+    if p_drive.startswith(('\\\\', '//')):  # Deal with MS Windows network drives
+        # 2 leading back (or forward)slashes, followed by
+        # at least one character means that it's a network drive
+        # which has the device name followed by a share name.
+        colon_pos = p_drive.find(':', 2)
+        if colon_pos != -1:
+            p_drive = p_drive[0:colon_pos]
+    elif p_drive[:1] == '/':
+        colon_pos = p_drive.find(':')
+        if colon_pos != -1 and p_drive[colon_pos - 1: colon_pos] == ':/':
+            # MS Windows drive with a path relative to it.
+            p_drive = p_drive[:colon_pos + 1]
+        else:
+            p_drive = ''
+    else:
+        # Could still be a UNC path. Flush out cases where the first
+        # character is '/' and the next is '\', i.e. /\foo\share
+        colon_pos = p_drive.find(':')
+        if colon_pos > 1 and p_drive[1:colon_pos] == '/' * (colon_pos - 1):
+            # <drive>:/foo/bar
+            p_drive = p_drive[:colon_pos + 1]
+    p_path = p_drive[len(p_drive):]
+    p_drive = p_drive[:len(p_drive)]  # share drive retains the colon
+    return p_drive, p_path
+
+os.path.split
+
+def split(p):
+    """
+    Split the path p into a pair, (head, tail) where tail is the last pathname component and head is everything leading up to that. The tail part will never contain a slash; if p ends in a slash, tail will be empty. If there is no slash in p, head will be empty. If p is empty, both head and tail are empty. Trailing slashes are stripped from head unless it is the root (one or more slashes only). In all cases, join(head, tail) returns a path to the same location as p (but the strings may differ). Also, if the path is relative, both head and tail will be relative.
+    """
+    import os
+    if not p:
+        return p, ''
+    if os.sep in p or os.altsep is None:
+        head, sep, tail = p.rpartition(os.sep)
+    else:
+        head, sep, tail = p.rpartition(os.altsep)
+    return head, tail
+
+[/PYTHON]
+
+What will be the output of `getbasename`, given the following input:
+[INPUT]
+{
+    "derivedpath": "D:/temp/file.txt"
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "basename": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "basename": "D:\\"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import importlib
+import importlib.metadata as im
+from matplotlib import _parse_to_version_info
+from matplotlib import get_backend
+
+class BackendRegistry:
+    _BUILTIN_BACKEND_TO_GUI_FRAMEWORK = {'gtk3agg': 'gtk3', 'gtk3cairo': 'gtk3', 'gtk4agg': 'gtk4', 'gtk4cairo': 'gtk4', 'macosx': 'macosx', 'nbagg': 'nbagg', 'notebook': 'nbagg', 'qtagg': 'qt', 'qtcairo': 'qt', 'qt5agg': 'qt5', 'qt5cairo': 'qt5', 'tkagg': 'tk', 'tkcairo': 'tk', 'webagg': 'webagg', 'wx': 'wx', 'wxagg': 'wx', 'wxcairo': 'wx', 'agg': 'headless', 'cairo': 'headless', 'pdf': 'headless', 'pgf': 'headless', 'ps': 'headless', 'svg': 'headless', 'template': 'headless'}
+    _GUI_FRAMEWORK_TO_BACKEND = {'gtk3': 'gtk3agg', 'gtk4': 'gtk4agg', 'headless': 'agg', 'macosx': 'macosx', 'qt': 'qtagg', 'qt5': 'qt5agg', 'qt6': 'qtagg', 'tk': 'tkagg', 'wx': 'wxagg'}
+
+    def __init__(self):
+        self._loaded_entry_points = False
+        self._backend_to_gui_framework = {}
+        self._name_to_module = {'notebook': 'nbagg'}
+
+    def _backend_module_name(self, backend):
+        if backend.startswith('module://'):
+            return backend[9:]
+        backend = backend.lower()
+        backend = self._name_to_module.get(backend, backend)
+        return backend[9:] if backend.startswith('module://') else f'matplotlib.backends.backend_{backend}'
+
+    def _ensure_entry_points_loaded(self):
+        if not self._loaded_entry_points:
+            entries = self._read_entry_points()
+            self._validate_and_store_entry_points(entries)
+            self._loaded_entry_points = True
+
+    def _get_gui_framework_by_loading(self, backend):
+        module = self.load_backend_module(backend)
+        canvas_class = module.FigureCanvas
+        return canvas_class.required_interactive_framework or 'headless'
+
+    def _read_entry_points(self):
+        import importlib.metadata as im
+        entry_points = im.entry_points(group='matplotlib.backend')
+        entries = [(entry.name, entry.value) for entry in entry_points]
+
+        def backward_compatible_entry_points(entries, module_name, threshold_version, names, target):
+            from matplotlib import _parse_to_version_info
+            try:
+                module_version = im.version(module_name)
+                if _parse_to_version_info(module_version) < threshold_version:
+                    for name in names:
+                        entries.append((name, target))
+            except im.PackageNotFoundError:
+                pass
+        names = [entry[0] for entry in entries]
+        if 'inline' not in names:
+            backward_compatible_entry_points(entries, 'matplotlib_inline', (0, 1, 7), ['inline'], 'matplotlib_inline.backend_inline')
+        if 'ipympl' not in names:
+            backward_compatible_entry_points(entries, 'ipympl', (0, 9, 4), ['ipympl', 'widget'], 'ipympl.backend_nbagg')
+        return entries
+
+    def _validate_and_store_entry_points(self, entries):
+        for name, module in set(entries):
+            name = name.lower()
+            if name.startswith('module://'):
+                raise RuntimeError(f"Entry point name '{name}' cannot start with 'module://'")
+            if name in self._BUILTIN_BACKEND_TO_GUI_FRAMEWORK:
+                raise RuntimeError(f"Entry point name '{name}' is a built-in backend")
+            if name in self._backend_to_gui_framework:
+                raise RuntimeError(f"Entry point name '{name}' duplicated")
+            self._name_to_module[name] = 'module://' + module
+            self._backend_to_gui_framework[name] = 'unknown'
+
+    def backend_for_gui_framework(self, framework):
+        return self._GUI_FRAMEWORK_TO_BACKEND.get(framework.lower())
+
+    def load_backend_module(self, backend):
+        module_name = self._backend_module_name(backend)
+        return importlib.import_module(module_name)
+
+    def resolve_backend(self, backend):
+        if isinstance(backend, str):
+            if not backend.startswith('module://'):
+                backend = backend.lower()
+        else:
+            from matplotlib import get_backend
+            backend = get_backend()
+        gui = self._BUILTIN_BACKEND_TO_GUI_FRAMEWORK.get(backend) or self._backend_to_gui_framework.get(backend)
+        if gui is None and isinstance(backend, str) and backend.startswith('module://'):
+            gui = 'unknown'
+        if gui is None and (not self._loaded_entry_points):
+            self._ensure_entry_points_loaded()
+            gui = self._backend_to_gui_framework.get(backend)
+        if gui == 'unknown':
+            gui = self._get_gui_framework_by_loading(backend)
+            self._backend_to_gui_framework[backend] = gui
+        if gui is None:
+            raise RuntimeError(f"'{backend}' is not a recognised backend name")
+        return (backend, gui if gui != 'headless' else None)
+
+    def resolve_gui_or_backend(self, gui_or_backend):
+        if not gui_or_backend.startswith('module://'):
+            gui_or_backend = gui_or_backend.lower()
+        backend = self.backend_for_gui_framework(gui_or_backend)
+        if backend is not None:
+            return (backend, gui_or_backend if gui_or_backend != 'headless' else None)
+        try:
+            return self.resolve_backend(gui_or_backend)
+        except Exception:
+            raise RuntimeError(f"'{gui_or_backend}' is not a recognised GUI loop or backend name")
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+matplotlib.lib.matplotlib.backends.registry.backend_for_gui_framework
+
+def backend_for_gui_framework(self, framework):
+    """
+    Return the name of the backend corresponding to the specified GUI framework.
+
+    Parameters
+    ----------
+    framework : str
+        GUI framework such as "qt".
+
+    Returns
+    -------
+    str or None
+        Backend name or None if GUI framework not recognised.
+    """
+    return self._GUI_FRAMEWORK_TO_BACKEND.get(framework.lower())
+
+matplotlib.lib.matplotlib.backends.registry.resolve_backend
+
+def resolve_backend(self, backend):
+    """
+    Return the backend and GUI framework for the specified backend name.
+
+    If the GUI framework is not yet known then it will be determined by loading the
+    backend module and checking the ``FigureCanvas.required_interactive_framework``
+    attribute.
+
+    This function only loads entry points if they have not already been loaded and
+    the backend is not built-in and not of ``module://some.backend`` format.
+
+    Parameters
+    ----------
+    backend : str or None
+        Name of backend, or None to use the default backend.
+
+    Returns
+    -------
+    backend : str
+        The backend name.
+    framework : str or None
+        The GUI framework, which will be None for a backend that is non-interactive.
+    """
+    if isinstance(backend, str):
+        if not backend.startswith("module://"):
+            backend = backend.lower()
+    else:  # Might be _auto_backend_sentinel or None
+        # Use whatever is already running...
+        from matplotlib import get_backend
+        backend = get_backend()
+
+    # Is backend already known (built-in or dynamically loaded)?
+    gui = (self._BUILTIN_BACKEND_TO_GUI_FRAMEWORK.get(backend) or
+           self._backend_to_gui_framework.get(backend))
+
+    # Is backend "module://something"?
+    if gui is None and isinstance(backend, str) and backend.startswith("module://"):
+        gui = "unknown"
+
+    # Is backend a possible entry point?
+    if gui is None and not self._loaded_entry_points:
+        self._ensure_entry_points_loaded()
+        gui = self._backend_to_gui_framework.get(backend)
+
+    # Backend known but not its gui framework.
+    if gui == "unknown":
+        gui = self._get_gui_framework_by_loading(backend)
+        self._backend_to_gui_framework[backend] = gui
+
+    if gui is None:
+        raise RuntimeError(f"'{backend}' is not a recognised backend name")
+
+    return backend, gui if gui != "headless" else None
+
+
+[/PYTHON]
+What will be the output of `resolve_gui_or_backend`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_loaded_entry_points": false,
+        "_backend_to_gui_framework": {},
+        "_name_to_module": {
+            "notebook": "nbagg"
+        }
+    },
+    "args": {
+        "gui_or_backend": "no-such-name"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+
+ Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+
+[FILEPATH] UpdateReportMaster.cjs [/FILEPATH]
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const fs = require("fs");
+const path = require("path");
+
+/**
+ * @param {string} dirPath
+ * @returns {Array<string>}
+ */
+function getFilesRecursively(dirPath) {
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  let filePaths = [];
+
+  for (let entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+
+    if (entry.isDirectory()) {
+      filePaths = filePaths.concat(getFilesRecursively(fullPath));
+    } else if (entry.isFile()) {
+      filePaths.push(fullPath);
+    }
+  }
+
+  return filePaths;
+}
+
+async function main() {
+  // Define prompt and directory path
+  const prompt = `"<prompt>"`;
+
+  const directoryPath =
+    "<YOUR_PATH>";
+  const filePaths = getFilesRecursively(directoryPath);
+
+  if (filePaths.length > 0) {
+    console.log("Processed files:");
+    filePaths.forEach((filePath) => console.log(filePath));
+  } else {
+    console.log("No files found.");
+    return;
+  }
+
+  // Read file contents
+  let contents = "";
+  for (const filePath of filePaths) {
+    contents += fs.readFileSync(filePath, "utf-8") + "\n";
+  }
+
+  // Instantiate model
+  const genAI = new GoogleGenerativeAI("<API_KEY>");
+  const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-flash-001",
+  });
+
+  const generationConfig = {
+    temperature: 1,
+    topP: 0.95,
+    topK: 40,
+    maxOutputTokens: 8192,
+    responseMimeType: "text/plain",
+  };
+
+  // Generate report
+  const result = await model.generateContent({
+    contents: [{ role: "user", parts: [{ text: prompt }, { text: contents }] }],
+    generationConfig,
+  });
+
+  // Output the report
+  console.log(result.response.text());
+}
+
+main().catch(console.error);
+
+[FILEPATH] UpdateReportMaster.cjs.js [/FILEPATH]
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import fs from "fs";
+import path from "path";
+/**
+ * @param {string} dirPath
+ * @returns {Array<string>}
+ */
+function getFilesRecursively(dirPath) {
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  let filePaths = [];
+
+  for (let entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+
+    if (entry.isDirectory()) {
+      filePaths = filePaths.concat(getFilesRecursively(fullPath));
+    } else if (entry.isFile()) {
+      filePaths.push(fullPath);
+    }
+  }
+
+  return filePaths;
+}
+
+async function main() {
+  // Define prompt and directory path
+  const prompt = `"<prompt>"`;
+
+  const directoryPath =
+    "<YOUR_PATH>";
+  const filePaths = getFilesRecursively(directoryPath);
+
+  if (filePaths.length > 0) {
+    console.log("Processed files:");
+    filePaths.forEach((filePath) => console.log(filePath));
+  } else {
+    console.log("No files found.");
+    return;
+  }
+
+  // Read file contents
+  let contents = "";
+  for (const filePath of filePaths) {
+    contents += fs.readFileSync(filePath, "utf-8") + "\n";
+  }
+
+  // Instantiate model
+  const genAI = new GoogleGenerativeAI("<API_KEY>");
+  const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-flash-001",
+  });
+
+  const generationConfig = {
+    temperature: 1,
+    topP: 0.95,
+    topK: 40,
+    maxOutputTokens: 8192,
+    responseMimeType: "text/plain",
+  };
+
+  // Generate report
+  const result = await model.generateContent({
+    contents: [{ role: "user", parts: [{ text: prompt }, { text: contents }] }],
+    generationConfig,
+  });
+
+  // Output the report
+  console.log(result.response.text());
+}
+
+main().catch(console.error);
+
+[FILEPATH] UpdateAgentCompiler.py [/FILEPATH]
+import asyncio
+import aiohttp
+import google.generativeai as genai
+from pydantic import BaseModel, Field, validator
+from typing import Dict, Optional, List
+import json
+from aiohttp import web
+
+class AgentUpdate(BaseModel):
+    """Agent update schema"""
+    agent_name: str = Field(description="Name of the agent to update")
+    agent_type: str = Field(description="Type of the agent")
+    update_data: Dict = Field(description="Update data for the agent")
+
+class AgentResponse(BaseModel):
+    """Response schema for agent actions"""
+    action: str = Field(description="Action performed by the agent")
+    result: str = Field(description="Result of the action")
+    timestamp: str = Field(description="Timestamp of the action")
+
+class GeminiAgentProcessor:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.agents: Dict[str, Dict] = {}
+        genai.configure(api_key=self.api_key)
+        
+    async def initialize_model(self) -> genai.GenerativeModel:
+        """Initialize Gemini model"""
+        return genai.GenerativeModel("gemini-1.5-flash-latest")
+
+    async def validate_agent_update(self, update: AgentUpdate) -> bool:
+        """Validate agent update using Pydantic"""
+        try:
+            # This will raise ValidationError if update is invalid
+            update.model_validate(update.dict())
+            return True
+        except Exception as e:
+            print(f"Validation error: {str(e)}")
+            return False
+
+    async def process_agent_update(self, update: AgentUpdate, model: genai.GenerativeModel) -> Dict:
+        """Process agent update with Gemini and Pydantic"""
+        # Validate update
+        if not await

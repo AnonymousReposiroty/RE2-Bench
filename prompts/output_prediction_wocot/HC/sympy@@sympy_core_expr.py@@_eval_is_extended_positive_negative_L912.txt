@@ -1,0 +1,870 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from typing import TYPE_CHECKING, overload, Literal
+from collections.abc import Iterable, Mapping
+from .basic import Basic, Atom
+from .singleton import S
+from .evalf import EvalfMixin, pure_complex, DEFAULT_MAXPREC
+from .decorators import call_highest_priority, sympify_method_args, sympify_return
+from .cache import cacheit
+from .function import Function, _derivative_dispatch
+from typing import Any, Hashable
+from typing_extensions import Self
+from sympy.polys.polyerrors import NotAlgebraic
+from sympy.polys.numberfields import minimal_polynomial
+from sympy.polys.numberfields import minimal_polynomial
+from sympy.polys.polyerrors import NotAlgebraic
+
+@sympify_method_args
+class Expr(Basic, EvalfMixin):
+    __slots__: tuple[str, ...] = ()
+    if TYPE_CHECKING:
+
+        def __new__(cls, *args: Basic) -> Self:
+            ...
+
+        @overload
+        def subs(self, arg1: Mapping[Basic | complex, Expr | complex], arg2: None=None) -> Expr:
+            ...
+
+        @overload
+        def subs(self, arg1: Iterable[tuple[Basic | complex, Expr | complex]], arg2: None=None, **kwargs: Any) -> Expr:
+            ...
+
+        @overload
+        def subs(self, arg1: Expr | complex, arg2: Expr | complex) -> Expr:
+            ...
+
+        @overload
+        def subs(self, arg1: Mapping[Basic | complex, Basic | complex], arg2: None=None, **kwargs: Any) -> Basic:
+            ...
+
+        @overload
+        def subs(self, arg1: Iterable[tuple[Basic | complex, Basic | complex]], arg2: None=None, **kwargs: Any) -> Basic:
+            ...
+
+        @overload
+        def subs(self, arg1: Basic | complex, arg2: Basic | complex, **kwargs: Any) -> Basic:
+            ...
+
+        def subs(self, arg1: Mapping[Basic | complex, Basic | complex] | Basic | complex, arg2: Basic | complex | None=None, **kwargs: Any) -> Basic:
+            ...
+
+        def simplify(self, **kwargs) -> Expr:
+            ...
+
+        def evalf(self, n: int | None=15, subs: dict[Basic, Basic | float] | None=None, maxn: int=100, chop: bool | int=False, strict: bool=False, quad: str | None=None, verbose: bool=False) -> Expr:
+            ...
+        n = evalf
+    is_scalar = True
+    _op_priority = 10.0
+
+    @property
+    def is_number(self):
+        return all((obj.is_number for obj in self.args))
+
+    def _eval_is_extended_positive_negative(self, positive):
+        from sympy.polys.numberfields import minimal_polynomial
+        from sympy.polys.polyerrors import NotAlgebraic
+        if self.is_number:
+            try:
+                n2 = self._eval_evalf(2)
+            except ValueError:
+                return None
+            if n2 is None:
+                return None
+            if getattr(n2, '_prec', 1) == 1:
+                return None
+            if n2 is S.NaN:
+                return None
+            f = self.evalf(2)
+            if f.is_Float:
+                match = (f, S.Zero)
+            else:
+                match = pure_complex(f)
+            if match is None:
+                return False
+            r, i = match
+            if not (i.is_Number and r.is_Number):
+                return False
+            if r._prec != 1 and i._prec != 1:
+                return bool(not i and (r > 0 if positive else r < 0))
+            elif r._prec == 1 and (not i or i._prec == 1) and self._eval_is_algebraic() and (not self.has(Function)):
+                try:
+                    if minimal_polynomial(self).is_Symbol:
+                        return False
+                except (NotAlgebraic, NotImplementedError):
+                    pass
+    __round__ = round
+
+    @property
+    def args(self) -> tuple[Basic, ...]:
+        return self._args
+
+    @cacheit
+    def has(self, *patterns):
+        return self._has(iterargs, *patterns)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.codegen.numpy_nodes._eval_evalf
+
+def _eval_evalf(self, *args, **kwargs):
+    return self.rewrite(log).evalf(*args, **kwargs)
+
+sympy.sympy.codegen.scipy_nodes._eval_evalf
+
+def _eval_evalf(self, *args, **kwargs):
+    return self.rewrite(cos).evalf(*args, **kwargs)
+
+sympy.sympy.concrete.expr_with_limits.is_number
+
+@property
+def is_number(self):
+    """Return True if the Sum has no free symbols, else False."""
+    return not self.free_symbols
+
+sympy.sympy.core.add.<lambda>
+
+_eval_is_algebraic = lambda self: _fuzzy_group(
+    (a.is_algebraic for a in self.args), quick_exit=True)
+
+
+sympy.sympy.core.cache.wrapper
+
+@wraps(func)
+def wrapper(*args, **kwargs):
+    try:
+        retval = cfunc(*args, **kwargs)
+    except TypeError as e:
+        if not e.args or not e.args[0].startswith('unhashable type:'):
+            raise
+        retval = func(*args, **kwargs)
+    return retval
+
+sympy.sympy.core.evalf.pure_complex
+
+def pure_complex(v: Expr, or_real=False) -> tuple[Number, Number] | None:
+    """Return a and b if v matches a + I*b where b is not zero and
+    a and b are Numbers, else None. If `or_real` is True then 0 will
+    be returned for `b` if `v` is a real number.
+
+    Examples
+    ========
+
+    >>> from sympy.core.evalf import pure_complex
+    >>> from sympy import sqrt, I, S
+    >>> a, b, surd = S(2), S(3), sqrt(2)
+    >>> pure_complex(a)
+    >>> pure_complex(a, or_real=True)
+    (2, 0)
+    >>> pure_complex(surd)
+    >>> pure_complex(a + b*I)
+    (2, 3)
+    >>> pure_complex(I)
+    (0, 1)
+    """
+    h, t = v.as_coeff_Add()
+    if t:
+        c, i = t.as_coeff_Mul()
+        if i is S.ImaginaryUnit:
+            return h, c
+    elif or_real:
+        return h, S.Zero
+    return None
+
+sympy.sympy.core.evalf.evalf
+
+def evalf(self, n=15, subs=None, maxn=100, chop=False, strict=False, quad=None, verbose=False):
+    """
+    Evaluate the given formula to an accuracy of *n* digits.
+
+    Parameters
+    ==========
+
+    subs : dict, optional
+        Substitute numerical values for symbols, e.g.
+        ``subs={x:3, y:1+pi}``. The substitutions must be given as a
+        dictionary.
+
+    maxn : int, optional
+        Allow a maximum temporary working precision of maxn digits.
+
+    chop : bool or number, optional
+        Specifies how to replace tiny real or imaginary parts in
+        subresults by exact zeros.
+
+        When ``True`` the chop value defaults to standard precision.
+
+        Otherwise the chop value is used to determine the
+        magnitude of "small" for purposes of chopping.
+
+        >>> from sympy import N
+        >>> x = 1e-4
+        >>> N(x, chop=True)
+        0.000100000000000000
+        >>> N(x, chop=1e-5)
+        0.000100000000000000
+        >>> N(x, chop=1e-4)
+        0
+
+    strict : bool, optional
+        Raise ``PrecisionExhausted`` if any subresult fails to
+        evaluate to full accuracy, given the available maxprec.
+
+    quad : str, optional
+        Choose algorithm for numerical quadrature. By default,
+        tanh-sinh quadrature is used. For oscillatory
+        integrals on an infinite interval, try ``quad='osc'``.
+
+    verbose : bool, optional
+        Print debug information.
+
+    Notes
+    =====
+
+    When Floats are naively substituted into an expression,
+    precision errors may adversely affect the result. For example,
+    adding 1e16 (a Float) to 1 will truncate to 1e16; if 1e16 is
+    then subtracted, the result will be 0.
+    That is exactly what happens in the following:
+
+    >>> from sympy.abc import x, y, z
+    >>> values = {x: 1e16, y: 1, z: 1e16}
+    >>> (x + y - z).subs(values)
+    0
+
+    Using the subs argument for evalf is the accurate way to
+    evaluate such an expression:
+
+    >>> (x + y - z).evalf(subs=values)
+    1.00000000000000
+    """
+    from .numbers import Float, Number
+    n = n if n is not None else 15
+
+    if subs and is_sequence(subs):
+        raise TypeError('subs must be given as a dictionary')
+
+    # for sake of sage that doesn't like evalf(1)
+    if n == 1 and isinstance(self, Number):
+        from .expr import _mag
+        rv = self.evalf(2, subs, maxn, chop, strict, quad, verbose)
+        m = _mag(rv)
+        rv = rv.round(1 - m)
+        return rv
+
+    if not evalf_table:
+        _create_evalf_table()
+    prec = dps_to_prec(n)
+    options = {'maxprec': max(prec, int(maxn*LG10)), 'chop': chop,
+           'strict': strict, 'verbose': verbose}
+    if subs is not None:
+        options['subs'] = subs
+    if quad is not None:
+        options['quad'] = quad
+    try:
+        result = evalf(self, prec + 4, options)
+    except NotImplementedError:
+        # Fall back to the ordinary evalf
+        if hasattr(self, 'subs') and subs is not None:  # issue 20291
+            v = self.subs(subs)._eval_evalf(prec)
+        else:
+            v = self._eval_evalf(prec)
+        if v is None:
+            return self
+        elif not v.is_number:
+            return v
+        try:
+            # If the result is numerical, normalize it
+            result = evalf(v, prec, options)
+        except NotImplementedError:
+            # Probably contains symbols or unknown functions
+            return v
+    if result is S.ComplexInfinity:
+        return result
+    re, im, re_acc, im_acc = result
+    if re is S.NaN or im is S.NaN:
+        return S.NaN
+    if re:
+        p = max(min(prec, re_acc), 1)
+        re = Float._new(re, p)
+    else:
+        re = S.Zero
+    if im:
+        p = max(min(prec, im_acc), 1)
+        im = Float._new(im, p)
+        return re + im*S.ImaginaryUnit
+    else:
+        return re
+
+sympy.sympy.core.evalf._eval_evalf
+
+def _eval_evalf(self, prec: int) -> Expr | None:
+    return None
+
+sympy.sympy.core.expr.is_number
+
+@property
+def is_number(self):
+    """Returns True if ``self`` has no free symbols and no
+    undefined functions (AppliedUndef, to be precise). It will be
+    faster than ``if not self.free_symbols``, however, since
+    ``is_number`` will fail as soon as it hits a free symbol
+    or undefined function.
+
+    Examples
+    ========
+
+    >>> from sympy import Function, Integral, cos, sin, pi
+    >>> from sympy.abc import x
+    >>> f = Function('f')
+
+    >>> x.is_number
+    False
+    >>> f(1).is_number
+    False
+    >>> (2*x).is_number
+    False
+    >>> (2 + Integral(2, x)).is_number
+    False
+    >>> (2 + Integral(2, (x, 1, 2))).is_number
+    True
+
+    Not all numbers are Numbers in the SymPy sense:
+
+    >>> pi.is_number, pi.is_Number
+    (True, False)
+
+    If something is a number it should evaluate to a number with
+    real and imaginary parts that are Numbers; the result may not
+    be comparable, however, since the real and/or imaginary part
+    of the result may not have precision.
+
+    >>> cos(1).is_number and cos(1).is_comparable
+    True
+
+    >>> z = cos(1)**2 + sin(1)**2 - 1
+    >>> z.is_number
+    True
+    >>> z.is_comparable
+    False
+
+    See Also
+    ========
+
+    sympy.core.basic.Basic.is_comparable
+    """
+    return all(obj.is_number for obj in self.args)
+
+sympy.sympy.core.function._eval_evalf
+
+def _eval_evalf(self, prec):
+
+    def _get_mpmath_func(fname):
+        """Lookup mpmath function based on name"""
+        if isinstance(self, AppliedUndef):
+            # Shouldn't lookup in mpmath but might have ._imp_
+            return None
+
+        if not hasattr(mpmath, fname):
+            fname = MPMATH_TRANSLATIONS.get(fname, None)
+            if fname is None:
+                return None
+        return getattr(mpmath, fname)
+
+    _eval_mpmath = getattr(self, '_eval_mpmath', None)
+    if _eval_mpmath is None:
+        func = _get_mpmath_func(self.func.__name__)
+        args = self.args
+    else:
+        func, args = _eval_mpmath()
+
+    # Fall-back evaluation
+    if func is None:
+        imp = getattr(self, '_imp_', None)
+        if imp is None:
+            return None
+        try:
+            return Float(imp(*[i.evalf(prec) for i in self.args]), prec)
+        except (TypeError, ValueError):
+            return None
+
+    # Convert all args to mpf or mpc
+    # Convert the arguments to *higher* precision than requested for the
+    # final result.
+    # XXX + 5 is a guess, it is similar to what is used in evalf.py. Should
+    #     we be more intelligent about it?
+    try:
+        args = [arg._to_mpmath(prec + 5) for arg in args]
+        def bad(m):
+            from mpmath import mpf, mpc
+            # the precision of an mpf value is the last element
+            # if that is 1 (and m[1] is not 1 which would indicate a
+            # power of 2), then the eval failed; so check that none of
+            # the arguments failed to compute to a finite precision.
+            # Note: An mpc value has two parts, the re and imag tuple;
+            # check each of those parts, too. Anything else is allowed to
+            # pass
+            if isinstance(m, mpf):
+                m = m._mpf_
+                return m[1] !=1 and m[-1] == 1
+            elif isinstance(m, mpc):
+                m, n = m._mpc_
+                return m[1] !=1 and m[-1] == 1 and \
+                    n[1] !=1 and n[-1] == 1
+            else:
+                return False
+        if any(bad(a) for a in args):
+            raise ValueError  # one or more args failed to compute with significance
+    except ValueError:
+        return
+
+    with mpmath.workprec(prec):
+        v = func(*args)
+
+    return Expr._from_mpmath(v, prec)
+
+sympy.sympy.core.numbers.__bool__
+
+def __bool__(self):
+    return False
+
+sympy.sympy.core.numbers.__gt__
+
+def __gt__(self, other):
+    if isinstance(other, NumberSymbol):
+        return other.__lt__(self)
+    rv = self._Frel(other, mlib.mpf_gt)
+    if rv is None:
+        return Expr.__gt__(self, other)
+    return rv
+
+sympy.sympy.core.numbers.__lt__
+
+def __lt__(self, other):
+    if isinstance(other, NumberSymbol):
+        return other.__gt__(self)
+    rv = self._Frel(other, mlib.mpf_lt)
+    if rv is None:
+        return Expr.__lt__(self, other)
+    return rv
+
+sympy.sympy.core.numbers._eval_evalf
+
+def _eval_evalf(self, prec):
+    return Float._new(self._as_mpf_val(prec), prec)
+
+sympy.sympy.core.operations._eval_evalf
+
+def _eval_evalf(self, prec):
+    """
+    Evaluate the parts of self that are numbers; if the whole thing
+    was a number with no functions it would have been evaluated, but
+    it wasn't so we must judiciously extract the numbers and reconstruct
+    the object. This is *not* simply replacing numbers with evaluated
+    numbers. Numbers should be handled in the largest pure-number
+    expression as possible. So the code below separates ``self`` into
+    number and non-number parts and evaluates the number parts and
+    walks the args of the non-number part recursively (doing the same
+    thing).
+    """
+    from .add import Add
+    from .mul import Mul
+    from .symbol import Symbol
+    from .function import AppliedUndef
+    if isinstance(self, (Mul, Add)):
+        x, tail = self.as_independent(Symbol, AppliedUndef)
+        # if x is an AssocOp Function then the _evalf below will
+        # call _eval_evalf (here) so we must break the recursion
+        if not (tail is self.identity or
+                isinstance(x, AssocOp) and x.is_Function or
+                x is self.identity and isinstance(tail, AssocOp)):
+            # here, we have a number so we just call to _evalf with prec;
+            # prec is not the same as n, it is the binary precision so
+            # that's why we don't call to evalf.
+            x = x._evalf(prec) if x is not self.identity else self.identity
+            args = []
+            tail_args = tuple(self.func.make_args(tail))
+            for a in tail_args:
+                # here we call to _eval_evalf since we don't know what we
+                # are dealing with and all other _eval_evalf routines should
+                # be doing the same thing (i.e. taking binary prec and
+                # finding the evalf-able args)
+                newa = a._eval_evalf(prec)
+                if newa is None:
+                    args.append(a)
+                else:
+                    args.append(newa)
+            return self.func(x, *args)
+
+    # this is the same as above, but there were no pure-number args to
+    # deal with
+    args = []
+    for a in self.args:
+        newa = a._eval_evalf(prec)
+        if newa is None:
+            args.append(a)
+        else:
+            args.append(newa)
+    return self.func(*args)
+
+sympy.sympy.functions.combinatorial.numbers._eval_evalf
+
+def _eval_evalf(self, prec):
+    from sympy.functions.special.gamma_functions import gamma
+    if self.args[0].is_number:
+        return self.rewrite(gamma)._eval_evalf(prec)
+
+sympy.sympy.functions.elementary.complexes._eval_evalf
+
+def _eval_evalf(self, prec):
+    """ Careful! any evalf of polar numbers is flaky """
+    return self.args[0]._eval_evalf(prec)
+
+sympy.sympy.functions.elementary.exponential._eval_evalf
+
+def _eval_evalf(self, prec):
+    """ Careful! any evalf of polar numbers is flaky """
+    i = im(self.args[0])
+    try:
+        bad = (i <= -pi or i > pi)
+    except TypeError:
+        bad = True
+    if bad:
+        return self  # cannot evalf for this argument
+    res = exp(self.args[0])._eval_evalf(prec)
+    if i > 0 and im(res) < 0:
+        # i ~ pi, but exp(I*i) evaluated to argument slightly bigger than pi
+        return re(res)
+    return res
+
+sympy.sympy.functions.elementary.miscellaneous.evalf
+
+def evalf(self, n=15, **options):
+    return self.func(*[a.evalf(n, **options) for a in self.args])
+
+sympy.sympy.functions.elementary.trigonometric._eval_is_algebraic
+
+def _eval_is_algebraic(self):
+    s = self.func(*self.args)
+    if s.func == self.func:
+        if fuzzy_not(self.args[0].is_zero) and self.args[0].is_algebraic:
+            return False
+        pi_coeff = _pi_coeff(self.args[0])
+        if pi_coeff is not None and pi_coeff.is_rational:
+            return True
+    else:
+        return s.is_algebraic
+
+sympy.sympy.functions.special.bessel._eval_evalf
+
+def _eval_evalf(self, prec):
+    if self.order.is_Integer:
+        return self.rewrite(bessely)._eval_evalf(prec)
+
+sympy.sympy.functions.special.error_functions._eval_evalf
+
+def _eval_evalf(self, prec):
+    if (self.args[0]/polar_lift(-1)).is_positive:
+        return super()._eval_evalf(prec) + (I*pi)._eval_evalf(prec)
+    return super()._eval_evalf(prec)
+
+sympy.sympy.functions.special.gamma_functions._eval_evalf
+
+def _eval_evalf(self, prec):
+    if not all(i.is_number for i in self.args):
+        return
+    s = self.args[0]._to_mpmath(prec+12)
+    z = self.args[1]._to_mpmath(prec+12)
+    if mp.isint(z) and z <= 0:
+        return S.ComplexInfinity
+    with workprec(prec+12):
+        if mp.isint(s) and s >= 0:
+            res = mp.polygamma(s, z)
+        else:
+            zt = mp.zeta(s+1, z)
+            dzt = mp.zeta(s+1, z, 1)
+            res = (dzt + (mp.euler + mp.digamma(-s)) * zt) * mp.rgamma(-s)
+    return Expr._from_mpmath(res, prec)
+
+sympy.sympy.functions.special.hyper.is_number
+
+@property
+def is_number(self):
+    """ Returns true if expression has numeric data only. """
+    return not self.free_symbols
+
+sympy.sympy.functions.special.spherical_harmonics._eval_evalf
+
+def _eval_evalf(self, prec):
+    # Note: works without this function by just calling
+    #       mpmath for Legendre polynomials. But using
+    #       the dedicated function directly is cleaner.
+    from mpmath import mp, workprec
+    n = self.args[0]._to_mpmath(prec)
+    m = self.args[1]._to_mpmath(prec)
+    theta = self.args[2]._to_mpmath(prec)
+    phi = self.args[3]._to_mpmath(prec)
+    with workprec(prec):
+        res = mp.spherharm(n, m, theta, phi)
+    return Expr._from_mpmath(res, prec)
+
+sympy.sympy.functions.special.zeta_functions._eval_evalf
+
+def _eval_evalf(self, prec):
+    if all(i.is_number for i in self.args):
+        return self.rewrite(zeta)._eval_evalf(prec)
+
+sympy.sympy.logic.boolalg.__bool__
+
+def __bool__(self):
+    return False
+
+sympy.sympy.physics.quantum.trace.is_number
+
+@property
+def is_number(self):
+    # TODO : improve this implementation
+    return True
+
+sympy.sympy.polys.numberfields.minpoly.minimal_polynomial
+
+@public
+def minimal_polynomial(ex, x=None, compose=True, polys=False, domain=None):
+    """
+    Computes the minimal polynomial of an algebraic element.
+
+    Parameters
+    ==========
+
+    ex : Expr
+        Element or expression whose minimal polynomial is to be calculated.
+
+    x : Symbol, optional
+        Independent variable of the minimal polynomial
+
+    compose : boolean, optional (default=True)
+        Method to use for computing minimal polynomial. If ``compose=True``
+        (default) then ``_minpoly_compose`` is used, if ``compose=False`` then
+        groebner bases are used.
+
+    polys : boolean, optional (default=False)
+        If ``True`` returns a ``Poly`` object else an ``Expr`` object.
+
+    domain : Domain, optional
+        Ground domain
+
+    Notes
+    =====
+
+    By default ``compose=True``, the minimal polynomial of the subexpressions of ``ex``
+    are computed, then the arithmetic operations on them are performed using the resultant
+    and factorization.
+    If ``compose=False``, a bottom-up algorithm is used with ``groebner``.
+    The default algorithm stalls less frequently.
+
+    If no ground domain is given, it will be generated automatically from the expression.
+
+    Examples
+    ========
+
+    >>> from sympy import minimal_polynomial, sqrt, solve, QQ
+    >>> from sympy.abc import x, y
+
+    >>> minimal_polynomial(sqrt(2), x)
+    x**2 - 2
+    >>> minimal_polynomial(sqrt(2), x, domain=QQ.algebraic_field(sqrt(2)))
+    x - sqrt(2)
+    >>> minimal_polynomial(sqrt(2) + sqrt(3), x)
+    x**4 - 10*x**2 + 1
+    >>> minimal_polynomial(solve(x**3 + x + 3)[0], x)
+    x**3 + x + 3
+    >>> minimal_polynomial(sqrt(y), x)
+    x**2 - y
+
+    """
+
+    ex = sympify(ex)
+    if ex.is_number:
+        # not sure if it's always needed but try it for numbers (issue 8354)
+        ex = _mexpand(ex, recursive=True)
+    for expr in preorder_traversal(ex):
+        if expr.is_AlgebraicNumber:
+            compose = False
+            break
+
+    if x is not None:
+        x, cls = sympify(x), Poly
+    else:
+        x, cls = Dummy('x'), PurePoly
+
+    if not domain:
+        if ex.free_symbols:
+            domain = FractionField(QQ, list(ex.free_symbols))
+        else:
+            domain = QQ
+    if hasattr(domain, 'symbols') and x in domain.symbols:
+        raise GeneratorsError("the variable %s is an element of the ground "
+                              "domain %s" % (x, domain))
+
+    if compose:
+        result = _minpoly_compose(ex, x, domain)
+        result = result.primitive()[1]
+        c = result.coeff(x**degree(result, x))
+        if c.is_negative:
+            result = expand_mul(-result)
+        return cls(result, x, field=True) if polys else result.collect(x)
+
+    if not domain.is_QQ:
+        raise NotImplementedError("groebner method only works for QQ")
+
+    result = _minpoly_groebner(ex, x, cls)
+    return cls(result, x, field=True) if polys else result.collect(x)
+
+sympy.sympy.polys.rootoftools._eval_evalf
+
+def _eval_evalf(self, prec, **kwargs):
+    """Evaluate this complex root to the given precision."""
+    # all kwargs are ignored
+    return self.eval_rational(n=prec_to_dps(prec))._evalf(prec)
+
+
+[/PYTHON]
+What will be the output of `_eval_is_extended_positive_negative`, given the following input:
+[INPUT]
+```
+{
+    "self": "-2",
+    "args": {
+        "positive": true
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]

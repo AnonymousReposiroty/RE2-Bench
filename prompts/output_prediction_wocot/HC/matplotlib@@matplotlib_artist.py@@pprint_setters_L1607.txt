@@ -1,0 +1,319 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from functools import cache, reduce, wraps
+import inspect
+import re
+import numpy as np
+
+class ArtistInspector:
+
+    def __init__(self, o):
+        if not isinstance(o, Artist):
+            if np.iterable(o):
+                o = list(o)
+                if len(o):
+                    o = o[0]
+        self.oorig = o
+        if not isinstance(o, type):
+            o = type(o)
+        self.o = o
+        self.aliasd = self.get_aliases()
+
+    def get_aliases(self):
+        names = [name for name in dir(self.o) if name.startswith(('set_', 'get_')) and callable(getattr(self.o, name))]
+        aliases = {}
+        for name in names:
+            func = getattr(self.o, name)
+            if not self.is_alias(func):
+                continue
+            propname = re.search(f'`({name[:4]}.*)`', inspect.getdoc(func)).group(1)
+            aliases.setdefault(propname[4:], set()).add(name[4:])
+        return aliases
+    _get_valid_values_regex = re.compile('\\n\\s*(?:\\.\\.\\s+)?ACCEPTS:\\s*((?:.|\\n)*?)(?:$|(?:\\n\\n))')
+
+    def get_valid_values(self, attr):
+        name = 'set_%s' % attr
+        if not hasattr(self.o, name):
+            raise AttributeError(f'{self.o} has no function {name}')
+        func = getattr(self.o, name)
+        if hasattr(func, '_kwarg_doc'):
+            return func._kwarg_doc
+        docstring = inspect.getdoc(func)
+        if docstring is None:
+            return 'unknown'
+        if docstring.startswith('Alias for '):
+            return None
+        match = self._get_valid_values_regex.search(docstring)
+        if match is not None:
+            return re.sub('\n *', ' ', match.group(1))
+        param_name = func.__code__.co_varnames[1]
+        match = re.search(f'(?m)^ *\\*?{param_name} : (.+)', docstring)
+        if match:
+            return match.group(1)
+        return 'unknown'
+
+    def get_setters(self):
+        setters = []
+        for name in dir(self.o):
+            if not name.startswith('set_'):
+                continue
+            func = getattr(self.o, name)
+            if not callable(func) or self.number_of_parameters(func) < 2 or self.is_alias(func):
+                continue
+            setters.append(name[4:])
+        return setters
+
+    @staticmethod
+    @cache
+    def number_of_parameters(func):
+        return len(inspect.signature(func).parameters)
+
+    @staticmethod
+    @cache
+    def is_alias(method):
+        ds = inspect.getdoc(method)
+        if ds is None:
+            return False
+        return ds.startswith('Alias for ')
+
+    def aliased_name(self, s):
+        aliases = ''.join((' or %s' % x for x in sorted(self.aliasd.get(s, []))))
+        return s + aliases
+    _NOT_LINKABLE = {'matplotlib.image._ImageBase.set_alpha', 'matplotlib.image._ImageBase.set_array', 'matplotlib.image._ImageBase.set_data', 'matplotlib.image._ImageBase.set_filternorm', 'matplotlib.image._ImageBase.set_filterrad', 'matplotlib.image._ImageBase.set_interpolation', 'matplotlib.image._ImageBase.set_interpolation_stage', 'matplotlib.image._ImageBase.set_resample', 'matplotlib.text._AnnotationBase.set_annotation_clip'}
+
+    def pprint_setters(self, prop=None, leadingspace=2):
+        if leadingspace:
+            pad = ' ' * leadingspace
+        else:
+            pad = ''
+        if prop is not None:
+            accepts = self.get_valid_values(prop)
+            return f'{pad}{prop}: {accepts}'
+        lines = []
+        for prop in sorted(self.get_setters()):
+            accepts = self.get_valid_values(prop)
+            name = self.aliased_name(prop)
+            lines.append(f'{pad}{name}: {accepts}')
+        return lines
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+matplotlib.lib.matplotlib.artist.get_valid_values
+
+def get_valid_values(self, attr):
+    """
+    Get the legal arguments for the setter associated with *attr*.
+
+    This is done by querying the docstring of the setter for a line that
+    begins with "ACCEPTS:" or ".. ACCEPTS:", and then by looking for a
+    numpydoc-style documentation for the setter's first argument.
+    """
+
+    name = 'set_%s' % attr
+    if not hasattr(self.o, name):
+        raise AttributeError(f'{self.o} has no function {name}')
+    func = getattr(self.o, name)
+
+    if hasattr(func, '_kwarg_doc'):
+        return func._kwarg_doc
+
+    docstring = inspect.getdoc(func)
+    if docstring is None:
+        return 'unknown'
+
+    if docstring.startswith('Alias for '):
+        return None
+
+    match = self._get_valid_values_regex.search(docstring)
+    if match is not None:
+        return re.sub("\n *", " ", match.group(1))
+
+    # Much faster than list(inspect.signature(func).parameters)[1],
+    # although barely relevant wrt. matplotlib's total import time.
+    param_name = func.__code__.co_varnames[1]
+    # We could set the presence * based on whether the parameter is a
+    # varargs (it can't be a varkwargs) but it's not really worth it.
+    match = re.search(fr"(?m)^ *\*?{param_name} : (.+)", docstring)
+    if match:
+        return match.group(1)
+
+    return 'unknown'
+
+matplotlib.lib.matplotlib.artist.get_setters
+
+def get_setters(self):
+    """
+    Get the attribute strings with setters for object.
+
+    For example, for a line, return ``['markerfacecolor', 'linewidth',
+    ....]``.
+    """
+    setters = []
+    for name in dir(self.o):
+        if not name.startswith('set_'):
+            continue
+        func = getattr(self.o, name)
+        if (not callable(func)
+                or self.number_of_parameters(func) < 2
+                or self.is_alias(func)):
+            continue
+        setters.append(name[4:])
+    return setters
+
+matplotlib.lib.matplotlib.artist.aliased_name
+
+def aliased_name(self, s):
+    """
+    Return 'PROPNAME or alias' if *s* has an alias, else return 'PROPNAME'.
+
+    For example, for the line markerfacecolor property, which has an
+    alias, return 'markerfacecolor or mfc' and for the transform
+    property, which does not, return 'transform'.
+    """
+    aliases = ''.join(' or %s' % x for x in sorted(self.aliasd.get(s, [])))
+    return s + aliases
+
+
+[/PYTHON]
+What will be the output of `pprint_setters`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "oorig": "<class 'matplotlib.tests.test_artist.test_artist_inspector_get_valid_values.<locals>.TestArtist'>",
+        "o": "<class 'matplotlib.tests.test_artist.test_artist_inspector_get_valid_values.<locals>.TestArtist'>",
+        "aliasd": {}
+    },
+    "args": {
+        "prop": null,
+        "leadingspace": 4
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]

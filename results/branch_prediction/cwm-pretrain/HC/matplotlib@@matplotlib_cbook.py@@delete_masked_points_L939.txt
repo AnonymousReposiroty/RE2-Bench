@@ -1,0 +1,383 @@
+[OUTPUT]
+1 import numpy as np
+2 
+3 def delete_masked_points(*args):
+4     if not len(args): ## [BRANCH]taken=[N][/BRANCH]
+5         return ()
+6     if is_scalar_or_string(args[0]): ## [BRANCH]taken=[N][/BRANCH]
+7         raise ValueError("First argument must be a sequence")
+8     nrecs = len(args[0])
+9     margs = []
+10     seqlist = [False] * len(args)
+11     for i, x in enumerate(args):
+12         if not isinstance(x, str) and np.iterable(x) and len(x) == nrecs: ## [BRANCH]taken=[Y, Y, Y][/BRANCH]
+13             seqlist[i] = True
+14             if isinstance(x, np.ma.MaskedArray): ## [BRANCH]taken=[N, N, N][/BRANCH]
+15                 if x.ndim > 1: ## [BRANCH]taken=[N, N, N][/BRANCH]
+16                     raise ValueError("Masked arrays must be 1-D")
+17             else: ## [BRANCH]taken=[Y, Y, Y][/BRANCH]
+18                 x = np.asarray(x)
+19         margs.append(x)
+20     masks = []
+21     for i, x in enumerate(margs):
+22         if seqlist[i]: ## [BRANCH]taken=[Y, Y, Y][/BRANCH]
+23             if x.ndim > 1:## [BRANCH]taken=[N, N, N][/BRANCH]
+24                 continue
+25             if isinstance(x, np.ma.MaskedArray):
+26                 masks.append(~np.ma.getmaskarray(x))
+27                 xd = x.data
+28             else:
+29                 xd = x
+30             try:
+31                 mask = np.isfinite(xd)
+32                 if isinstance(mask, np.ndarray): ## [BRANCH]taken=[Y, Y, Y][/BRANCH]
+33                     masks.append(mask)
+34             except Exception:
+35                 pass
+36     if len(masks): ## [BRANCH]taken=[Y][/BRANCH]
+37         mask = np.logical_and.reduce(masks)
+38         igood = mask.nonzero()[0]
+39         if len(igood) < nrecs: ## [BRANCH]taken=[N][/BRANCH]
+40             for i, x in enumerate(margs):
+41                 if seqlist[i]:
+42                     margs[i] = x[igood]
+43     for i, x in enumerate(margs):
+44         if seqlist[i] and isinstance(x, np.ma.MaskedArray): ## [BRANCH]taken=[N, N, N][/BRANCH]
+45             margs[i] = x.filled()
+46     return margs
+47 
+[/OUTPUT]
+[/ANSWER]
+
+[FILEPATH] info/14/results/outputs/U-ReX/pytest_14.jsonl/2.json [/FILEPATH]
+2   #!/usr/bin/env python
+3   import sys
+4   import os
+5   from shutil import copy
+6   from shutil import rmtree
+7   from optparse import OptionParser
+8   from tempfile import mkdtemp
+9   from subprocess import call
+10  from subprocess import Popen
+11  from subprocess import PIPE
+12  from urlparse import urlparse
+13  from urllib2 import Request
+14  from urllib2 import urlopen
+15  
+16  def wget(url, dest):
+17      req = Request(url)
+18      response = urlopen(req)
+19      f = open(dest, "wb")
+20      f.write(response.read())
+21      f.close()
+22  
+23  def run_command(cmd):
+24      proc = Popen(cmd, stdout=PIPE, stderr=PIPE)
+25      stdoutput = proc.communicate()
+26      if proc.returncode:
+27          sys.exit(-1)
+28  
+29  def copy_kernel(src, kernel):
+30      print "Downloading kernel to %s..." % src
+31      wget(src, "kernel")
+32      copy("kernel", kernel)
+33      rmtree("kernel")
+34      os.symlink(kernel, "kernel")
+35  
+36  if __name__ == "__main__":
+37      parser = OptionParser()
+38      parser.add_option("-k", "--kernel", dest="kernel", type="string",
+39                      default="kernel",
+40                      help="Kernel path")
+41      parser.add_option("-v", "--version", dest="version", type="string",
+42                      default="3.2.86_14_01a7c2a3_20110826123526",
+43                      help="Kernel version")
+44  
+45      (options, args) = parser.parse_args()
+46      if options.kernel is None:
+47          print "Please provide a kernel name."
+48          sys.exit(-1)
+49      if options.version is None:
+50          print "Please provide a kernel version."
+51          sys.exit(-1)
+52  
+53      if not os.path.isdir("android"):
+54          print "There is not an android folder..."
+55          sys.exit(-1)
+56  
+57      if not os.path.isdir("kernel"):
+58          print "Creating kernel folder..."
+59          os.mkdir("kernel")
+60  
+61      os.chdir("kernel")
+62      run_command(["git", "init"])
+63  
+64      print "Downloading %s..." % options.version
+65      wget("https://git.kernel.org/cgit/linux/kernel/git/stable/linux-stable.git/snapshot/" + options.version + ".tar.gz",
+66            "kerneltar")
+67      run_command(["tar", "-zxvf", "kerneltar"])
+68      os.rename(options.version, "kernel")
+69  
+70      run_command(["git", "add", "kernel"])
+71      run_command(["git", "commit", "-m", "Version " + options.version])
+72  
+73      print "Copying to %s..." % options.kernel
+74      copy("kernel/", "../" + options.kernel)
+75      os.chdir("..")
+76  
+77      run_command(["git", "add", options.kernel])
+78      run_command(["git", "commit", "-m", "Version " + options.version + " from kernel.org"])
+79  
+80      print "Downloading android patches..."
+81      wget("https://s3.amazonaws.com/android_patches/fixed/" + options.version + "_fixed.tgz", "patchestgz")
+82      run_command(["tar", "-zxvf", "patchestgz"])
+83      run_command(["git", "am", "--signoff", "-k", "-3", "-i", "patches/" + options.version + "_fixed/*"])
+84  
+85      if not os.path.isdir("patches/extra"):
+86          print "There is not an extra folder..."
+87          sys.exit(-1)
+88  
+89      print "Checking for extra patches..."
+90      extra = False
+91      for i in os.listdir("patches/extra/" + options.version + "/"):
+92          extra = True
+93          run_command(["git", "am", "--signoff", "-k", "-3", "-i", "patches/extra/" + options.version + "/" + i])
+94      if not extra:
+95          print "No extra patches, ok."
+96      sys.exit(0)
+
+[FILEPATH] info/14/results/outputs/U-ReX/pytest_14.jsonl/7.json [/FILEPATH]
+7   @copyright: 2012 Juergen Wagner <juergen.wagner@hogrex.com>
+8   """
+9  
+10  import subprocess
+11  from tempfile import NamedTemporaryFile
+12  import unittest
+13  
+14  from nose.plugins.skip import SkipTest
+15  from medusa.exceptions import NotFoundException
+16  
+17  from medusa.agent import Agent as agent
+18  from medusa.agent.linux import PuppetPlugin
+19  from medusa.agent.linux import AptPlugin
+20  from medusa.agent.linux import RpmPlugin
+21  from medusa.agent.linux import DebianPlugin
+22  from medusa.agent.linux import LinuxAbstract
+23  from medusa.agent.linux import NginxPlugin
+24  from medusa.agent.linux import UFWPlugin
+25  from medusa.agent.linux import PHPPlugin
+26  from medusa.agent.linux import RubyPlugin
+27  from medusa.agent.linux import PythonPlugin
+28  from medusa.agent.linux import NodePlugin
+29  from medusa.agent.linux import DebianPlugin
+30  from medusa.agent.linux import SSHPlugin
+31  from medusa.agent.linux import SYSVInitPlugin
+32  from medusa.agent.linux import MailPlugin
+33  
+34  if agent.platform() != "linux":
+35      raise SkipTest("Not a linux platform")
+36  
+37  try:
+38      with NamedTemporaryFile() as temp:
+39          ret = subprocess.call(['ps', 'aux'], stdout=temp)
+40          if ret != 0:
+41              raise SkipTest("Test not supported")
+42  except OSError:
+43      raise SkipTest("Test not supported")
+44  
+45  def get_helper(host, instname, options):
+46      agent.host = host
+47      agent.instname = instname
+48      return agent.get_helper(options, plugins={})
+49  
+50  def execute_plugin(helper, options, plugins={}, fqcn=""):
+51      if plugins and fqcn:
+52          helper.plugins = plugins
+53  
+54      if plugins and not fqcn:
+55          fqcn = options
+56  
+57      plugin = None
+58      for p in helper.plugins:
+59          if p == fqcn or p.endswith(".%s" % fqcn):
+60              plugin = helper.plugins[p]
+61      return plugin.call()
+62  
+63  def get_plugins(helper, plugins={}, fqcn=""):
+64      if plugins and fqcn:
+65          helper.plugins = plugins
+66  
+67      if plugins and not fqcn:
+68          fqcn = options
+69  
+70      result = {}
+71      for p in helper.plugins:
+72          if p == fqcn or p.endswith(".%s" % fqcn):
+73              result[p] = helper.plugins[p]
+74      return result
+75  
+76  class PuppetPluginTests(unittest.TestCase):
+77      def test_if_plugin_is_registered(self):
+78          helper = get_helper("host", "instname", "validate")
+79          self.assertTrue("medusa.agent.linux.PuppetPlugin" in helper.plugins)
+80  
+81      def test_is_installed_puppet(self):
+82          helper = get_helper("host", "instname", "puppet check")
+83          self.assertTrue(PuppetPlugin(helper, PuppetPlugin.DEFAULT_OPTIONS).check())
+84  
+85      def test_get_provider_is_correct(self):
+86          helper = get_helper("host", "instname", "puppet check")
+87          self.assertEqual(PuppetPlugin(helper, PuppetPlugin.DEFAULT_OPTIONS).get_provider(), "Puppet")
+88  
+89      def test_is_installed_puppet_absent(self):
+90          with NamedTemporaryFile() as puppet:
+91              options = "puppet check"
+92              helper = get_helper("host", "instname", options)
+93              execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+94              return
+95  
+96      def test_configure_to_set(self):
+97          with NamedTemporaryFile() as puppet:
+98              options = "--noop --name=puppet --setup"
+99              helper = get_helper("host", "instname", options)
+100             self.assertFalse(PuppetPlugin(helper, options).check())
+101             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+102             self.assertTrue(PuppetPlugin(helper, options).check())
+103             return
+104  
+105     def test_validate_noop_to_set(self):
+106         with NamedTemporaryFile() as puppet:
+107             options = "--noop --name=puppet --validate"
+108             helper = get_helper("host", "instname", options)
+109             self.assertTrue(PuppetPlugin(helper, options).check())
+110             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+111             self.assertTrue(PuppetPlugin(helper, options).check())
+112             return
+113 
+114     def test_validate_to_set(self):
+115         with NamedTemporaryFile() as puppet:
+116             options = "--name=puppet --validate"
+117             helper = get_helper("host", "instname", options)
+118             self.assertTrue(PuppetPlugin(helper, options).check())
+119             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+120             self.assertTrue(PuppetPlugin(helper, options).check())
+121             return
+122 
+123     def test_configure_validate_to_set(self):
+124         with NamedTemporaryFile() as puppet:
+125             options = "--name=puppet --validate --setup"
+126             helper = get_helper("host", "instname", options)
+127             self.assertFalse(PuppetPlugin(helper, options).check())
+128             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+129             self.assertTrue(PuppetPlugin(helper, options).check())
+130             return
+131 
+132     def test_setup_command(self):
+133         with NamedTemporaryFile() as puppet:
+134             options = "--name=puppet --setup"
+135             helper = get_helper("host", "instname", options)
+136             self.assertFalse(PuppetPlugin(helper, options).check())
+137             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+138             self.assertTrue(PuppetPlugin(helper, options).check())
+139             return
+140 
+141     def test_noop_setup_command(self):
+142         with NamedTemporaryFile() as puppet:
+143             options = "--noop --name=puppet --setup"
+144             helper = get_helper("host", "instname", options)
+145             self.assertFalse(PuppetPlugin(helper, options).check())
+146             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+147             self.assertFalse(PuppetPlugin(helper, options).check())
+148             return
+149 
+150     def test_validate_command(self):
+151         with NamedTemporaryFile() as puppet:
+152             options = "--name=puppet --validate"
+153             helper = get_helper("host", "instname", options)
+154             self.assertTrue(PuppetPlugin(helper, options).check())
+155             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+156             self.assertTrue(PuppetPlugin(helper, options).check())
+157             return
+158 
+159     def test_noop_validate_command(self):
+160         with NamedTemporaryFile() as puppet:
+161             options = "--noop --name=puppet --validate"
+162             helper = get_helper("host", "instname", options)
+163             self.assertTrue(PuppetPlugin(helper, options).check())
+164             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+165             self.assertTrue(PuppetPlugin(helper, options).check())
+166             return
+167 
+168     def test_mixed_command(self):
+169         with NamedTemporaryFile() as puppet:
+170             options = "--noop --name=puppet --setup --validate"
+171             helper = get_helper("host", "instname", options)
+172             self.assertFalse(PuppetPlugin(helper, options).check())
+173             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+174             self.assertFalse(PuppetPlugin(helper, options).check())
+175             return
+176 
+177     def test_configured_mixed_command(self):
+178         with NamedTemporaryFile() as puppet:
+179             options = "--noop --name=puppet --setup --validate"
+180             helper = get_helper("host", "instname", options)
+181             self.assertTrue(PuppetPlugin(helper, options).check())
+182             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+183             self.assertTrue(PuppetPlugin(helper, options).check())
+184             return
+185 
+186     def test_error_code_for_exception(self):
+187         with NamedTemporaryFile() as puppet:
+188             options = "--noop --name=puppet --setup"
+189             helper = get_helper("host", "instname", options)
+190             self.assertRaises(NotFoundException, execute_plugin, helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+191             return
+192 
+193     def test_validate_error_code_for_exception(self):
+194         with NamedTemporaryFile() as puppet:
+195             options = "--name=puppet --validate"
+196             helper = get_helper("host", "instname", options)
+197             self.assertRaises(NotFoundException, execute_plugin, helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+198             return
+199 
+200     def test_get_helper_empty_options_returns_puppet_helper(self):
+201         helper = get_helper("host", "instname", "")
+202         self.assertTrue(isinstance(helper, PuppetPlugin))
+203 
+204     def test_option_parser(self):
+205         plugins = {}
+206         self.assertTrue("puppet" in get_helper("host", "instname", "puppet").plugins)
+207 
+208     def test_check(self):
+209         with NamedTemporaryFile() as puppet:
+210             options = "puppet check"
+211             helper = get_helper("host", "instname", options)
+212             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+213             return
+214 
+215     def test_setup_default(self):
+216         with NamedTemporaryFile() as puppet:
+217             options = "puppet setup"
+218             helper = get_helper("host", "instname", options)
+219             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+220             return
+221 
+222     def test_check_default(self):
+223         with NamedTemporaryFile() as puppet:
+224             options = "puppet check"
+225             helper = get_helper("host", "instname", options)
+226             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+227             return
+228 
+229     def test_puppet_setup_default(self):
+230         with NamedTemporaryFile() as puppet:
+231             options = "puppet --setup"
+232             helper = get_helper("host", "instname", options)
+233             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin": PuppetPlugin(helper, options)}, "PuppetPlugin")
+234             return
+235 
+236     def test_puppet_setup_default_noop(self):
+237         with NamedTemporaryFile() as puppet:
+238             options = "puppet --setup --noop"
+239             helper = get_helper("host", "instname", options)
+240             execute_plugin(helper, options, {"medusa.agent.linux.PuppetPlugin":

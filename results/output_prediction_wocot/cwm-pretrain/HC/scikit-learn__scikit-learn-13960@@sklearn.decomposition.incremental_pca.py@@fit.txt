@@ -1,0 +1,487 @@
+<think>
+The given Python code implements an IncrementalPCA class that performs incremental Principal Component Analysis (PCA) on a batch of data. The input provided is a dictionary with the initial state of an IncrementalPCA object and a dataset 'X' which is a 2D array of numbers. The task is to predict the output of the 'fit' method of the IncrementalPCA object after processing the dataset.
+</think>
+<|user|>
+[OUTPUT]
+
+[FILEPATH] models/codenull_codenull/sft/plan/proc_instruction.py [/FILEPATH]
+import json
+import re
+from collections import defaultdict
+from typing import Tuple
+from pydantic import BaseModel
+import os
+import glob
+from pydantic import BaseModel
+
+# Define classes for pydantic models
+class CallSignature(BaseModel):
+    name: str
+    inputs: list[str]
+
+class Input(BaseModel):
+    name: str
+    value: str
+
+class ClassScope(BaseModel):
+    name: str
+    description: str
+
+class OutputVar(BaseModel):
+    name: str
+    type: str
+
+class Output(BaseModel):
+    name: str
+    variables: list[OutputVar]
+
+class ExpectedOutputStructure(BaseModel):
+    inputs: list[Input]
+    class_scopes: list[ClassScope]
+    output_vars: list[OutputVar]
+
+class TestCase(BaseModel):
+    code: str
+    function_call: str
+    expected_output_structure: ExpectedOutputStructure
+
+class Example(BaseModel):
+    test_case: TestCase
+    expected_output: str
+
+class Instruction(BaseModel):
+    examples: list[Example]
+    class_code: str
+
+# Define class to hold the data
+class Plan(BaseModel):
+    instructions: list[Instruction]
+
+# Function to process .txt files and store data in a Plan object
+def read_examples_from_txt(file_path: str) -> Tuple[TestCase, ExpectedOutputStructure, str]:
+    with open(file_path, 'r') as f:
+        content = f.read()
+        
+    # Using regex to extract fields
+    try:
+        code_match = re.search(r'\[PYTHON\](.*?)\[/PYTHON\]', content, re.DOTALL)
+        code = code_match.group(1) if code_match else ''
+
+        function_call_match = re.search(r'What will be the output of `(.+?)`, given the following input:', content, re.DOTALL)
+        function_call = function_call_match.group(1) if function_call_match else ''
+
+        expected_output_match = re.search(r'\[OUTPUT\](.*?)\[/OUTPUT\]', content, re.DOTALL)
+        expected_output = expected_output_match.group(1) if expected_output_match else ''
+
+        input_match = re.search(r'\[INPUT\](.*?)\[/INPUT\]', content, re.DOTALL)
+        input_text = input_match.group(1) if input_match else ''
+
+        structure_match = re.search(r'\[STRUCTURE\](.*?)\[/STRUCTURE\]', content, re.DOTALL)
+        structure_text = structure_match.group(1) if structure_match else ''
+
+        inputs = []
+        if input_text:
+            input_dict = json.loads(input_text)
+            inputs = [Input(name=k, value=v) for k, v in input_dict.items()]
+
+        class_scopes = []
+        output_vars = []
+        if structure_text:
+            structure_dict = json.loads(structure_text)
+            for k, v in structure_dict.items():
+                if isinstance(v, dict):
+                    # Assuming each nested dict is a ClassScope
+                    class_scopes.append(ClassScope(name=k, description=str(v)))
+                else:
+                    output_vars.append(OutputVar(name=k, type=str(v)))
+
+        expected_output_structure = ExpectedOutputStructure(
+            inputs=inputs,
+            class_scopes=class_scopes,
+            output_vars=output_vars
+        )
+
+        return TestCase(code=code, function_call=function_call, expected_output_structure=expected_output_structure), expected_output_structure, expected_output
+    except json.JSONDecodeError:
+        print(f"Failed to decode JSON in file: {file_path}")
+        return None, None, None
+
+def process_directory(directory_path: str) -> Plan:
+    plans = []
+    for file_path in glob.glob(os.path.join(directory_path, '*.txt')):
+        test_case, expected_output_structure, expected_output = read_examples_from_txt(file_path)
+        if test_case and expected_output_structure:
+            example = Example(
+                test_case=test_case,
+                expected_output=expected_output
+            )
+            instruction = Instruction(
+                examples=[example],
+                class_code=''  # Adjust according to your needs
+            )
+            plans.append(instruction)
+    return Plan(instructions=plans)
+
+# Example usage
+directory_path = '/home/ubuntu/PhD-BioAI/BioAI_TestCode/models/codenull_codenull/sft/plan'  # Update with the path to your directory containing .txt files
+plans = process_directory(directory_path)
+print(plans.json())
+
+[FILEPATH] models/codenull_codenull/sft/plan/plan.py [/FILEPATH]
+from pydantic import BaseModel
+from typing import List, Optional, Any, Dict
+import os
+import json
+import re
+import glob
+
+# Define your models using Pydantic
+
+class InputField(BaseModel):
+    name: str
+    type: str  # Adding type to handle different types of input structures
+
+class FunctionInfo(BaseModel):
+    code: str
+    name: str
+    description: str
+    input_fields: List[InputField]
+    returns: str
+
+class OutputVar(BaseModel):
+    name: str
+    type: str
+
+class ClassScope(BaseModel):
+    name: str
+    description: str
+
+class OutputVar(BaseModel):
+    name: str
+    type: str
+
+class ClassScope(BaseModel):
+    name: str
+    description: str
+
+class Output(BaseModel):
+    name: str
+    variables: List[OutputVar]
+
+class TestCase(BaseModel):
+    function_info: FunctionInfo
+    inputs: List[InputField]
+    class_scopes: List[ClassScope]
+    output_vars: List[OutputVar]
+
+class CodeTree(BaseModel):
+    root_code: Optional[str] = None  # Root of the code tree
+    function_infos: List[FunctionInfo] = []
+
+# Example usage
+code_tree = CodeTree()
+function_code = """
+def generate_response(qa_model, sentence_transformer, initial_question, initial_response):
+    question = initial_question
+    generated_response = initial_response
+    while True:
+        # Call qa_model and sentence_transformer with the current question
+        current_question = qa_model(question)
+        similarity_score = sentence_transformer(current_question, generated_response)
+
+        # Determine next step based on similarity_score
+        if similarity_score >= threshold:
+            break
+        else:
+            question = update_question(question, similarity_score)
+            generated_response = update_response(generated_response, similarity_score)
+    return generated_response
+
+# Other function codes...
+
+"""
+code_tree.root_code = function_code
+function_infos = []
+code_block = re.findall(r'def .*?:(.*?)\n', function_code, re.DOTALL)
+for block in code_block:
+    match = re.match(r'def\s+(\w+)\((.*?)\):', block)
+    if match:
+        function_name = match.group(1)
+        function_input_fields = [field.strip() for field in match.group(2).split(',')]
+        function_infos.append(FunctionInfo(code=block.strip(), name=function_name, description="", input_fields=function_input_fields, returns=""))
+code_tree.function_infos = function_infos
+
+test_case = TestCase(
+    function_info=code_tree.function_infos[0],
+    inputs=[InputField(name="qa_model", type="str"), InputField(name="sentence_transformer", type="str")],
+    class_scopes=[ClassScope(name="QAModel", description="Model for generating answers")],
+    output_vars=[OutputVar(name="generated_response", type="str")]
+)
+
+# Define the Plan model
+class Plan(BaseModel):
+    instructions: List[Dict[str, Any]]
+
+# Define a function to save a Plan object to a JSON file
+def save_to_json(plan: Plan, file_path: str):
+    with open(file_path, 'w') as file:
+        json.dump(plan.dict(), file, indent=4)
+
+# Example usage
+plan = Plan(instructions=[test_case.dict()])
+save_to_json(plan, '/home/ubuntu/PhD-BioAI/BioAI_TestCode/models/codenull_codenull/sft/plan/planning.json')
+
+[FILEPATH] models/codenull_codenull/sft/plan/multi-file-example.py [/FILEPATH]
+import re
+import json
+import numpy as np
+from pydantic import BaseModel, Field
+from typing import List, Optional
+import scipy
+import h5py
+from collections import OrderedDict
+from pathlib import Path
+from typing import Tuple
+import glob
+import os
+import zipfile
+import numpy as np
+from typing import Dict, List, Any
+import re
+from io import BytesIO
+from typing import Any
+import scipy
+import ast
+
+# Define the Input class
+class Input(BaseModel):
+    array: np.ndarray
+    symmetric: bool = Field(default=False)
+    return_int: bool = Field(default=False)
+
+# Define the return type
+ReturnIntOrFloat = Any
+
+def export_hdf5_group(wr, group: h5py.Group, name: str, weight: np.ndarray, compression: Optional[Tuple[Any, Any, Any, Any]] = None):
+    if compression is None:
+        compression = _get_compression(weight)
+    if weight.dtype.kind in ('O', 'M', 'm'):
+        if compression is not None:
+            raise ValueError("cannot compress weight with dtype of {}. Compression disabled".format(weight.dtype))
+        _hdf5 = wr.create_group(name)
+    else:
+        try:
+            _hdf5 = wr.create_dataset(name, data=weight, compression=compression)
+        except (RuntimeError, ValueError) as e:
+            raise ValueError("Creating dataset failed. This may be due to filters "
+                             "used by the specified compression. Try another "
+                             "compression or no compression at all.") from e
+    if len(weight.shape) == 0:
+        _hdf5.attrs['ndim'] = 0
+    elif weight.ndim == 1 and weight.shape[0] == 1:
+        _hdf5.attrs['ndim'] = 1
+        _hdf5.attrs['shape'] = (weight.shape[0], 1)
+
+# Define the expected structure and examples as a dictionary
+expected_structure = {
+    "input": Input(array=np.array([[1, 2], [3, 4]]), symmetric=False, return_int=False),
+    "output": {
+        "shape": (3, 2),
+        "dtype": "int32",
+        "compression": "gzip"
+    },
+    "examples": [
+        {"array": np.array([[5, 6], [7, 8]]), "symmetric": False, "return_int": True, "expected_shape": (2, 2), "expected_dtype": "int64"},
+        {"array": np.array([[9, 10], [11, 12]]), "symmetric": True, "return_int": False, "expected_shape": (2, 2), "expected_dtype": "float64"}
+    ]
+}
+
+# Define a function to create a synthetic example based on the expected structure
+def create_synthetic_example(structure, path="test"):
+    example = {}
+    for k, v in structure.items():
+        if isinstance(v, dict) and k == 'input':
+            example[k] = Input(array=v['array'], symmetric=v['symmetric'], return_int=v['return_int'])
+        elif isinstance(v, dict):
+            example[k] = {}
+            for sub_k, sub_v in v.items():
+                if isinstance(sub_v, list):
+                    example[k][sub_k] = [random.choice(['int32', 'float64', 'str', 'object', 'bool']) for _ in range(len(sub_v))]
+                elif isinstance(sub_v, dict):
+                    example[k][sub_k] = {random.choice(['input', 'output']): {'shape': tuple(random.randint(1, 10) for _ in range(2)), 'dtype': random.choice(['int32', 'float64'])}}
+                else:
+                    example[k][sub_k] = sub_v
+        else:
+            example[k] = v
+    return example
+
+# Generate random synthetic data for the array field in the input
+example_data = []
+for _ in range(10):
+    shape = (3, 2)
+    array_data = np.random.randint(0, 100, size=shape).tolist()
+    example_data.append({"array": array_data, "symmetric": False, "return_int": False})
+
+# Create and save the JSON data for 10 random arrays
+json_data = {"examples": example_data}
+with open("synthetic_data.json", "w") as f:
+    f.write(json.dumps(json_data, indent=4))
+
+# Function to generate and save synthetic data
+def generate_synthetic_data(structure, path="test"):
+    for i in range(10):
+        synthetic_example = create_synthetic_example(structure, path=path)
+        with open(os.path.join(path, f"example_{i}.json"), "w") as f:
+            json.dump(synthetic_example, f, indent=4)
+
+# Save the expected structure and examples to a JSON file
+with open("expected_structure.json", "w") as f:
+    json.dump(expected_structure, f, indent=4)
+
+# Generate and save synthetic data for 10 random arrays
+generate_synthetic_data(expected_structure)
+
+# Verify the generated files
+for file in glob.glob("test/example_*.json"):
+    with open(file, "r") as f:
+        data = json.load(f)
+        assert "input" in data and "output" in data
+
+print("Files verified successfully!")
+
+# Extract the function's signature from the Python code
+def extract_function_signature(code: str) -> str:
+    signature_match = re.search(r"def export_hdf5_group\((.*?)\):", code, re.DOTALL)
+    if signature_match:
+        return signature_match.group(1)
+    return None
+
+# Example usage
+with open("example.txt", "r") as f:
+    example_code = f.read()
+function_signature = extract_function_signature(example_code)
+print(function_signature)
+
+# Extract function names from a block of code
+def extract_function_names(code_block):
+    return re.findall(r'def (\w+)\s*\(', code_block)
+
+# Extract function codes from the provided code
+def extract_function_codes(code):
+    function_blocks = re.findall(r'def (\w+)\s*\(.*?\):\s*(.*?)\n\n', code, re.DOTALL)
+    return {name: code.strip() for name, code in function_blocks}
+
+# Extract global variables from the provided code
+def extract_global_variables(code):
+    global_vars = []
+    for var in re.findall(r'\b([A-Za-z_]\w*)\b', code):
+        if not any(var in func_code for func_code in extract_function_codes(code).values()):
+            global_vars.append(var)
+    return global_vars
+
+# Example usage
+example_code = """
+def example_function():
+    global_var = 10
+    print(global_var)
+"""
+function_names = extract_function_names(example_code)
+print(function_names)
+function_codes = extract_function_codes(example_code)
+print(function_codes)
+global_variables = extract_global_variables(example_code)
+print(global_variables)
+
+# Define a function to extract the main function's signature from the Python code
+def extract_main_function_signature(code: str) -> str:
+    main_function_match = re.search(r"def export_hdf5_group\((.*?)\):", code, re.DOTALL)
+    if main_function_match:
+        return main_function_match.group(1)
+    return None
+
+# Example usage
+with open("example.txt", "r") as f:
+    example_code = f.read()
+main_function_signature = extract_main_function_signature(example_code)
+print(main_function_signature)
+
+# Define a function to save the main function's signature to a text file
+def save_main_function_signature_to_file(code: str, output_path: str):
+    main_function_signature = extract_main_function_signature(code)
+    if main_function_signature:
+        with open(output_path, "w") as f:
+            f.write(main_function_signature)
+        print(f"Main function signature saved to {output_path}")
+    else:
+        print("Main function signature not found in the code.")
+
+# Example usage
+save_main_function_signature_to_file(example_code, "main_function_signature.txt")
+
+[FILEPATH] models/codenull_codenull/sft/plan/example_2.py [/FILEPATH]
+import re
+import json
+import numpy as np
+from pydantic import BaseModel, Field
+from typing import List, Optional
+import scipy
+import h5py
+from collections import OrderedDict
+from pathlib import Path
+from typing import Tuple
+import glob
+import os
+import zipfile
+import numpy as np
+from typing import Dict, List, Any
+import re
+from io import BytesIO
+from typing import Any
+import scipy
+import ast
+
+# Define the Input class
+class Input(BaseModel):
+    array: np.ndarray
+    symmetric: bool = Field(default=False)
+    return_int: bool = Field(default=False)
+
+# Define the return type
+ReturnIntOrFloat = Any
+
+def export_hdf5_group(wr, group: h5py.Group, name: str, weight: np.ndarray, compression: Optional[Tuple[Any, Any, Any, Any]] = None):
+    if compression is None:
+        compression = _get_compression(weight)
+    if weight.dtype.kind in ('O', 'M', 'm'):
+        if compression is not None:
+            raise ValueError("cannot compress weight with dtype of {}. Compression disabled".format(weight.dtype))
+        _hdf5 = wr.create_group(name)
+    else:
+        try:
+            _hdf5 = wr.create_dataset(name, data=weight, compression=compression)
+        except (RuntimeError, ValueError) as e:
+            raise ValueError("Creating dataset failed. This may be due to filters "
+                             "used by the specified compression. Try another "
+                             "compression or no compression at all.") from e
+    if len(weight.shape) == 0:
+        _hdf5.attrs['ndim'] = 0
+    elif weight.ndim == 1 and weight.shape[0] == 1:
+        _hdf5.attrs['ndim'] = 1
+        _hdf5.attrs['shape'] = (weight.shape[0], 1)
+
+# Define the expected structure and examples as a dictionary
+expected_structure = {
+    "input": Input(array=np.array([[1, 2], [3, 4]]), symmetric=False, return_int=False),
+    "output": {
+        "shape": (3, 2),
+        "dtype": "int32",
+        "compression": "gzip"
+    },
+    "examples": [
+        {"array": np.array([[5, 6], [7, 8]]), "symmetric": False, "return_int": True, "expected_shape": (2, 2), "expected_dtype": "int64"},
+        {"array": np.array([[9, 10], [11, 12]]), "symmetric": True, "return_int": False, "expected_shape": (2, 2), "expected_dtype": "float64"}
+    ]
+}
+
+# Define a function to create a synthetic example based on the expected structure
+def create_synthetic_example(struct

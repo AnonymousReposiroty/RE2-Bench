@@ -1,0 +1,88 @@
+Let’s walk through the execution step by step.
+
+1. We’re calling `_set_params` with `attr = "_transformers"`, and `kwargs = {"trans1__with_mean": false}`.  
+   The `self` object contains:  
+   - `transformers = null` (meaning `None`)  
+   - `remainder = "drop"`  
+   - `n_jobs = 1`  
+   - `transformer_weights = null`  
+
+2. In `_set_params`, the first check:  
+   ```python
+   if attr in params:
+       setattr(self, attr, params.pop(attr))
+   ```
+   `params` currently has `{"trans1__with_mean": false}`.  
+   `attr` is `"_transformers"`, which is not in `params`. So nothing happens.
+
+3. Next:  
+   ```python
+   items = getattr(self, attr)
+   ```
+   `getattr(self, "_transformers")` calls `self._transformers` property defined as:
+   ```python
+   def _transformers(self):
+       return [(name, trans) for name, trans, _ in self.transformers]
+   ```
+   But `self.transformers` is `null`, so `self._transformers()` will be an empty list `[]`.  
+
+4. Then:  
+   ```python
+   names = []
+   if items:
+       names, _ = zip(*items)
+   ```
+   `items = []`, so `names = []`.
+
+5. Loop over `params` keys:  
+   ```python
+   for name in list(six.iterkeys(params)):
+       if '__' not in name and name in names:
+           self._replace_estimator(attr, name, params.pop(name))
+   ```
+   `params` key is `"trans1__with_mean"`. It does contain `'__'`, so the condition `'__' not in name` is false.  
+   Nothing happens here.
+
+6. Next:  
+   ```python
+   super(_BaseComposition, self).set_params(**params)
+   ```
+   This calls `BaseEstimator.set_params`.  
+   Currently `params` still contains `{"trans1__with_mean": false}`.  
+   Inside `BaseEstimator.set_params`:
+   - `valid_params = self.get_params(deep=True)`  
+     `self.get_params` will call `self._get_params('_transformers', deep=True)` from `ColumnTransformer`.  
+     But given `transformers` is null, `_transformers` is `[]`, so `self._get_params` will just return `super().get_params(deep=True)` which is based on `self._get_param_names`.  
+     The `_get_param_names` returns constructor parameter names (excluding 'self'), which here are likely `['transformers', 'remainder', 'n_jobs', 'transformer_weights']`.  
+     So `valid_params` will be:  
+     ```
+     {
+        'transformers': null,
+        'remainder': 'drop',
+        'n_jobs': 1,
+        'transformer_weights': null
+     }
+     ```
+     And since `deep=True`, but `transformers` is None, `hasattr(None, 'get_params')` is false, so no nested params added.
+
+   - In `BaseEstimator.set_params`, loop over `params.items()` (only `("trans1__with_mean", false)`):
+     - `key, delim, sub_key = "trans1__with_mean".partition('__')` gives `key="trans1"`, `delim="__"`, `sub_key="with_mean"`.
+     - Check if `key` in `valid_params`: `valid_params` keys are `['transformers', 'remainder', 'n_jobs', 'transformer_weights']`.  
+       `"trans1"` is not in `valid_params`.  
+       Therefore raises `ValueError`.
+
+The execution stops with an error. But the output structure expects values for `transformers`, `remainder`, `n_jobs`, `transformer_weights`.  
+Since an exception is raised before any changes to `self`, the object state remains unchanged.
+
+Thus, final state is the same as initial state.
+
+[OUTPUT]
+```
+{
+    "transformers": null,
+    "remainder": "drop",
+    "n_jobs": 1,
+    "transformer_weights": null
+}
+```
+[/OUTPUT]

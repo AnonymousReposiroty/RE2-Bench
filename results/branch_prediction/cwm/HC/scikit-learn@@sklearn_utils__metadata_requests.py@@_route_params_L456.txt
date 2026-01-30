@@ -1,0 +1,74 @@
+<think>
+In the _route_params method, let's analyze the conditional branches step by step for the given input.
+
+1. The input parameters are:
+   - params: {'sample_weight': [1], 'metadata': 'a'}
+   - parent: 'ColumnTransformer(transformers=[('trans', ConsumingTransformer(registry=[]), [0])])'
+   - caller: 'fit_transform'
+
+2. The self._requests dictionary is {'sample_weight': True, 'metadata': True}.
+
+3. The code iterates over each prop, alias pair in self._requests:
+   - First iteration: prop='sample_weight', alias=True
+     - The condition `if alias is False or alias == WARN` is False, so it proceeds to the next condition.
+     - The condition `elif alias is True and prop in args` is True because alias is True and 'sample_weight' is in args.
+     - So, res['sample_weight'] = [1]. This branch is taken → ['Y'].
+
+   - Second iteration: prop='metadata', alias=True
+     - Similarly, the condition `if alias is False or alias == WARN` is False.
+     - The condition `elif alias is True and prop in args` is True because alias is True and 'metadata' is in args.
+     - So, res['metadata'] = 'a'. This branch is taken → ['Y'].
+
+4. Since both props ('sample_weight' and 'metadata') are requested and present in args, the unrequested dictionary remains empty.
+
+5. The condition `if unrequested` is False because unrequested is empty. So, this branch is not taken → ['N'].
+
+Therefore, the branches taken are:
+- The `elif alias is True and prop in args` branch is taken twice → ['Y', 'Y'].
+- The `if unrequested` branch is not taken → ['N'].
+
+The final list of taken branches in order is ['Y', 'Y', 'N'].
+</think>
+[ANSWER]
+1 from warnings import warn
+2 from sklearn.exceptions import UnsetMetadataPassedError
+3 from sklearn.utils._bunch import Bunch
+4 
+5 class MethodMetadataRequest:
+6 
+7     def __init__(self, owner, method, requests=None):
+8         self._requests = requests or dict()
+9         self.owner = owner
+10         self.method = method
+11 
+12     def _check_warnings(self, *, params):
+13         params = {} if params is None else params
+14         warn_params = {prop for prop, alias in self._requests.items() if alias == WARN and prop in params}
+15         for param in warn_params:
+16             warn(f'Support for {param} has recently been added to {self.owner} class. To maintain backward compatibility, it is ignored now. Using `set_{self.method}_request({param}={{True, False}})` on this method of the class, you can set the request value to False to silence this warning, or to True to consume and use the metadata.')
+17 
+18     def _route_params(self, params, parent, caller):
+19         self._check_warnings(params=params)
+20         unrequested = dict()
+21         args = {arg: value for arg, value in params.items() if value is not None}
+22         res = Bunch()
+23         for prop, alias in self._requests.items():
+24             if alias is False or alias == WARN: ## [BRANCH]taken=[N, N][/BRANCH]
+25                 continue
+26             elif alias is True and prop in args: ## [BRANCH]taken=[Y, Y][/BRANCH]
+27                 res[prop] = args[prop]
+28             elif alias is None and prop in args: ## [BRANCH]taken=[N, N][/BRANCH]
+29                 unrequested[prop] = args[prop]
+30             elif alias in args: ## [BRANCH]taken=[N, N][/BRANCH]
+31                 res[prop] = args[alias]
+32         if unrequested: ## [BRANCH]taken=[N][/BRANCH]
+33             if self.method in COMPOSITE_METHODS:
+34                 callee_methods = COMPOSITE_METHODS[self.method]
+35             else:
+36                 callee_methods = [self.method]
+37             set_requests_on = ''.join([f'.set_{method}_request({{metadata}}=True/False)' for method in callee_methods])
+38             message = f"[{', '.join([key for key in unrequested])}] are passed but are not explicitly set as requested or not requested for {_routing_repr(self.owner)}.{self.method}, which is used within {_routing_repr(parent)}.{caller}. Call `{_routing_repr(self.owner)}" + set_requests_on + '` for each metadata you want to request/ignore. See the Metadata Routing User guide <https://scikit-learn.org/stable/metadata_routing.html> for more information.'
+39             raise UnsetMetadataPassedError(message=message, unrequested_params=unrequested, routed_params=res)
+40         return res
+41 
+[/ANSWER]

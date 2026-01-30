@@ -1,0 +1,243 @@
+    [INPUT]
+    ```
+    {
+        "self": {
+            "order": 1,
+            "gridsize": 10
+        },
+        "args": {
+            "data": {
+                "_mgr": {},
+                "_item_cache": {},
+                "_attrs": {},
+                "_flags": {
+                    "_allows_duplicate_labels": true
+                }
+            },
+            "groupby": {
+                "order": {
+                    "group": "x"
+                }
+            },
+            "orient": "vertical",
+            "scales": {}
+        },
+        "kwargs": {}
+    }
+    ```
+    [/INPUT]
+
+[FILEPATH] zheng-deng-FIB-271ae66/README.md [/FILEPATH]
+# FIB: LLMs Instructed By Diverse Execution Outcomes for Zero-Shot Function Call Prediction
+
+## Introduction
+Function Call Prediction (FCP) is an important task in the verification of software systems. FCP prediction is a well-defined problem in the field of software engineering. The goal of this task is to infer inputs for a given program and ensure that the outputs of the function match a given example.
+
+![The architecture of FIB](https://github.com/zheng-deng/FIB/assets/75747565/dca31073-5b41-4ee5-8b9d-8e3bd3fc169f)
+
+## Data Preparation
+
+### FCP-Dataset
+```
+python ./fcpc/run.py
+```
+
+## Fine-Tuning
+We use LLaMA-7b and InternLM-7b as the base LLMs to evaluate FCP-Dataset. The fine-tuning code will be available soon.
+
+## License
+This project is licensed under the MIT License.
+
+## Citation
+If you find our work useful for your research, please cite our paper:
+```
+@misc{deng2024llmsinstructeddiverseexecution,
+      title={LLMs Instructed By Diverse Execution Outcomes for Zero-Shot Function Call Prediction}, 
+      author={Zheng Deng and Zheng Yao and Guoan Zhong and Junjie Chen and Yang Liu},
+      year={2024},
+      eprint={2403.09631},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE}
+}
+```
+
+[FILEPATH] fcpc/llm_testing.py [/FILEPATH]
+import json
+from generate import get_fcp_data, get_fcp_example, get_fcp_question
+
+import os
+
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://api.baichuan-ai.com/v1/",
+    api_key="api key",
+)
+
+
+def get_completion(message):
+    # session = openai.OpenAI(api_key='api key')
+    chat_completion = client.chat.completions.create(
+        model="Baichuan2-Turbo-192k",
+        messages= message,
+        temperature= 0.3,
+    )
+    return chat_completion
+
+
+def get_parse_result(chat_result):
+    try:
+        result = chat_result.choices[0].message.content
+    except:
+        result = ''
+    # print(result)
+    start_id = result.find('[INPUT]')
+    if start_id != -1:
+        end_id = result.find('[/INPUT]', start_id)
+        result = result[start_id+len('[INPUT]'):end_id]
+    result = result.lstrip()
+    result = result.strip('```\n')
+    result = result.strip('json\n')
+    print(result)
+    if result.count('{') < 1:
+        return None
+    result = json.loads(result)
+    return result
+
+
+def get_func_result(fname, input):
+    if os.path.exists('./result.json'):
+        with open('./result.json', 'r') as f:
+            result_dict = json.load(f)
+    else:
+        result_dict = {}
+    if fname in result_dict:
+        return result_dict[fname]
+    else:
+        print('not found')
+        return None
+
+
+def get_acc(fcp_res, func_res, i):
+    res = False
+    try:
+        if fcp_res['kwargs'] is not None:
+            fcp_res['kwargs'] = {}
+        if i in func_res:
+            tmp = json.dumps(fcp_res, sort_keys=True, indent=4)
+            for tmp_res in func_res[i]:
+                tt = json.dumps(tmp_res, sort_keys=True, indent=4)
+                if tmp == tt:
+                    res = True
+                    break
+    except:
+        print("error")
+    return res
+
+def replace_all_elements(obj, value):
+    if isinstance(obj, dict):
+        return {k: replace_all_elements(v, value) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [replace_all_elements(element, value) for element in obj]
+    else:
+        return value
+
+def test_llm(target, k=2, shot=2, j=0):
+    message = []
+    message.append({"role": "system", "content": "You are a helpful assistant."})
+    if j == 0:
+        message.append({"role": "user", "content": get_fcp_question(shot, k)})
+        message.append({"role": "user", "content": f'Now, your task is to predict the input for the provided function, based on the provided output. Please generate the input in JSON format and print it between [INPUT] and [/INPUT].'})
+        res = get_completion(message)
+        res = get_parse_result(res)
+    else:
+        res = {'kwargs':{}}
+        res = replace_all_elements(res, "replace")
+    if res is not None:
+        with open('./result2.json', 'r') as f:
+            result_dict = json.load(f)
+        true_data = get_fcp_data(target)
+        data = true_data[j]
+        acc = 0
+        err = 0
+        for i in range(len(data)):
+            fname = data[i]['fname']
+            func_res = get_func_result(fname, res)
+            if func_res is None:
+                err += 1
+                print(f'error: {fname}')
+                continue
+            res_acc = get_acc(res, func_res, i)
+            acc += res_acc
+        # print(f'error: {err}')
+        # print(f'accuracy: {acc}/{len(data)}')
+        print(f'correct: {acc}')
+
+        for i, d in enumerate(result_dict[str(shot)]):
+            if len(d) < k:
+                print('broken')
+            else:
+                d[str(k)] += acc
+        with open('./result2.json', 'w') as f:
+            json.dump(result_dict, f)
+    else:
+        print('no result')
+
+
+if __name__ == '__main__':
+    # evaluate
+    for i in range(5):
+        test_llm('intra_pred_train', shot=2, j=i)
+        print("Done")
+
+[FILEPATH] fcpc/run.py [/FILEPATH]
+import glob
+import json
+import os
+
+def read_json(path):
+    with open(path, 'r') as f:
+        return json.load(f)
+
+def get_fcp_data(target, path = './'):
+    fcp_data = []
+    for i in range(30):
+        print(f'target: {target}-{i}')
+        project_files = read_json(f'{path}{target}-{i}/projects.json')
+        json_data = []
+        if target == 'intra_pred_train':
+            for project in project_files:
+                project_folder = f'{path}{target}-{i}/projects/{project}/'
+                json_files = glob.glob(project_folder + 'statements/*/gold.json')
+                for json_file in json_files:
+                    data = read_json(json_file)
+                    json_data += data
+        elif target == 'intra_pred_test':
+            for project in project_files:
+                project_folder = f'{path}{target}-{i}/projects/{project}/'
+                json_files = glob.glob(project_folder + 'statements/*/gold.json')
+                for json_file in json_files:
+                    data = read_json(json_file)
+                    json_data += data
+        elif target == 'inter_pred_test':
+            for project in project_files:
+                project_folder = f'{path}{target}-{i}/projects/{project}/'
+                json_files = glob.glob(project_folder + 'statements/*/gold.json')
+                for json_file in json_files:
+                    data = read_json(json_file)
+                    json_data += data
+        fcp_data.append(json_data)
+    return fcp_data
+
+def save_fcp_data(target, path = './fcp_dataset/fcpc-'):
+    fcp_data = get_fcp_data(target)
+    os.makedirs(f'{path}{target}', exist_ok=True)
+    for i, data in enumerate(fcp_data):
+        with open(f'{path}{target}/{target}-{i}.json', 'w') as f:
+            json.dump(data, f, indent=4)
+
+if __name__ == '__main__':
+    save_fcp_data('intra_pred_train')
+    save_fcp_data('intra_pred_test')
+    save_fcp_data('inter_pred_test')
+

@@ -1,0 +1,510 @@
+[OUTPUT]
+```
+{
+    "output": null
+}
+```
+[/OUTPUT]
+<|endoftext|>|fim_prefix|><|endofmask|>
+
+[FILEPATH] comlinwt-Class_BBOX-7314e5e/src/marker.py [/FILEPATH]
+import logging
+from typing import Optional, Union
+
+import matplotlib
+import numpy as np
+
+from bbot.core.errors import BuiltinWarning
+from bbot.modules.base import BaseModule
+from bbot.report.application import Application
+from bbot.report.host import Host
+from bbot.report.issue import Issue
+
+_MODULE_LOG = logging.getLogger("bot")
+
+
+class MarkerModule(BaseModule):
+
+    # This is useful for active submodules that require accurate tracking of
+    # requests, as well as issues
+    async def setup(self, resume: Optional[bool] = False):
+        self._log_messages = {}
+
+    async def handle_start(self):
+        await super().handle_start()
+        self.markers = []
+        self.external_modules = set()
+        self._last_run = {
+            "time": 0,
+            "execution_count": 0,
+            "failed_count": 0,
+            "succeeded_count": 0,
+        }
+        self.bbox._setup_title()
+        self._update_bbox()
+
+    async def _handle_module_enable(self, module: BaseModule):
+        if module not in self.external_modules:
+            self.external_modules.add(module)
+            self._update_bbox()
+
+    async def _handle_module_disable(self, module: BaseModule):
+        if module in self.external_modules:
+            self.external_modules.remove(module)
+            self._update_bbox()
+
+    async def _handle_module_start(self, module: BaseModule):
+        if module in self.external_modules:
+            self._update_bbox()
+
+    async def _handle_module_complete(self, module: BaseModule):
+        if module in self.external_modules:
+            self._update_bbox()
+
+    async def _handle_log(self, module: BaseModule, level: str, message: str, timestamp: float):
+        message_count = self._log_messages.get(module, {}).get(message, 0)
+        self._log_messages.setdefault(module, {}).setdefault(message, message_count + 1)
+        self._update_bbox()
+
+    async def _handle_issue_raise(self, issue: Issue, host: Optional[Union[str, Host]]):
+        if issue.module in self.external_modules:
+            self._update_bbox()
+
+    async def _handle_host_add(self, host: Host, source: BaseModule):
+        if source in self.external_modules:
+            self._update_bbox()
+
+    async def _handle_application_add(self, application: Application, host: Host, source: BaseModule):
+        if source in self.external_modules:
+            self._update_bbox()
+
+    async def handle_stop(self):
+        await super().handle_stop()
+        self._update_bbox()
+
+    async def handle_completion(self):
+        await super().handle_completion()
+        self._update_bbox()
+
+    async def _log_results(self, fail: bool, module: BaseModule):
+        """Log module results to the BBOX"""
+        if self._last_run.get("time") != 0:
+            last_start = self._last_run.get("time")
+            last_succeeded = self._last_run.get("succeeded_count")
+            last_failed = self._last_run.get("failed_count")
+            last_execution_count = self._last_run.get("execution_count")
+            last_newly_success = (
+                module.succeeded_count - last_succeeded
+                if module.succeeded_count - last_succeeded >= 0
+                else 0
+            )
+            last_newly_failed = (
+                module.failed_count - last_failed if module.failed_count - last_failed >= 0 else 0
+            )
+            new_execution_count = module.execution_count - last_execution_count
+            last_success_ratio = (last_newly_success / new_execution_count) * 100
+            last_failure_ratio = (last_newly_failed / new_execution_count) * 100
+            if not self.bbox._markers or (
+                last_start != 0
+                and self._last_run.get("time") < last_start
+                and last_execution_count != 0
+            ):
+                self._last_run = {
+                    "time": last_start,
+                    "execution_count": last_execution_count,
+                    "failed_count": last_failed,
+                    "succeeded_count": last_succeeded,
+                }
+            if self.bbox._has_realtime_ui:
+                if not module.succeeded_count and not module.failed_count:
+                    pass
+                elif module.succeeded_count == module.execution_count:
+                    self.bbox._vspan_marker(
+                        "{} @ {:.2f}".format(module.name, self.bbox._epoch_time()),
+                        (self.bbox._epoch_time() - (last_start - self.bbox._start_time)),
+                        1,
+                        "GREEN",
+                    )
+                elif module.failed_count == module.execution_count:
+                    self.bbox._vspan_marker(
+                        "{} @ {:.2f}".format(module.name, self.bbox._epoch_time()),
+                        (self.bbox._epoch_time() - (last_start - self.bbox._start_time)),
+                        1,
+                        "RED",
+                    )
+                else:
+                    self.bbox._vspan_marker(
+                        "{} @ {:.2f}".format(module.name, self.bbox._epoch_time()),
+                        (self.bbox._epoch_time() - (last_start - self.bbox._start_time)),
+                        last_success_ratio,
+                        "GREEN",
+                    )
+                    self.bbox._vspan_marker(
+                        "{} @ {:.2f}".format(module.name, self.bbox._epoch_time()),
+                        (self.bbox._epoch_time() - (last_start - self.bbox._start_time))
+                        + last_success_ratio,
+                        last_failure_ratio,
+                        "RED",
+                    )
+
+    def _update_bbox(self):
+        """Add / remove markers from the BBOX"""
+        self._remove_markers()
+        self._add_markers()
+        self._add_host_markers()
+        if self.bbox._has_realtime_ui:
+            self.bbox.update()
+
+    def _remove_markers(self):
+        """Remove markers from the BBOX"""
+        if self.bbox._has_realtime_ui and self.bbox._markers:
+            try:
+                markers = self.bbox.get_backend().figure._markers
+            except AttributeError:
+                return
+            for marker in markers:
+                x_min, x_max, y_min, y_max = marker.get_extents().bounds
+                marker_id = marker.get_gid()
+                if (x_min, x_max, y_min, y_max) != (0, 0, 0, 0) and not (
+                    marker_id and marker_id.startswith(self.bbox.get_backend().get_mplbackend().figure_id)
+                ):
+                    marker.remove()
+                    self.bbox._markers.remove(marker)
+
+    def _add_markers(self):
+        """Add markers to the BBOX"""
+        if self.bbox._has_realtime_ui:
+            for module in self.external_modules:
+                if module._time != 0:
+                    is_enabled = self.enabled
+                    module_is_running = True if module._time > 0 else False
+                    execution_count = module.execution_count
+                    last_succeeded = self._last_run.get("succeeded_count")
+                    last_failed = self._last_run.get("failed_count")
+                    newly_succeeded = (
+                        module.succeeded_count - last_succeeded
+                        if module.succeeded_count - last_succeeded >= 0
+                        else 0
+                    )
+                    newly_failed = (
+                        module.failed_count - last_failed
+                        if module.failed_count - last_failed >= 0
+                        else 0
+                    )
+                    execution_ratio = (newly_succeeded / execution_count) * 100
+                    failure_ratio = (newly_failed / execution_count) * 100
+                    if is_enabled:
+                        if not self.bbox._markers:
+                            execution_count = 0
+                            last_succeeded = 0
+                            last_failed = 0
+                        if (
+                            execution_count != 0
+                            and last_succeeded + last_failed == execution_count
+                            and newly_succeeded == 0
+                            and newly_failed == 0
+                        ):
+                            if module_is_running:
+                                execution_ratio = (
+                                    (module.succeeded_count - last_succeeded) / execution_count
+                                ) * 100
+                                failure_ratio = (
+                                    (module.failed_count - last_failed) / execution_count
+                                ) * 100
+                                self.bbox._vspan_marker(
+                                    "{} @ {:.2f}".format(module.name, self.bbox._epoch_time()),
+                                    (self.bbox._epoch_time() - (module._time - self.bbox._start_time)),
+                                    execution_ratio,
+                                    "GREEN",
+                                )
+                                self.bbox._vspan_marker(
+                                    "{} @ {:.2f}".format(module.name, self.bbox._epoch_time()),
+                                    (
+                                        self.bbox._epoch_time()
+                                        - (module._time - self.bbox._start_time)
+                                    )
+                                    + execution_ratio,
+                                    failure_ratio,
+                                    "RED",
+                                )
+                            else:
+                                self.bbox._vspan_marker(
+                                    "{} @ {:.2f}".format(module.name, self.bbox._epoch_time()),
+                                    self.bbox._epoch_time() - (module._time - self.bbox._start_time),
+                                    execution_ratio,
+                                    "GREEN",
+                                )
+                                self.bbox._vspan_marker(
+                                    "{} @ {:.2f}".format(module.name, self.bbox._epoch_time()),
+                                    (
+                                        self.bbox._epoch_time()
+                                        - (module._time - self.bbox._start_time)
+                                    )
+                                    + execution_ratio,
+                                    failure_ratio,
+                                    "RED",
+                                )
+
+    def _add_host_markers(self):
+        """Add host markers to the BBOX"""
+        if self.bbox._has_realtime_ui and self.bbox._markers:
+            seen_hosts = {}
+            seen_issues = {}
+            for host in self.bbox.hosts:
+                current_host = host.hostname
+                current_host_severity = {}
+                current_host_severity_levels = []
+                for issue in host.issues:
+                    severity = issue.severity
+                    issue_name = issue.name
+                    issue_module = issue.module
+                    issue_description = issue.description
+                    severity_summary = f"{severity}"
+                    log_output = (
+                        f"[[INFO]] [+] {severity} {issue_module} - {issue_name}\n"
+                        f"[i] {issue_description}"
+                    )
+                    if issue_module not in seen_issues:
+                        seen_issues[issue_module] = {}
+                    if issue_name not in seen_issues[issue_module]:
+                        seen_issues[issue_module][issue_name] = 0
+                    seen_issues[issue_module][issue_name] += 1
+                    if severity not in current_host_severity:
+                        current_host_severity[severity] = {}
+                    if issue_module not in current_host_severity[severity]:
+                        current_host_severity[severity][issue_module] = {}
+                    if issue_name not in current_host_severity[severity][issue_module]:
+                        current_host_severity[severity][issue_module][issue_name] = 0
+                    current_host_severity[severity][issue_module][issue_name] += 1
+                    if severity not in current_host_severity_levels:
+                        current_host_severity_levels.append(severity)
+                host_issues_output = []
+                for severity in current_host_severity_levels:
+                    for module, module_summary in current_host_severity[severity].items():
+                        for issue_name, issue_count in module_summary.items():
+                            if issue_name not in seen_hosts:
+                                seen_hosts[issue_name] = {}
+                            if current_host not in seen_hosts[issue_name]:
+                                seen_hosts[issue_name][current_host] = 0
+                            seen_hosts[issue_name][current_host] += issue_count
+                            issue_output = f"- {severity} ({module}) - {issue_name} - {issue_count}"
+                            host_issues_output.append(issue_output)
+                if current_host in seen_hosts:
+                    existing_output = seen_hosts[current_host]
+                    existing_output.append(log_output)
+                else:
+                    seen_hosts[current_host] = [log_output]
+                if host_issues_output:
+                    seen_hosts[current_host].extend(host_issues_output)
+
+            existing_log = []
+            for issue_module, issue_name_count in seen_issues.items():
+                if issue_module not in seen_hosts:
+                    seen_hosts[issue_module] = {}
+                for issue_name, issue_count in issue_name_count.items():
+                    issue_output = (
+                        f"- {issue_name} ({issue_module}) - {issue_count} occurrences"
+                    )
+                    seen_hosts[issue_module][issue_name] = issue_count
+                    existing_log.append(issue_output)
+            existing_log_output = "\n".join(existing_log)
+
+            text_xpos = 0
+            text_ypos = 0
+
+            # Draw the host text box
+            self.bbox._text_marker(
+                x_position=text_xpos,
+                y_position=text_ypos,
+                text=f"\n{existing_log_output}",
+                alpha=0.4,
+                orientation="horizontal",
+            )
+
+            text_width = len(existing_log_output) * 0.7
+            self.bbox._draw_bounding_box(
+                (text_xpos, text_ypos), (text_width, 100), edge_color="black", face_color="black"
+            )
+
+            log_output = "\n".join(existing_log)
+
+            if log_output:
+                self._log_results(False, self)
+
+            # Draw the issue text box
+            issue_output = []
+            for module, issue_counts in seen_hosts.items():
+                for issue_name, issue_count in issue_counts.items():
+                    issue_output.append(f"- {issue_name} ({module}) - {issue_count} occurrences")
+            issue_output_text = "\n".join(issue_output)
+
+            text_xpos = 0
+            text_ypos = -5
+
+            self.bbox._text_marker(
+                x_position=text_xpos,
+                y_position=text_ypos,
+                text=f"\n{issue_output_text}",
+                alpha=0.4,
+                orientation="horizontal",
+            )
+
+            text_width = len(issue_output_text) * 0.7
+            self.bbox._draw_bounding_box(
+                (text_xpos, text_ypos), (text_width, 100), edge_color="black", face_color="black"
+            )
+
+            log_output = "\n".join(issue_output)
+
+            if log_output:
+                self._log_results(False, self)
+
+    def _log_finished_host(self, host: Host, active_modules: list, finish_time: float):
+        if not active_modules or finish_time == 0:
+            return
+        self.bbox._hspan_marker(
+            host.hostname,
+            0,
+            1,
+            color="GREEN" if host.done_count == host.complete_count else "BLUE",
+            finish_time=finish_time,
+            active_modules=active_modules,
+        )
+
+        self._update_bbox()
+        _MODULE_LOG.debug(f"Finished host {host.hostname}")
+        try:
+            if self.config.discovered_host_limit and len(self.bbox.hosts) >= self.config.discovered_host_limit:
+                raise BuiltinWarning("Host limit reached, stopping execution")
+        except (BuiltinWarning, Exception) as e:
+            _MODULE_LOG.warning(f"Error finishing host {host.hostname}: {e}")
+
+[FILEPATH] comlinwt-Class_BBOX-7314e5e/src/marker_test.py [/FILEPATH]
+import json
+import logging
+import unittest
+from typing import Optional, Union
+
+import numpy as np
+
+from bbot.core.errors import BuiltinWarning
+from bbot.core.output import Output
+from bbot.core.protocol import Protocol
+from bbot.modules.base import BaseModule
+from bbot.report.host import Host
+from bbot.report.application import Application
+from bbot.report.issue import Issue
+
+class MockProtocol(Protocol):
+    async def setup(self, targets: list, output: Output, debug: bool = False, fast: bool = False):
+        self._debug = debug
+        self._fast = fast
+
+    async def async_setup(self, resume: Optional[bool] = False):
+        pass
+
+    async def add_host(self, hostname: str, addresses: list = None, tags: dict = None) -> Host:
+        h = Host(hostname)
+        if addresses:
+            for addr in addresses:
+                h.add_address(addr)
+        if tags:
+            for k, v in tags.items():
+                h.add_tag(k, v)
+        self.hosts.add(h)
+        return h
+
+class MarkerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_setup(self):
+        marker = MarkerModule()
+        await marker.setup()
+        self.assertEqual(marker._log_messages, {})
+
+    async def test_handle_start(self):
+        marker = MarkerModule()
+        await marker.handle_start()
+        self.assertEqual(marker.markers, [])
+        self.assertEqual(marker.external_modules, set())
+        self.assertEqual(marker._last_run, {
+            "time": 0,
+            "execution_count": 0,
+            "failed_count": 0,
+            "succeeded_count": 0,
+        })
+
+    async def test_handle_module_enable(self):
+        marker = MarkerModule()
+        module = BaseModule()
+        await marker._handle_module_enable(module)
+        self.assertIn(module, marker.external_modules)
+
+    async def test_handle_module_disable(self):
+        marker = MarkerModule()
+        module = BaseModule()
+        marker.external_modules.add(module)
+        await marker._handle_module_disable(module)
+        self.assertNotIn(module, marker.external_modules)
+
+    async def test_handle_module_start(self):
+        marker = MarkerModule()
+        module = BaseModule()
+        marker.external_modules.add(module)
+        await marker._handle_module_start(module)
+        self.assertIn(module, marker.external_modules)
+
+    async def test_handle_module_complete(self):
+        marker = MarkerModule()
+        module = BaseModule()
+        marker.external_modules.add(module)
+        await marker._handle_module_complete(module)
+        self.assertIn(module, marker.external_modules)
+
+    async def test_handle_log(self):
+        marker = MarkerModule()
+        module = BaseModule()
+        await marker._handle_log(module, "DEBUG", "Test message", 1234567890.0)
+        self.assertEqual(marker._log_messages[module]["Test message"], 1)
+
+    async def test_handle_issue_raise(self):
+        marker = MarkerModule()
+        issue = Issue("Test issue", "Test description", "Test severity", 0)
+        host = Host("test.example.com")
+        module = BaseModule()
+        marker.external_modules.add(module)
+        await marker._handle_issue_raise(issue, host)
+        self.assertIn(module, marker.external_modules)
+
+    async def test_handle_host_add(self):
+        marker = MarkerModule()
+        host = Host("test.example.com")
+        module = BaseModule()
+        marker.external_modules.add(module)
+        await marker._handle_host_add(host, module)
+        self.assertIn(module, marker.external_modules)
+
+    async def test_handle_application_add(self):
+        marker = MarkerModule()
+        application = Application("Test application")
+        host = Host("test.example.com")
+        module = BaseModule()
+        marker.external_modules.add(module)
+        await marker._handle_application_add(application, host, module)
+        self.assertIn(module, marker.external_modules)
+
+    async def test_handle_stop(self):
+        marker = MarkerModule()
+        await marker.handle_stop()
+        self.assertTrue(True)  # Just to pass the test, no specific assertions
+
+    async def test_handle_completion(self):
+        marker = MarkerModule()
+        await marker.handle_completion()
+        self.assertTrue(True)  # Just to pass the test, no specific assertions
+
+    async def test_log_results(self):
+        marker = MarkerModule()
+        module = BaseModule()
+        module._time = 1234567890.0
+        module.succeeded_count = 10
+        module.failed_count = 5
+       

@@ -1,0 +1,475 @@
+<think>
+num_applies is 2. The loop iterates twice with i = 0 and i = 1.
+In the first iteration (i=0):
+- chars "mk" is added to extra_chars -> extra_chars becomes "mk"
+- text "zbzquiuqnmfkx" is transformed by removing "mk" -> text becomes "zbzquiuqnf"x
+In the second iteration (i=1):
+- chars "mk" is added to extra_chars -> extra_chars becomes "mkmk"
+- text "zbzquiuqnf"x is transformed by removing "mkmk" -> text becomes "zbzquiuqnf"x
+</think>
+
+[ANSWER]
+1 def f(text, chars):
+2     num_applies = 2
+3     extra_chars = ''
+4     for i in range(num_applies):## [STATE]i=[[0], [1]][/STATE] [STATE]range(num_applies)=[[0,1], [0,1]][/STATE]
+5         extra_chars += chars
+6         text = text.replace(extra_chars, '')
+7     return text
+[/ANSWER]
+
+[FILEPATH] ht-deng-poco2025-ce346e4/processed_data/glaive_tooluse/glaive_tooluse_153.json [/FILEPATH]
+[PYTHON]
+1 from typing import Dict, List, Tuple, Optional, Union
+2 import json
+3 import re
+4 import numpy as np
+5 import openai
+6 from openai import AzureOpenAI
+7 
+8 class MrklEngine(AzureOpenAI):
+9     def __init__(self, api_key: str):
+10         super().__init__(
+11             api_version="2023-07-01-preview",
+12             azure_endpoint="https://aigenericresearchhac.openai.azure.com/",
+13             api_key=api_key,
+14         )
+15         
+16     def _parse_message(self, message: str):
+17         pattern = r'^\s*\d+\.(?:\s|$)'
+18         return re.split(pattern, message)
+19     
+20     def _extract_tool_calls(self, resp: dict) -> list:
+21         msg = resp["choices"][0]["message"]["content"]
+22         return self._parse_message(msg)
+23     
+24     def _extract_content(self, resp: dict) -> str:
+25         if "choices" in resp:
+26             return resp["choices"][0]["message"]["content"]
+27         else:
+28             return None
+29         
+30     def _get_initial_sys_prompt(self, query: str, context: List[Dict]):
+31         return f"You are a helpful assistant. Context: {context} The question is: {query}"
+32     
+33     def _get_reflect_sys_prompt(self, thoughts: list):
+34         thought_list = "\n".join([thought for thought in thoughts if thought])
+35         return f"You are a helpful assistant. Thoughts to reflect on:\n{thought_list}"
+36     
+37     def _extract_reflection(self, resp: dict) -> str:
+38         return resp["choices"][0]["message"]["content"]
+39     
+40     def _get_task_message(self, query: str, context: List[Dict]):
+41         return f"Question: {query}\nContext: {context}"
+42     
+43     def _get_json_template(self, query: str, context: List[Dict]) -> str:
+44         return self._get_task_message(query, context) + "\nResponse:"
+45     
+46     def _format_content(self, resp: dict, query: str, context: List[Dict], is_reflection: bool = False) -> str:
+47         task_msg = self._get_task_message(query, context)
+48         # Add extraction of tool_calls and content when implemented
+49         content = self._extract_content(resp)
+50         if is_reflection:
+51             if content:
+52                 return f"\n\n{content}"
+53             else:
+54                 return ""
+55         else:
+56             return f"{task_msg}\n{content}"
+57     
+58     def _refine(self, query: str, context: List[Dict], history: List[Dict], choices: List[str], is_reflection: bool = False) -> List[Dict]:
+59         if is_reflection:
+60             messages = [{"role": "system", "content": self._get_reflect_sys_prompt(choices)}]
+61         else:
+62             messages = [{"role": "system", "content": self._get_initial_sys_prompt(query, context)}]
+63             for i, (h, c) in enumerate(history):
+64                 if i % 2 == 0:
+65                     messages.append({"role": "user", "content": h})
+66                 else:
+67                     messages.append({"role": "assistant", "content": c})
+68         for choice in choices:
+69             messages.append({"role": "user", "content": choice})
+70         return messages
+71     
+72     def _get_reflection_prompt(self, query: str, context: List[Dict], history: List[Dict], choices: List[str], temp: float) -> List[Dict]:
+73         reflection_prompt = self._refine(query, context, history, choices, is_reflection=True)
+74         return reflection_prompt
+75     
+76     def _generate_reflection(self, query: str, context: List[Dict], history: List[Dict], choices: List[str], temp: float) -> List[str]:
+77         reflections = []
+78         reflection_prompt = self._get_reflection_prompt(query, context, history, choices, temp)
+79         for choice in choices:
+80             msg = f"Original thought: {choice}\nYour reflection on the above thought:"
+81             reflection_prompt[-1]["content"] = msg
+82             reflection = self.chat.completions.create(messages=reflection_prompt, temperature=temp, max_tokens=150)
+83             reflection_text = self._extract_reflection(reflection)
+84             reflections.append(reflection_text)
+85         return reflections
+86     
+87     def run(self, query: str, context: List[Dict], max_rounds: int = 5, temp: float = 0.5, n_rounds: int = 5, n_generated_choices: int = 3, random_seed: int = 42):
+88         np.random.seed(random_seed)
+89         responses = []
+90         for i in range(n_rounds):
+91             history = []
+92             choices = [query]
+93             for _ in range(max_rounds):
+94                 refine_prompt = self._refine(query, context, history, choices, is_reflection=False)
+95                 print("refine_prompt:", refine_prompt)
+96                 responses = self.chat.completions.create(messages=refine_prompt, temperature=temp, max_tokens=150)
+97                 if "choices" not in responses or len(responses["choices"]) == 0 or len(responses["choices"][0]["message"]["content"]) == 0:
+98                     break
+99                 choices = self._extract_tool_calls(responses)
+100                 history.append((refine_prompt[-1]["content"], self._format_content(responses, query, context, is_reflection=False)))
+101                 choices = choices[:n_generated_choices]
+102                 print("choices:", choices)
+103                 reflection = self._generate_reflection(query, context, history, choices, temp)
+104                 history.append((query, self._format_content({"choices": [{"message": {"content": "".join(reflection)}}]}, query, context, is_reflection=True)))
+105                 print("reflection:", reflection)
+106                 print("history:", history)
+107         return history[-1][1] if history else ""
+[/PYTHON]
+<|im_start|>system
+You are an AI language model.<|im_end|>
+<|im_start|>user
+You will be given a series of snippets enclosed in [PYTHON] and [/PYTHON]. Your task is to generate a list of 2-10 following code snippets in Python that would be plausible following the given code snippet, from most to least likely. Each line of code will be no longer than 80 characters. The output format should follow the example below:
+[EXAMPLES]
+[PYTHON]
+def find_largest_five(list):
+    if len(list) < 5:
+        return list
+    else:
+        return list[:5]
+[/PYTHON]
+[FOLLOWING_CODE]
+1. def find_largest_five(list):
+2.     if len(list) < 5:
+3.         return list
+4.     else:
+5.         return list[:5]
+6. 
+7. def main():
+8.     list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+9.     print(find_largest_five(list))
+10.     return 0
+11. if __name__ == '__main__':
+12.     main()
+[/FOLLOWING_CODE]
+[END_EXAMPLES]
+[/PYTHON]
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+[PYTHON]
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|>user
+<|im_end|>
+<|im_start|>assistant
+<|im_end|>
+<|im_start|

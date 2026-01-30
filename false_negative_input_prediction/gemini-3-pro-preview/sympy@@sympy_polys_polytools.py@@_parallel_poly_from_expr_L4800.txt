@@ -1,0 +1,206 @@
+<<FUNCTION_NAME>>
+
+_parallel_poly_from_expr
+
+<<CODE>>
+
+from sympy.core.basic import Basic
+from sympy.core.sympify import sympify, _sympify
+from sympy.polys.constructor import construct_domain
+from sympy.polys.polyerrors import (
+    OperationNotSupported, DomainError,
+    CoercionFailed, UnificationFailed,
+    GeneratorsNeeded, PolynomialError,
+    MultivariatePolynomialError,
+    ExactQuotientFailed,
+    PolificationFailed,
+    ComputationFailed,
+    GeneratorsError,
+)
+from sympy.polys.polyutils import (
+    basic_from_dict,
+    _sort_gens,
+    _unify_gens,
+    _dict_reorder,
+    _dict_from_expr,
+    _parallel_dict_from_expr,
+)
+from sympy.functions.elementary.piecewise import Piecewise
+from sympy.functions.elementary.piecewise import Piecewise
+
+def _parallel_poly_from_expr(exprs, opt):
+    """Construct polynomials from expressions. """
+    if len(exprs) == 2:
+        f, g = exprs
+
+        if isinstance(f, Poly) and isinstance(g, Poly):
+            f = f.__class__._from_poly(f, opt)
+            g = g.__class__._from_poly(g, opt)
+
+            f, g = f.unify(g)
+
+            opt.gens = f.gens
+            opt.domain = f.domain
+
+            if opt.polys is None:
+                opt.polys = True
+
+            return [f, g], opt
+
+    origs, exprs = list(exprs), []
+    _exprs, _polys = [], []
+
+    failed = False
+
+    for i, expr in enumerate(origs):
+        expr = sympify(expr)
+
+        if isinstance(expr, Basic):
+            if expr.is_Poly:
+                _polys.append(i)
+            else:
+                _exprs.append(i)
+
+                if opt.expand:
+                    expr = expr.expand()
+        else:
+            failed = True
+
+        exprs.append(expr)
+
+    if failed:
+        raise PolificationFailed(opt, origs, exprs, True)
+
+    if _polys:
+        # XXX: this is a temporary solution
+        for i in _polys:
+            exprs[i] = exprs[i].as_expr()
+
+    reps, opt = _parallel_dict_from_expr(exprs, opt)
+    if not opt.gens:
+        raise PolificationFailed(opt, origs, exprs, True)
+
+    from sympy.functions.elementary.piecewise import Piecewise
+    for k in opt.gens:
+        if isinstance(k, Piecewise):
+            raise PolynomialError("Piecewise generators do not make sense")
+
+    coeffs_list, lengths = [], []
+
+    all_monoms = []
+    all_coeffs = []
+
+    for rep in reps:
+        monoms, coeffs = list(zip(*list(rep.items())))
+
+        coeffs_list.extend(coeffs)
+        all_monoms.append(monoms)
+
+        lengths.append(len(coeffs))
+
+    domain = opt.domain
+
+    if domain is None:
+        opt.domain, coeffs_list = construct_domain(coeffs_list, opt=opt)
+    else:
+        coeffs_list = list(map(domain.from_sympy, coeffs_list))
+
+    for k in lengths:
+        all_coeffs.append(coeffs_list[:k])
+        coeffs_list = coeffs_list[k:]
+
+    polys = []
+
+    for monoms, coeffs in zip(all_monoms, all_coeffs):
+        rep = dict(list(zip(monoms, coeffs)))
+        poly = Poly._from_dict(rep, opt)
+        polys.append(poly)
+
+    if opt.polys is None:
+        opt.polys = bool(_polys)
+
+    return polys, opt
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {}, 'args': {'exprs': ['2', '-1*2*cos(phi)'], 'opt': {}}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+[["Poly(2, cos(phi), domain='ZZ')", "Poly(-2*(cos(phi)), cos(phi), domain='ZZ')"], {'gens': ['cos(phi)'], 'domain': 'ZZ', 'polys': False}]
+
+<<LLM_RESPONSE>>
+
+To predict the input for `_parallel_poly_from_expr`, I need to reverse-engineer the logic based on the provided output.
+
+**Analysis of the Output:**
+The output is a tuple containing:
+1.  A list of two `Poly` objects: `[Poly(2, cos(phi), domain='ZZ'), Poly(-2*cos(phi), cos(phi), domain='ZZ')]`.
+2.  An options object (presented as a dict) containing:
+    *   `gens`: `[cos(phi)]`
+    *   `domain`: `'ZZ'`
+    *   `polys`: `false`
+
+**Analysis of the Code:**
+The function `_parallel_poly_from_expr` handles two main cases:
+1.  If `len(exprs) == 2` and both are already `Poly` instances: It unifies them.
+2.  Otherwise: It processes expressions, expands them (if `opt.expand` is not false), determines generators (`gens`) if not provided, handles domain construction, and converts them to `Poly` objects.
+
+**Reasoning:**
+1.  **Expressions (`exprs`)**: The resulting polynomials correspond to `2` and `-2*cos(phi)`. Since the output shows `polys: false`, it implies that the input was likely *not* a list of existing `Poly` objects (which often sets `polys=True` implicitly or explicit logic keeps it). The text representation of the Polys in the output is `Poly(2, cos(phi), domain='ZZ')` and `Poly(-2*(cos(phi)), cos(phi), domain='ZZ')`. This suggests the input expressions were simply the symbolic expressions `2` and `-2*cos(phi)`.  Or perhaps `2` and `-2*cos(phi)` in a list.
+2.  **Generators (`gens`)**: The output shows `gens` as `[cos(phi)]`. The code has logic `reps, opt = _parallel_dict_from_expr(exprs, opt)`. If `gens` are not in `opt` initially, they are inferred. Since `2` is a constant and `-2*cos(phi)` involves `cos(phi)`, `cos(phi)` is the natural generator here.
+3.  **Domain (`domain`)**: The output domain is `ZZ` (Integers). The coefficients are 2 and -2, which fit in `ZZ`.
+4.  **Options (`opt`)**: The output `opt` dict has `polys: false`. In the code: `if opt.polys is None: opt.polys = bool(_polys)`. `_polys` tracks indices of inputs that were already `Poly` objects. Since `polys` ended up `false`, it confirms that the inputs were raw expressions (like `Symbol` or `Mul` or `Integer`), not `Poly` instances.
+
+**Constructing the Input:**
+*   `exprs`: `[2, -2*cos(phi)]`. Note: In the JSON input format for the prediction task, we represent symbolic expressions as strings that `sympify` would parse, or simple standard Python types if applicable. `2` is an integer. `-2*cos(phi)` is a string expression.
+*   `opt`: This needs to be an instance that tracks options. In the output JSON, it looks like a dictionary. In the context of the function signature, it's usually `PolyOptions` or a dict behaving like one. Given the output `opt` structure has inferred fields, the input `opt` was likely quite empty or just contained default flags. The crucial part is that `gens` was likely calculated inside. Let's assume an empty options dictionary/object for the input, or one specifying defaults. However, looking at the code `opt.expand` is accessed. For the purpose of this exercise, providing the `opt` as an empty dictionary (which the testing harness likely interprets as an object with attributes or dict) is the standard approach, but specifically here `opt` is usually a `PolyOptions` object. The prompt structure puts `opt` inside `args`.
+
+Let's refine `exprs`. The output polynomials are `2` and `-2*cos(phi)`.
+Input: `[2, "-2*cos(phi)"]` (or just strings for both).
+The output explicitly lists `Poly(2, cos(phi)...)`. This means the generator `cos(phi)` was found.
+
+Let's verifying the step `if isinstance(expr, Basic): ...`.
+The loop iterates `exprs`. If we pass `[2, -2*cos(phi)]` (symbolic objects) or strings that get sympified. The function calls `sympify(expr)`.
+So passing `[2, "-2*cos(phi)"]` works.
+
+**Input Structure:**
+The structure needs `self`, `args`, `kwargs`.
+`_parallel_poly_from_expr` is a standalone function (though often imported). The structure provided `self: {}` suggests it might be treated as a static method or standalone.
+`args` contains `exprs` and `opt`.
+
+**Detailed Values:**
+*   `exprs`: `["2", "-2*cos(phi)"]` (Using strings is safest for symbolic expressions in this JSON format).
+*   `opt`: `{}`.
+
+Wait, check the output `polys: false`.
+Code:
+```python
+    if opt.polys is None:
+        opt.polys = bool(_polys)
+```
+If input `exprs` are standard expressions, `_polys` list is empty. `bool([])` is `False`. So `opt.polys` becomes `False`. Matches output.
+If `opt` had `gens` preset, they would appear in output. Output has `gens: [cos(phi)]`. Input `opt` likely didn't have `gens`, or had `cod(phi)`. Since `_parallel_dict_from_expr` determines them if missing, it's safer to assume they were missing.
+
+Final check on `exprs` order.
+Output list: `[Poly(2...), Poly(-2*cos(phi)...)]`.
+Input order matches output order.
+Input 1: `2`
+Input 2: `-2*cos(phi)`
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "exprs": [
+            "2",
+            "-2*cos(phi)"
+        ],
+        "opt": {}
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

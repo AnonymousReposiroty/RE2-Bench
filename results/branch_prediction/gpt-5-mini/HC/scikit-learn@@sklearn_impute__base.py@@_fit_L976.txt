@@ -1,0 +1,101 @@
+[THOUGHT]
+We trace _fit with precomputed=True and X a boolean numpy array.
+
+- In _fit: precomputed is True, so we enter that branch.
+- The check at line 67: not (hasattr(X, 'dtype') and X.dtype.kind == 'b'):
+  X has dtype and dtype.kind == 'b' (boolean), so the inner expression is True, and the not(...) is False. Thus that branch is not taken (['N']). We set self._precomputed = True.
+- Because self._precomputed is True, _validate_input is not called, so branches inside _validate_input (lines 59 and 61) are not encountered at all (empty lists []).
+- _get_missing_features_info is called with self._precomputed == True:
+  - At line 25: if not self._precomputed is False, so the if branch is not taken (['N']) and the else branch at line 27 is taken (['Y']).
+  - X is not sparse, so sp.issparse(X) is False and that sparse-handling block is skipped.
+  - Inside the non-sparse branch, the code path that would recompute the mask if not precomputed is not taken (precomputed True), so no further branch markers are hit.
+- Summary of encounters:
+  - line 67: evaluated once -> ['N']
+  - line 25 (if not self._precomputed): evaluated once -> ['N']
+  - line 27 (else): corresponding else executed once -> ['Y']
+  - lines 59 and 61 (in _validate_input): not encountered -> []
+
+These determine the annotations below.
+[/THOUGHT]
+
+[ANSWER]
+1 import numpy as np
+2 from scipy import sparse as sp
+3 from sklearn.base import BaseEstimator, TransformerMixin, _fit_context
+4 from sklearn.utils._mask import _get_mask
+5 from sklearn.utils._missing import is_pandas_na, is_scalar_nan
+6 from sklearn.utils._param_validation import MissingValues, StrOptions
+7 from sklearn.utils.validation import (
+8     FLOAT_DTYPES,
+9     _check_feature_names_in,
+10     _check_n_features,
+11     check_is_fitted,
+12     validate_data,
+13 )
+14 
+15 class MissingIndicator(TransformerMixin, BaseEstimator):
+16     _parameter_constraints: dict = {'missing_values': [MissingValues()], 'features': [StrOptions({'missing-only', 'all'})], 'sparse': ['boolean', StrOptions({'auto'})], 'error_on_new': ['boolean']}
+17 
+18     def __init__(self, *, missing_values=np.nan, features='missing-only', sparse='auto', error_on_new=True):
+19         self.missing_values = missing_values
+20         self.features = features
+21         self.sparse = sparse
+22         self.error_on_new = error_on_new
+23 
+24     def _get_missing_features_info(self, X):
+25         if not self._precomputed: ## [BRANCH]taken=['N'][/BRANCH]
+26             imputer_mask = _get_mask(X, self.missing_values)
+27         else: ## [BRANCH]taken=['Y'][/BRANCH]
+28             imputer_mask = X
+29         if sp.issparse(X):
+30             imputer_mask.eliminate_zeros()
+31             if self.features == 'missing-only':
+32                 n_missing = imputer_mask.sum(axis=0)
+33             if self.sparse is False:
+34                 imputer_mask = imputer_mask.toarray()
+35             elif imputer_mask.format == 'csr':
+36                 imputer_mask = imputer_mask.tocsc()
+37         else:
+38             if not self._precomputed:
+39                 imputer_mask = _get_mask(X, self.missing_values)
+40             else:
+41                 imputer_mask = X
+42             if self.features == 'missing-only':
+43                 n_missing = imputer_mask.sum(axis=0)
+44             if self.sparse is True:
+45                 imputer_mask = sp.csc_matrix(imputer_mask)
+46         if self.features == 'all':
+47             features_indices = np.arange(X.shape[1])
+48         else:
+49             features_indices = np.flatnonzero(n_missing)
+50         return (imputer_mask, features_indices)
+51 
+52     def _validate_input(self, X, in_fit):
+53         if not is_scalar_nan(self.missing_values):
+54             ensure_all_finite = True
+55         else:
+56             ensure_all_finite = 'allow-nan'
+57         X = validate_data(self, X, reset=in_fit, accept_sparse=('csc', 'csr'), dtype=None, ensure_all_finite=ensure_all_finite)
+58         _check_inputs_dtype(X, self.missing_values)
+59         if X.dtype.kind not in ('i', 'u', 'f', 'O'): ## [BRANCH]taken=[][/BRANCH]
+60             raise ValueError('MissingIndicator does not support data with dtype {0}. Please provide either a numeric array (with a floating point or integer dtype) or categorical data represented either as an array with integer dtype or an array of string values with an object dtype.'.format(X.dtype))
+61         if sp.issparse(X) and self.missing_values == 0: ## [BRANCH]taken=[][/BRANCH]
+62             raise ValueError('Sparse input with missing_values=0 is not supported. Provide a dense array instead.')
+63         return X
+64 
+65     def _fit(self, X, y=None, precomputed=False):
+66         if precomputed:
+67             if not (hasattr(X, 'dtype') and X.dtype.kind == 'b'): ## [BRANCH]taken=['N'][/BRANCH]
+68                 raise ValueError('precomputed is True but the input data is not a mask')
+69             self._precomputed = True
+70         else:
+71             self._precomputed = False
+72         if not self._precomputed:
+73             X = self._validate_input(X, in_fit=True)
+74         else:
+75             _check_n_features(self, X, reset=True)
+76         self._n_features = X.shape[1]
+77         missing_features_info = self._get_missing_features_info(X)
+78         self.features_ = missing_features_info[1]
+79         return missing_features_info[0]
+[/ANSWER]

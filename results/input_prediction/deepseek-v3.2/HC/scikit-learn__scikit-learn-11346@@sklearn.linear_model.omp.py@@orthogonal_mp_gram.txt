@@ -1,0 +1,97 @@
+Let’s reason through the problem step by step.  
+
+We have the `orthogonal_mp_gram` function, and the output is a 1D array of length 12:  
+
+```
+[0.         2.33249979 0.         0.         0.         0.        0.         0.         0.         0.         0.         0.        ]
+```
+
+That means `np.squeeze(coef)` produced a 1D array with 12 elements.  
+
+From the code:  
+- `Gram` is `(n_features, n_features)` Gram matrix.  
+- `Xy` shape is `(n_features, n_targets)`.  
+- `coef` shape depends on `return_path`. Here `return_path` is probably `False` (default). Then `coef` is `(len(Gram), Xy.shape[1])`. After squeezing, if `Xy.shape[1]` is 1, we get 1D array length `len(Gram)`.  
+
+So `len(Gram) = 12`, meaning `Gram` is `12x12`.  
+
+The output shows only index 1 has nonzero coefficient (~2.3325), others are zero.  
+That means OMP chose only one atom (index 1) and the coefficient is ≈2.3325.  
+
+The function uses `_gram_omp` for each column of `Xy`.  
+If `Xy` has one column, `n_iters` is scalar.  
+
+Given `n_nonzero_coefs` is unspecified in output, the function uses default:  
+`if n_nonzero_coefs is None and tol is None: n_nonzero_coefs = int(0.1 * len(Gram))` → `int(0.1*12) = 1`.  
+So if `tol=None`, `n_nonzero_coefs=1`.  
+
+Output matches picking one nonzero coefficient at index 1.  
+
+We need to pick `Gram` and `Xy` so that `_gram_omp` picks index 1.  
+From `_gram_omp` logic:  
+- Compute `alpha = Xy`.  
+- `lam = np.argmax(np.abs(alpha))` chooses first atom.  
+- So `Xy[1]` should have largest absolute value, and `Xy[1]^2` > `min_float`.  
+- Gram[1,1] must be > 0 (sqrt taken).  
+
+Also `tol=None`, `norms_squared=None` unless `tol` is given.  
+
+Since `norms_squared` is only needed when `tol` is not None, we set `tol=None`, `norms_squared=None`.  
+
+`copy_Xy` could be `True` or `False`; probably `True` by default but not important for output.  
+
+We can choose simple numbers: Let `Xy = [0, 5, 0, 0, ...]` (length 12), max at index 1.  
+Gram is identity matrix (12x12).  
+Then solution `gamma` from `potrs` on `L[:1,:1]` will be `Xy[1] / sqrt(Gram[1,1])`.  
+If Gram[1,1] = 1, then `gamma = Xy[1] = 5`.  
+
+But output coefficient is `2.3325`, not `5`.  
+Wait: coefficient stored is `coef[idx, k] = x` where `x` is gamma.  
+In `_gram_omp`, gamma is computed from solving `L[:n_active,:n_active] * gamma = Xy[:n_active]`.  
+If Gram is identity, L[0,0] = sqrt(Gram[lam,lam]) = 1, Xy[0] = Xy[lam] after swap, so gamma = Xy[lam] / L[0,0] = original `Xy[1]`.  
+
+So why output 2.3325? Maybe Gram is not identity but something else, causing scaling.  
+Let’s pick `Gram[1,1] = (Xy[1]/coef)^2` to match:  
+If `Xy[1] = 5`, coefficient `≈ 2.3325`, then `sqrt(Gram[1,1]) = L[0,0] = Xy[1] / gamma = 5/2.3325 ≈ 2.143`.  
+Thus `Gram[1,1] ≈ 4.59`.  
+
+We can fix `Xy[1] = 5`, others zero, `Gram` = identity except `Gram[1,1]=4.59`.  
+
+But easier: Let’s choose `Xy[1] = 2.3325` and `Gram[1,1]=1`, then coefficient will be `2.3325`.  
+That works.  
+
+So set:  
+- `Gram` = 12x12 identity matrix (or any valid symmetric positive definite).  
+- `Xy` = [0, 2.3325, 0, …, 0] shape (12,1) or (12,).  
+- `n_nonzero_coefs=1`  
+- `tol=None`  
+- `norms_squared=None`  
+- `copy_Xy=True` (default)  
+
+Check output shape: `coef` shape `(12,1)` → squeeze → `(12,)`. OK.  
+
+Thus:  
+`kwargs = { "Gram": (12x12 identity), "Xy": (length 12 vector with index 1 = 2.3325), "n_nonzero_coefs": 1, "tol": null, "norms_squared": null, "copy_Xy": true }`  
+
+I’ll represent Gram as a 12x12 numpy array (but in JSON, maybe list of lists).  
+
+[THOUGHT]
+I need to provide Gram as a 12x12 matrix (identity for simplicity) and Xy with zeros except at index 1 = 2.33249979, n_nonzero_coefs=1, tol=null, norms_squared=null, copy_Xy=true.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {},
+    "kwargs": {
+        "Gram": [[1.0 if i==j else 0.0 for j in range(12)] for i in range(12)],
+        "Xy": [0.0, 2.33249979, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "n_nonzero_coefs": 1,
+        "tol": null,
+        "norms_squared": null,
+        "copy_Xy": true
+    }
+}
+```
+[/INPUT]

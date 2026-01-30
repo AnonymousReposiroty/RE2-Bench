@@ -1,0 +1,373 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from .coreerrors import NonCommutativeExpression
+from collections import defaultdict
+from sympy.polys.polytools import gcd, factor
+
+class Term:
+    __slots__ = ('coeff', 'numer', 'denom')
+
+    def __init__(self, term, numer=None, denom=None):
+        if numer is None and denom is None:
+            if not term.is_commutative:
+                raise NonCommutativeExpression('commutative expression expected')
+            coeff, factors = term.as_coeff_mul()
+            numer, denom = (defaultdict(int), defaultdict(int))
+            for factor in factors:
+                base, exp = decompose_power(factor)
+                if base.is_Add:
+                    cont, base = base.primitive()
+                    coeff *= cont ** exp
+                if exp > 0:
+                    numer[base] += exp
+                else:
+                    denom[base] += -exp
+            numer = Factors(numer)
+            denom = Factors(denom)
+        else:
+            coeff = term
+            if numer is None:
+                numer = Factors()
+            if denom is None:
+                denom = Factors()
+        self.coeff = coeff
+        self.numer = numer
+        self.denom = denom
+
+    def mul(self, other):
+        coeff = self.coeff * other.coeff
+        numer = self.numer.mul(other.numer)
+        denom = self.denom.mul(other.denom)
+        numer, denom = numer.normal(denom)
+        return Term(coeff, numer, denom)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.decorators.__sympifyit_wrapper
+
+@wraps(func)
+def __sympifyit_wrapper(a, b):
+    try:
+        # If an external class has _op_priority, it knows how to deal
+        # with SymPy objects. Otherwise, it must be converted.
+        if not hasattr(b, '_op_priority'):
+            b = sympify(b, strict=True)
+        return func(a, b)
+    except SympifyError:
+        return retval
+
+sympy.sympy.core.exprtools.mul
+
+def mul(self, other):  # Factors
+    """Return Factors of ``self * other``.
+
+    Examples
+    ========
+
+    >>> from sympy.core.exprtools import Factors
+    >>> from sympy.abc import x, y, z
+    >>> a = Factors((x*y**2).as_powers_dict())
+    >>> b = Factors((x*y/z).as_powers_dict())
+    >>> a.mul(b)
+    Factors({x: 2, y: 3, z: -1})
+    >>> a*b
+    Factors({x: 2, y: 3, z: -1})
+    """
+    if not isinstance(other, Factors):
+        other = Factors(other)
+    if any(f.is_zero for f in (self, other)):
+        return Factors(S.Zero)
+    factors = dict(self.factors)
+
+    for factor, exp in other.factors.items():
+        if factor in factors:
+            exp = factors[factor] + exp
+
+            if not exp:
+                del factors[factor]
+                continue
+
+        factors[factor] = exp
+
+    return Factors(factors)
+
+sympy.sympy.core.exprtools.normal
+
+def normal(self, other):
+    """Return ``self`` and ``other`` with ``gcd`` removed from each.
+    The only differences between this and method ``div`` is that this
+    is 1) optimized for the case when there are few factors in common and
+    2) this does not raise an error if ``other`` is zero.
+
+    See Also
+    ========
+    div
+
+    """
+    if not isinstance(other, Factors):
+        other = Factors(other)
+        if other.is_zero:
+            return (Factors(), Factors(S.Zero))
+        if self.is_zero:
+            return (Factors(S.Zero), Factors())
+
+    self_factors = dict(self.factors)
+    other_factors = dict(other.factors)
+
+    for factor, self_exp in self.factors.items():
+        try:
+            other_exp = other.factors[factor]
+        except KeyError:
+            continue
+
+        exp = self_exp - other_exp
+
+        if not exp:
+            del self_factors[factor]
+            del other_factors[factor]
+        elif _isnumber(exp):
+            if exp > 0:
+                self_factors[factor] = exp
+                del other_factors[factor]
+            else:
+                del self_factors[factor]
+                other_factors[factor] = -exp
+        else:
+            r = self_exp.extract_additively(other_exp)
+            if r is not None:
+                if r:
+                    self_factors[factor] = r
+                    del other_factors[factor]
+                else:  # should be handled already
+                    del self_factors[factor]
+                    del other_factors[factor]
+            else:
+                sc, sa = self_exp.as_coeff_Add()
+                if sc:
+                    oc, oa = other_exp.as_coeff_Add()
+                    diff = sc - oc
+                    if diff > 0:
+                        self_factors[factor] -= oc
+                        other_exp = oa
+                    elif diff < 0:
+                        self_factors[factor] -= sc
+                        other_factors[factor] -= sc
+                        other_exp = oa - diff
+                    else:
+                        self_factors[factor] = sa
+                        other_exp = oa
+                if other_exp:
+                    other_factors[factor] = other_exp
+                else:
+                    del other_factors[factor]
+
+    return Factors(self_factors), Factors(other_factors)
+
+sympy.sympy.core.exprtools.__init__
+
+def __init__(self, term, numer=None, denom=None):  # Term
+    if numer is None and denom is None:
+        if not term.is_commutative:
+            raise NonCommutativeExpression(
+                'commutative expression expected')
+
+        coeff, factors = term.as_coeff_mul()
+        numer, denom = defaultdict(int), defaultdict(int)
+
+        for factor in factors:
+            base, exp = decompose_power(factor)
+
+            if base.is_Add:
+                cont, base = base.primitive()
+                coeff *= cont**exp
+
+            if exp > 0:
+                numer[base] += exp
+            else:
+                denom[base] += -exp
+
+        numer = Factors(numer)
+        denom = Factors(denom)
+    else:
+        coeff = term
+
+        if numer is None:
+            numer = Factors()
+
+        if denom is None:
+            denom = Factors()
+
+    self.coeff = coeff
+    self.numer = numer
+    self.denom = denom
+
+sympy.sympy.core.numbers.__mul__
+
+def __mul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p*other)
+        elif isinstance(other, Integer):
+            return Integer(self.p*other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.p, other.q, igcd(self.p, other.q))
+        return Rational.__mul__(self, other)
+    return Rational.__mul__(self, other)
+
+sympy.sympy.core.numbers.__rmul__
+
+def __rmul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(other*self.p)
+        elif isinstance(other, Rational):
+            return Rational._new(other.p*self.p, other.q, igcd(self.p, other.q))
+        return Rational.__rmul__(self, other)
+    return Rational.__rmul__(self, other)
+
+
+[/PYTHON]
+What will be the input of `mul`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "Term(1, Factors({}), Factors({}))"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": XXX,
+    "args": {
+        "other": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

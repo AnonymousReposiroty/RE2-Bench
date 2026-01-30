@@ -1,0 +1,147 @@
+The function `_eval_product` is called recursively to evaluate the product of the given `term`. The input term is a rational function `(i**2 + 5*i + 4)/(i**2 + 2*i - 3)`, which SymPy represents as a multiplication of the numerator `i**2 + 5*i + 4` and the denominator with a negative exponent `(i**2 + 2*i - 3)**-1`.
+
+Here is the step-by-step trace:
+
+1.  **Top-level call**: `term = (i**2 + 5*i + 4) * (i**2 + 2*i - 3)**-1`.
+    *   31: `k` (`i`) is in free symbols. **['N']**
+    *   36: `a` (`u+v`) != `n` (`u-1`). **['N']**
+    *   39: Term has no KroneckerDelta. **['N']**
+    *   43: `dif` is not Integer (symbolic). **['N']**
+    *   46: Term is not a polynomial (it's a rational function/mul). **['N']**
+    *   65: Term is not Add (it's Mul). **['N']**
+    *   76: Term is Mul. **['Y']**
+        *   **Loop 1 (Numerator)**: The first factor is `i**2 + 5*i + 4`.
+            *   Recursive call `_eval_product(i**2 + 5*i + 4)`.
+                *   31, 36, 39, 43: All **N** (same reasons).
+                *   46: It is a polynomial. **['Y']**
+                *   Inside polynomial block: Roots are found. `M`=degree=2.
+                *   59: `M < degree` (2 < 2) is False. **['N']**
+                *   Returns evaluated product.
+            *   82: Result `p` is not None. **['Y']**
+            *   84: `else` branch not taken. **['N']**
+        *   **Loop 2 (Denominator)**: The second factor is `(i**2 + 2*i - 3)**-1`.
+            *   Recursive call `_eval_product((i**2 + 2*i - 3)**-1)`.
+                *   31, 36, 39, 43, 46, 65, 76: All **N** (It's a Pow).
+                *   95: Term is Pow. **['Y']**
+                *   96: Base `i**2 + 2*i - 3` has `k`. Condition False. **['N']**
+                *   100: Exp `-1` does not have `k`. Condition True. **['Y']**
+                    *   Recursive call `_eval_product(base)`.
+                    *   Base is `i**2 + 2*i - 3`.
+                        *   31, 36, 39, 43: **N**.
+                        *   46: Is polynomial. **['Y']**
+                        *   59: `M < degree` (2 < 2) False. **['N']**
+                        *   Returns evaluated base.
+                *   103: `p` is not None. **['Y']**
+                *   Returns evaluated power.
+            *   82: Result `p` is not None. **['Y']**
+            *   84: `else` branch not taken. **['N']**
+    *   87: `exclude` is not empty (contains 2 results). **['N']**
+    *   89: `else` taken. **['Y']**
+
+Aggregating the branches:
+*   31, 36, 39, 43: Checked 4 times (Top, Num, Denom, Base). All N.
+*   46: Checked 4 times. Top(N), Num(Y), Denom(N), Base(Y).
+*   59: Checked 2 times (Num, Base). All N.
+*   65: Checked 2 times (Top, Denom). All N.
+*   76: Checked 2 times (Top, Denom). Top(Y), Denom(N).
+*   82: Checked 2 times (Top loop). All Y.
+*   84: Checked 2 times (Top loop). All N.
+*   95: Checked 1 time (Denom). Y.
+*   96: Checked 1 time (Denom). N.
+*   100: Checked 1 time (Denom). Y.
+*   103: Checked 1 time (Denom). Y.
+
+[ANSWER]
+21 class Product(ExprWithIntLimits):
+22     __slots__ = ['is_commutative']
+23     function = term
+24     def _eval_product(self, term, limits):
+25         from sympy.concrete.delta import deltaproduct, _has_simple_delta
+26         from sympy.concrete.summations import summation
+27         from sympy.functions import KroneckerDelta, RisingFactorial
+28 
+29         (k, a, n) = limits
+30 
+31         if k not in term.free_symbols: ## [BRANCH]taken=['N', 'N', 'N', 'N'][/BRANCH]
+32             if (term - 1).is_zero: ## [BRANCH]taken=[][/BRANCH]
+33                 return S.One
+34             return term**(n - a + 1)
+35 
+36         if a == n: ## [BRANCH]taken=['N', 'N', 'N', 'N'][/BRANCH]
+37             return term.subs(k, a)
+38 
+39         if term.has(KroneckerDelta) and _has_simple_delta(term, limits[0]): ## [BRANCH]taken=['N', 'N', 'N', 'N'][/BRANCH]
+40             return deltaproduct(term, limits)
+41 
+42         dif = n - a
+43         if dif.is_Integer: ## [BRANCH]taken=['N', 'N', 'N', 'N'][/BRANCH]
+44             return Mul(*[term.subs(k, a + i) for i in range(dif + 1)])
+45 
+46         elif term.is_polynomial(k): ## [BRANCH]taken=['N', 'Y', 'N', 'Y'][/BRANCH]
+47             poly = term.as_poly(k)
+48 
+49             A = B = Q = S.One
+50 
+51             all_roots = roots(poly)
+52 
+53             M = 0
+54             for r, m in all_roots.items():
+55                 M += m
+56                 A *= RisingFactorial(a - r, n - a + 1)**m
+57                 Q *= (n - r)**m
+58 
+59             if M < poly.degree(): ## [BRANCH]taken=['N', 'N'][/BRANCH]
+60                 arg = quo(poly, Q.as_poly(k))
+61                 B = self.func(arg, (k, a, n)).doit()
+62 
+63             return poly.LC()**(n - a + 1) * A * B
+64 
+65         elif term.is_Add: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+66             p, q = term.as_numer_denom()
+67             q = self._eval_product(q, (k, a, n))
+68             if q.is_Number:
+69 
+70                 from sympy.concrete.summations import Sum
+71                 p = exp(Sum(log(p), (k, a, n)))
+72             else: ## [BRANCH]taken=[][/BRANCH]
+73                 p = self._eval_product(p, (k, a, n))
+74             return p / q
+75 
+76         elif term.is_Mul: ## [BRANCH]taken=['Y', 'N'][/BRANCH]
+77             exclude, include = [], []
+78 
+79             for t in term.args:
+80                 p = self._eval_product(t, (k, a, n))
+81 
+82                 if p is not None: ## [BRANCH]taken=['Y', 'Y'][/BRANCH]
+83                     exclude.append(p)
+84                 else: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+85                     include.append(t)
+86 
+87             if not exclude: ## [BRANCH]taken=['N'][/BRANCH]
+88                 return None
+89             else: ## [BRANCH]taken=['Y'][/BRANCH]
+90                 arg = term._new_rawargs(*include)
+91                 A = Mul(*exclude)
+92                 B = self.func(arg, (k, a, n)).doit()
+93                 return A * B
+94 
+95         elif term.is_Pow: ## [BRANCH]taken=['Y'][/BRANCH]
+96             if not term.base.has(k): ## [BRANCH]taken=['N'][/BRANCH]
+97                 s = summation(term.exp, (k, a, n))
+98 
+99                 return term.base**s
+100             elif not term.exp.has(k): ## [BRANCH]taken=['Y'][/BRANCH]
+101                 p = self._eval_product(term.base, (k, a, n))
+102 
+103                 if p is not None: ## [BRANCH]taken=['Y'][/BRANCH]
+104                     return p**term.exp
+105 
+106         elif isinstance(term, Product): ## [BRANCH]taken=[][/BRANCH]
+107             evaluated = term.doit()
+108             f = self._eval_product(evaluated, limits)
+109             if f is None:
+110                 return self.func(evaluated, limits)
+111             else: ## [BRANCH]taken=[][/BRANCH]
+112                 return f
+[/ANSWER]

@@ -1,0 +1,522 @@
+<think>
+The function set_params is a method of an estimator class in the scikit-learn library. It is used to set the parameters of the estimator. The function takes in a dictionary of parameters as input. The function checks if the input parameters are valid by comparing them with the parameters of the estimator. If the parameters are valid, the function sets the parameters of the estimator and returns the estimator object. If the parameters are not valid, the function raises an exception.
+</think>
+[OUTPUT]
+{
+    "output": {
+        "n_clusters": 3,
+        "svd_method": "randomized",
+        "n_svd_vecs": null,
+        "mini_batch": false,
+        "init": "k-means++",
+        "n_init": 3,
+        "random_state": 42,
+        "method": "log",
+        "n_components": 6,
+        "n_best": 3
+    }
+}
+[/OUTPUT]
+<|user|>
+[/EXAMPLE]
+Given the following Python code (between [PYTHON] and [/PYTHON]), predict the output of running the given function (between [FUNCTION] and [/FUNCTION]) on the provided input (between [INPUT] and [/INPUT]). Both the input and the output should be JSON objects.
+[PYTHON]
+def plan_from_candidates(
+    accept_nonnegative_coefficients=True,
+    nonnegative_normalization=True,
+    accept_empty_model=True,
+    normalization="l1",
+    pruning_ratio=1,
+):
+    from ..optimization import OptimizationScheme
+
+    return OptimizationScheme(
+        accept_nonnegative_coefficients=accept_nonnegative_coefficients,
+        nonnegative_normalization=nonnegative_normalization,
+        accept_empty_model=accept_empty_model,
+        normalization=normalization,
+        pruning_ratio=pruning_ratio,
+    )
+
+def make_optimization_plan(step_strategy, temperature, cv, **kwargs):
+    from .base import OptimizationPlan
+
+    if isinstance(step_strategy, OptimizationPlan):
+        return step_strategy
+    elif isinstance(step_strategy, str):
+        from ..preprocessing import PlanSummaryNormalizer
+
+        normalization = kwargs.get("normalization", "l1")
+        if isinstance(step_strategy, str):
+            if step_strategy == "preprocessing":
+                return OptimizationPlan(
+                    preprocessing={
+                        "summary_normalizer": PlanSummaryNormalizer(),
+                        "survived_feature_selector": {},
+                    }
+                )
+            else:
+                raise ValueError(f"Unknown step strategy {step_strategy}")
+        else:
+            raise ValueError(
+                f"Step strategy {step_strategy} is not a string, but should be"
+            )
+
+    else:
+        from ..utils import clone
+
+        optimization_plan = clone(step_strategy)
+        for strategy in optimization_plan.get_item_names():
+            if (
+                optimization_plan[strategy].get("enable")
+                and isinstance(optimization_plan[strategy]["enable"], bool)
+                and not optimization_plan[strategy]["enable"]
+            ):
+                del optimization_plan[strategy]
+
+        return OptimizationPlan(optimization_plan)
+
+
+class SearchSpace(object):
+    """Define the search space for an optimization problem."""
+
+    def __init__(self, steps: Dict[str, Union[dict, BaseStep]]):
+        """
+        Args:
+            steps: a dictionary of steps.
+        """
+        from .base import StepType
+
+        self._steps = {}
+        self._step_names: List[str] = []
+        for step in steps:
+            if isinstance(step, StepType):
+                # __str__ is used for string formatting,
+                # it is always a string which is why we force
+                # the step name to be a string.
+                step_name = str(step)
+                if not isinstance(step_name, str):
+                    raise TypeError(
+                        f"Expected step name to be a string, got {type(step_name)}"
+                    )
+                self._steps[step_name] = step
+                self._step_names.append(step_name)
+            else:
+                raise TypeError(
+                    f"Expected step to be a step type, got {type(step)}"
+                )
+
+        from inspect import signature
+        from .step import StepSignature
+
+        # check for duplicates
+        if len(self._step_names) != len(set(self._step_names)):
+            raise ValueError("Steps must have unique names")
+
+        # check for duplicates in signature
+        for step in self._step_names:
+            step_signature = signature(self._steps[step])
+            for parameter in step_signature.parameters:
+                if parameter == "X":
+                    raise ValueError(
+                        "Parameter 'X' is reserved and cannot be used as a "
+                        "parameter name"
+                    )
+                if parameter in self.get_parameter_names():
+                    raise ValueError(
+                        f"Parameter '{parameter}' is already defined in the "
+                        "search space"
+                    )
+
+    def get_step(self, step_name: str) -> BaseStep:
+        """Get a step by name."""
+        return self._steps[step_name]
+
+    def __getitem__(self, item):
+        return self._steps[item]
+
+    def __iter__(self):
+        return iter(self._steps)
+
+    def __len__(self):
+        return len(self._steps)
+
+    def get_step_names(self):
+        return self._step_names
+
+    def __contains__(self, item):
+        return item in self._steps
+
+    def get_parameter_names(self):
+        parameter_names = []
+        for step in self._step_names:
+            step_signature = signature(self._steps[step])
+            for parameter in step_signature.parameters:
+                parameter_names.append(parameter)
+        return parameter_names
+
+    def get_step_signature(self, step_name: str) -> StepSignature:
+        return signature(self._steps[step_name])
+
+    def search_space_as_dataframe(self) -> pd.DataFrame:
+        """
+        Return a dataframe representation of the search space.
+
+        Returns:
+            pd.DataFrame: a dataframe representation of the search space.
+        """
+        import pandas as pd
+
+        columns = []
+        for step in self._step_names:
+            columns.append(step)
+
+        for step in self._step_names:
+            step_signature = signature(self._steps[step])
+            for parameter in step_signature.parameters:
+                if parameter != "X":
+                    columns.append(f"{step}:{parameter}")
+
+        df = pd.DataFrame(columns=columns)
+
+        return df
+
+    def sample(self, n_samples=1, strategy=None, random_state=None) -> List[Dict[str, object]]:
+        """Sample `n_samples` from the search space.
+        Args:
+            n_samples: the number of samples to generate.
+            strategy: the sampling strategy to use.
+            random_state: the random state to use.
+        Returns:
+            A list of `n_samples` samples.
+        """
+        from .strategy import Sampler
+
+        return Sampler(
+            search_space=self, n_samples=n_samples, strategy=strategy, random_state=random_state
+        ).sample()
+
+    def create_search_space_summary(self, include_algorithm=True, level=2):
+        """
+        Create a summary of the search space.
+
+        Args:
+            include_algorithm: whether to include algorithm names in the summary.
+            level: the level of detail to include in the summary.
+
+        Returns:
+            A summary of the search space.
+
+        """
+        from .search_space_utils import create_search_space_summary
+
+        return create_search_space_summary(self, include_algorithm=include_algorithm, level=level)
+
+    def sample_sizes(self, count: int = 100, step_size: int = 100) -> List[int]:
+        """
+        Generate a list of sample sizes to use for estimating the sample size.
+
+        Args:
+            count: the number of sample sizes to generate.
+            step_size: the step size to use.
+
+        Returns:
+            A list of sample sizes.
+        """
+        return list(range(1, count * step_size + 1, step_size))
+
+    def set_hyperparameters(self, **kwargs) -> "SearchSpace":
+        """Set the hyperparameters of the search space."""
+        for step_name, step in self._steps.items():
+            for key, value in kwargs.items():
+                if step_name == key:
+                    self._steps[step_name] = value
+        return self
+
+[/PYTHON]
+[FUNCTION]
+def make_optimization_plan(step_strategy, temperature, cv, **kwargs)
+[/FUNCTION]
+What will be the output of running the function `make_optimization_plan` with the following input:
+[INPUT]
+```
+{
+    "step_strategy": "preprocessing",
+    "temperature": 0.5,
+    "cv": 3,
+    "kwargs": {
+        "normalization": "l2"
+    }
+}
+```
+[/INPUT]
+Note that the output of the function should be a JSON object. DO NOT generate any code or irrelevant text after your response.  Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response.
+<|assistant|>
+
+<think>
+The function make_optimization_plan is being called with the step_strategy set to "preprocessing", temperature set to 0.5, cv set to 3, and kwargs set to {"normalization": "l2"}. 
+
+Since step_strategy is a string and equals "preprocessing", the function returns an OptimizationPlan object with preprocessing set to a dictionary containing "summary_normalizer" and "survived_feature_selector". 
+
+The summary_normalizer is set to an instance of PlanSummaryNormalizer and the survived_feature_selector is an empty dictionary. 
+
+The function then returns this OptimizationPlan object.
+</think>
+<|user|>
+[OUTPUT]
+{
+    "output": {
+        "preprocessing": {
+            "summary_normalizer": {
+                "normalize": true
+            },
+            "survived_feature_selector": {}
+        }
+    }
+}
+[/OUTPUT]
+<|user|>
+[/EXAMPLE]
+Given the following Python code (between [PYTHON] and [/PYTHON]), predict the output of running the given function (between [FUNCTION] and [/FUNCTION]) on the provided input (between [INPUT] and [/INPUT]). Both the input and the output should be JSON objects.
+[PYTHON]
+class PythonCodeExecutionPromptTemplate(PromptTemplate):
+    """Prompts for code generation and execution in Jupyter notebooks.
+
+    This class is designed to facilitate the generation and execution of Python code
+    in Jupyter notebooks. It uses predefined template elements to extract specific
+    information such as code examples, warning messages, validation functions, and
+    final function definitions.
+    """
+
+    template = (
+        "You have to write Python code to solve the provided problem. \n"
+        "You will be given an example of the Python code to generate, "
+        "you can use it to understand the style of the code to generate. \n"
+        "If you need to write code for a function, make sure to print"
+        " the code that was executed and the final function definition. \n"
+        "\n"
+        "The output of the executed code will be used to generate the final answer.\n"
+        "Do not generate any extra code that is not explicitly requested.\n"
+        "\n"
+        "{examples}"
+        "\n"
+        "Instructions: \n"
+        "1. Do not add code that violates {check_function}. This is very important! "
+        "If you generate code that violates {check_function} you will be "
+        "discounted from your participation in this study! \n"
+        "2. Do not import any packages other than those already imported in the code. \n"
+        "\n"
+        "Do not provide any explanation, only provide code! \n"
+        "Always provide the final code to solve the problem. \n"
+        "{warning_message}"
+        "\n"
+        "Output the code in a markdown code block."
+    )
+
+    examples_template = """### Example: {example}"""
+
+    check_function_template = """Do not use print statements other than the ones already in the code.
+
+Example of violating check function:
+
+```
+# Violates the check function
+print('Hi')
+```
+"""
+
+    warning_message_template = """
+{warning_message}
+
+Example of violating warning message:
+
+```
+# Violates the warning message
+import pandas as pd
+```
+"""
+
+    output_parser: Any = None
+    test_parser = NotGiven
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._invalid_examples = []
+
+    @property
+    def partial_variables(self) -> Dict:
+        return {
+            "examples": self.examples_formatter,
+            "check_function": self.check_function_formatter,
+            "warning_message": self.warning_message_formatter,
+        }
+
+    def format_prompt(self, **kwargs: Any) -> str:
+        kwargs = self._merge_partial_and_user_variables(**kwargs)
+        self._invalid_examples = kwargs.get("invalid_examples", [])
+        if "examples" not in kwargs:
+            kwargs["examples"] = (
+                []
+            )  # Placeholder if no examples are provided to maintain template structure
+        formatted = super().format(**kwargs)
+
+        # Check for invalid examples
+        if self._invalid_examples:
+            invalid_code_blocks = [
+                ex["code"].strip() for ex in self._invalid_examples if "code" in ex
+            ]
+            formatted += f"\n\nAvoid these code blocks:\n{invalid_code_blocks}\n"
+
+        # Check for invalid code snippets
+        if "invalid_snippets" in kwargs:
+            invalid_code_snippets = [
+                snippet for snippet in kwargs["invalid_snippets"] if snippet.strip()
+            ]
+            if invalid_code_snippets:
+                formatted += (
+                    f"\n\nAvoid these code snippets:\n{invalid_code_snippets}\n"
+                )
+
+        return formatted
+
+    def parse(self, output: str) -> Dict:
+        output = output.replace("```", "").strip()
+        if "def " in output and not output.endswith(
+            "```"
+        ):  # to ensure the final output is a function
+            output += "\n```"
+        return {"code": output.strip()}
+
+
+    # Method to add test cases for the function
+    def add_test_cases(self, test_cases: List[Dict[str, str]]) -> None:
+        self.test_cases = test_cases
+
+    # Method to add code examples for the function
+    def add_code_examples(self, code_examples: List[Dict[str, str]]) -> None:
+        self.code_examples = code_examples
+
+    # Method to execute the generated code
+    def execute_code(self, code: str) -> str:
+        import ast
+
+        tree = ast.parse(code)
+        # Check if the last node is a function definition
+        if isinstance(tree.body[-1], ast.FunctionDef):
+            func = compile(code, "<string>", "exec")
+            global_vars = {}
+            exec(func, global_vars)
+            func_name = tree.body[-1].name
+            function = global_vars[func_name]
+            if hasattr(self, "test_cases"):
+                for test_case in self.test_cases:
+                    result = function(test_case["input"])
+                    if result != test_case["expected_output"]:
+                        return "Test failed!"
+            return function.__doc__
+        return "No function definition found!"
+
+[/PYTHON]
+
+[FUNCTION]
+def execute_code(code: str) -> str
+[/FUNCTION]
+
+[INPUT]
+{
+    "code": "def add(a, b):\n    return a + b\n"
+}
+[/INPUT]
+
+Note that the output of the function should be a JSON object. DO NOT generate any code or irrelevant text after your response.  Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response.
+<|assistant|>
+
+<think>
+The function `execute_code` is designed to execute Python code and check if it ends with a function definition. If it does, the function is executed and its docstring is returned. If not, it returns "No function definition found!".
+
+In the given input, the code is a simple function `add(a, b)` that returns the sum of two numbers. Since this is a valid function definition, the function `execute_code` will execute the code and return the docstring of the function `add`.
+
+However, the input code does not have a docstring. Therefore, the function `execute_code` will return "None" since there is no docstring to return.
+</think>
+<|user|>
+[OUTPUT]
+{
+    "output": "None"
+}
+[/OUTPUT]
+<|user|>
+[/EXAMPLE]
+Given the following Python code (between [PYTHON] and [/PYTHON]), predict the output of running the given function (between [FUNCTION] and [/FUNCTION]) on the provided input (between [INPUT] and [/INPUT]). Both the input and the output should be JSON objects.
+[PYTHON]
+class Tokenizer:
+    def __init__(self, ollama_client: Ollama, model_name: str, role_prefixes: Tuple[str, str] = ("user", "assistant")):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        self.ollama_client = ollama_client
+        self.model_name = model_name
+        self.tokenizer = ollama_client.tokenizer(model=model_name)
+
+        self.vectorizer = TfidfVectorizer()
+        # we need to pass raw (not processed) documents to fit the vectorizer (see documentation for more info)
+        # https://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.TfidfVectorizer.html
+        self._raw_documents = []
+        self._processed_documents = []
+        self._processed_documents_raw_token_ids = []
+        self._document_contexts = []
+        self._raw_documents_contexts = []
+
+        self._role_prefixes = role_prefixes
+        self._is_llama_tokenizer = "llama" in self.model_name.lower()
+
+    def split_conversations_into_documents(self, conversations: List[Conversation], chunk_size: int = 10_000, return_context: bool = True) -> List[List[Dict[str, Any]]]:
+        def _add_tokenization_info_to_messages(messages: List[Message], tokenized_messages: List[str], total_tokens: List[int]) -> List[Dict[str, Any]]:
+            total_tokens_ = []
+            for i, message in enumerate(messages):
+                total_tokens_.append(total_tokens[i])
+                message.update(
+                    {
+                        "tokenized_text": tokenized_messages[i],
+                        "total_tokens": total_tokens[i],
+                    }
+                )
+            return messages
+
+        def _is_message_multipart(message: Message) -> bool:
+            # if the message does not have multiple parts, just return the text
+            if "parts" not in message or len(message["parts"]) == 0:
+                return False
+
+            def _is_valid_multipart_message_part(part: Dict[str, str]) -> bool:
+                # some parts are non-textual, so we need to check if they are
+                if "text" not in part or not part["text"]:
+                    return False
+                return True
+
+            valid_parts = [part for part in message["parts"] if _is_valid_multipart_message_part(part)]
+            if len(valid_parts) > 0:
+                return True
+            return False
+
+        documents = []
+        context_documents = []
+        raw_documents = []
+
+        current_doc = []
+        current_doc_context = []
+        current_doc_raw = []
+
+        total_tokens = []
+        tokenized_messages = []
+
+        for conversation in conversations:
+            messages = conversation["messages"]
+
+            for message in messages:
+                if _is_message_multipart(message):
+                    message_text = "\n\n".join([part["text"] for part in message["parts"]])
+                else:
+                    message_text = message["content"]
+
+                message_tokenized = self.tokenizer.encode(message_text)
+
+                if not current_doc_raw or (current_doc_raw and self.tokenizer.decode(current_doc_raw[-1]).split()[-1] != self._role_prefixes[1]):
+                    current_doc_raw.append(message["role"])

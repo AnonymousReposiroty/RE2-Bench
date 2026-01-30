@@ -1,0 +1,607 @@
+<THOUGHT>
+Let me trace through the execution of `fit_transform` with the given input.
+
+Input:
+- self.transformer_list = [["simpleimputer", "SimpleImputer(...)"], ["missingindicator", "MissingIndicator()"]]
+- self.n_jobs = null
+- self.transformer_weights = null
+- self.verbose = false
+- X = "[[nan, 1.], [1., nan]]"
+- y = null
+- params = {} (no kwargs)
+
+Execution flow:
+
+Line 54: `if _routing_enabled():`
+Looking at the code, `_routing_enabled()` is imported from sklearn.utils.metadata_routing. In standard sklearn, this is typically False by default unless explicitly enabled. I'll assume it returns False here.
+Branch at line 54: taken=N
+
+Line 56: `else:` (this is taken since _routing_enabled() is False)
+Line 57-64: We go through the transformer_list to build routed_params
+  - For each (name, obj) in self.transformer_list:
+    - First iteration: name="simpleimputer", obj="SimpleImputer(...)"
+      - Line 59: `if hasattr(obj, 'fit_transform'):`
+        - SimpleImputer is a sklearn transformer with fit_transform method, so this is True
+        - Branch at line 59: taken=Y
+        - Lines 60-61 are executed
+    - Second iteration: name="missingindicator", obj="MissingIndicator()"
+      - Line 59: `if hasattr(obj, 'fit_transform'):`
+        - MissingIndicator is a sklearn transformer with fit_transform method, so this is True
+        - Branch at line 59: taken=Y again (second time)
+
+Line 66: `results = self._parallel_func(X, y, _fit_transform_one, routed_params)`
+This calls _parallel_func which validates transformers, calls _iter(), and executes parallel jobs.
+
+In _validate_transformers (line 27-34):
+- Line 31: `if t in ('drop', 'passthrough'):`
+  - First transformer: "SimpleImputer(...)" is neither 'drop' nor 'passthrough'
+    - Branch at line 31: taken=N (first time)
+  - Second transformer: "MissingIndicator()" is neither 'drop' nor 'passthrough'
+    - Branch at line 31: taken=N (second time)
+
+In _validate_transformer_weights (line 36-42):
+- Line 37: `if not self.transformer_weights:`
+  - self.transformer_weights = null, so `not null` is True
+  - Branch at line 37: taken=Y
+  - Line 38 returns early
+
+In _iter (line 44-51):
+- Iterates through transformer_list
+- First iteration: name="simpleimputer", trans="SimpleImputer(...)"
+  - Line 47: `if trans == 'drop':`
+    - "SimpleImputer(...)" != 'drop'
+    - Branch at line 47: taken=N
+  - Line 49: `if trans == 'passthrough':`
+    - "SimpleImputer(...)" != 'passthrough'
+    - Branch at line 49: taken=N
+  - Line 51: yields this transformer
+- Second iteration: name="missingindicator", trans="MissingIndicator()"
+  - Line 47: `if trans == 'drop':`
+    - "MissingIndicator()" != 'drop'
+    - Branch at line 47: taken=N
+  - Line 49: `if trans == 'passthrough':`
+    - "MissingIndicator()" != 'passthrough'
+    - Branch at line 49: taken=N
+  - Line 51: yields this transformer
+
+Back to fit_transform:
+
+Line 67: `if not results:`
+- results should contain output from the parallel execution. Since we have 2 transformers that should work, results should be non-empty (not [])
+- Branch at line 67: taken=N
+
+Line 74 (_log_message): `if not self.verbose:`
+- self.verbose = false, so `not false` = True
+- Branch at line 74: taken=Y (called in _parallel_func for each transformer)
+- This is called twice (once for each transformer)
+
+Line 87 (_hstack): `if hasattr(X, 'shape') and len(X.shape) != 2:`
+- The outputs from the transformers should be numpy arrays or sparse matrices with shape attribute
+- SimpleImputer output: should have shape (2, 2) - 2 samples, 2 features
+- MissingIndicator output: should have shape (2, 2) - 2 samples, 2 features
+- Both have shape with len(X.shape) == 2, so the condition is False
+- Branch at line 87: taken=N (twice, once for each output)
+
+Summary of branches in order of execution:
+1. Line 54 `if _routing_enabled():` - N
+2. Line 59 `if hasattr(obj, 'fit_transform'):` - Y (first transformer)
+3. Line 31 `if t in ('drop', 'passthrough'):` - N (first transformer)
+4. Line 31 `if t in ('drop', 'passthrough'):` - N (second transformer)
+5. Line 37 `if not self.transformer_weights:` - Y
+6. Line 47 `if trans == 'drop':` - N (first in _iter)
+7. Line 49 `if trans == 'passthrough':` - N (first in _iter)
+8. Line 47 `if trans == 'drop':` - N (second in _iter)
+9. Line 49 `if trans == 'passthrough':` - N (second in _iter)
+10. Line 59 `if hasattr(obj, 'fit_transform'):` - Y (second transformer)
+11. Line 67 `if not results:` - N
+12. Line 74 `if not self.verbose:` - Y (called multiple times)
+13. Line 87 `if hasattr(X, 'shape') and len(X.shape) != 2:` - N (called multiple times)
+
+Actually, let me reconsider the order. The branches are marked in the code in this order:
+- Line 31 (in _validate_transformers)
+- Line 37 (in _validate_transformer_weights)
+- Line 47 (in _iter)
+- Line 49 (in _iter)
+- Line 54 (in fit_transform)
+- Line 56 (else for line 54)
+- Line 59 (in fit_transform loop)
+- Line 62 (else for line 59)
+- Line 67 (in fit_transform)
+- Line 74 (in _log_message)
+- Line 87 (in _hstack)
+
+The execution order matters for determining taken sequence. Let me trace again:
+
+fit_transform is called (line 53):
+1. Line 54: `if _routing_enabled():` - This is evaluated. Returns False. taken=N
+2. Goes to else block (line 56): This is the else, taken=Y
+3. Loop at line 58: `for name, obj in self.transformer_list:`
+   - First iteration with SimpleImputer:
+     - Line 59: `if hasattr(obj, 'fit_transform'):` - SimpleImputer has fit_transform. taken=Y
+   - Second iteration with MissingIndicator:
+     - Line 59: `if hasattr(obj, 'fit_transform'):` - MissingIndicator has fit_transform. taken=Y
+4. Line 66: results = self._parallel_func(...)
+   - This calls _validate_transformers() which processes transformers:
+     - For SimpleImputer: Line 31 `if t in ('drop', 'passthrough'):` taken=N
+     - For MissingIndicator: Line 31 `if t in ('drop', 'passthrough'):` taken=N
+   - Then _validate_transformer_weights():
+     - Line 37: `if not self.transformer_weights:` - transformer_weights is null. taken=Y
+   - Then _iter():
+     - First iteration:
+       - Line 47: `if trans == 'drop':` - taken=N
+       - Line 49: `if trans == 'passthrough':` - taken=N
+     - Second iteration:
+       - Line 47: `if trans == 'drop':` - taken=N
+       - Line 49: `if trans == 'passthrough':` - taken=N
+   - Also _log_message is called for each transformer:
+     - Line 74: `if not self.verbose:` - verbose is false. taken=Y (first call)
+     - Line 74: `if not self.verbose:` - verbose is false. taken=Y (second call)
+5. Line 67: `if not results:` - results should have values. taken=N
+6. Back to line 71: calls _hstack(Xs)
+   - For first transformer output (SimpleImputer):
+     - Line 87: `if hasattr(X, 'shape') and len(X.shape) != 2:` - should be (2,2). taken=N
+   - For second transformer output (MissingIndicator):
+     - Line 87: `if hasattr(X, 'shape') and len(X.shape) != 2:` - should be (2,2). taken=N
+
+Wait, I need to be more careful about the order. Let me list the exact line numbers with branches again:
+
+Line 31: in _validate_transformers
+Line 37: in _validate_transformer_weights  
+Line 47: in _iter
+Line 49: in _iter
+Line 54: in fit_transform
+Line 56: else in fit_transform
+Line 59: in fit_transform
+Line 62: else in fit_transform
+Line 67: in fit_transform
+Line 74: in _log_message
+Line 87: in _hstack
+
+The question asks for the branch annotations for each branch point. Looking at the code again:
+
+Line 31 appears in _validate_transformers, which is called from _parallel_func (line 80)
+Line 37 appears in _validate_transformer_weights, which is called from _parallel_func (line 81)
+Line 47, 49 appear in _iter, which is called from _parallel_func (line 82)
+Line 54, 56, 59, 62, 67 are in fit_transform
+Line 74 is in _log_message
+Line 87 is in _hstack
+
+The execution order in fit_transform would be:
+1. Line 54
+2. Line 56 (else, not a separate branch but part of if/else)
+3. Lines 59, 62 (in loop, twice for two transformers)
+4. Line 67
+5. Then _hstack which calls line 87
+6. _log_message is called in _parallel_func which happens when _parallel_func is called
+
+Actually, looking at line 56, it says `else: ## [BRANCH]taken=??[/BRANCH]` but this is the else clause itself, not a branch condition. Let me check the example again... The example doesn't mark else clauses, only if conditions. So line 56 should not have a branch marker. But it does in the code! Let me check...
+
+Yes, line 56 has `else: ## [BRANCH]taken=??[/BRANCH]`. This is unusual but I'll treat it as marking whether the else branch is taken (which is equivalent to the if condition being false).
+
+So the branches to mark are:
+- Line 31: if in _validate_transformers
+- Line 37: if in _validate_transformer_weights
+- Line 47: if in _iter
+- Line 49: if in _iter
+- Line 54: if in fit_transform
+- Line 56: else in fit_transform
+- Line 59: if in fit_transform loop
+- Line 62: else in fit_transform loop
+- Line 67: if in fit_transform
+- Line 74: if in _log_message
+- Line 87: if in _hstack
+
+Now let me trace the execution order carefully:
+
+1. fit_transform starts
+2. Line 54: `if _routing_enabled():` evaluates to False → taken=N
+3. Line 56: else block is taken (because line 54 was False) → taken=Y
+4. Line 58-64: Loop through transformer_list
+   - First iteration (SimpleImputer):
+     - Line 59: `if hasattr(obj, 'fit_transform'):` is True → taken=Y
+     - Lines 60-61 executed
+   - Second iteration (MissingIndicator):
+     - Line 59: `if hasattr(obj, 'fit_transform'):` is True → taken=Y
+     - Lines 60-61 executed
+5. Line 66: `results = self._parallel_func(X, y, _fit_transform_one, routed_params)`
+   
+   Inside _parallel_func:
+   - Line 79: self.transformer_list = list(self.transformer_list)
+   - Line 80: self._validate_transformers()
+     - Inside _validate_transformers:
+       - Loop through transformers:
+         - First (SimpleImputer): Line 31 `if t in ('drop', 'passthrough'):` → taken=N
+         - Second (MissingIndicator): Line 31 `if t in ('drop', 'passthrough'):` → taken=N
+   - Line 81: self._validate_transformer_weights()
+     - Inside _validate_transformer_weights:
+       - Line 37: `if not self.transformer_weights:` is True (transformer_weights is null) → taken=Y
+       - Line 38: return (early exit)
+   - Line 82: transformers = list(self._iter())
+     - Inside _iter:
+       - First iteration:
+         - Line 47: `if trans == 'drop':` is False → taken=N
+         - Line 49: `if trans == 'passthrough':` is False → taken=N
+         - Line 51: yield
+       - Second iteration:
+         - Line 47: `if trans == 'drop':` is False → taken=N
+         - Line 49: `if trans == 'passthrough':` is False → taken=N
+         - Line 51: yield
+   - Line 83: Parallel execution with delayed calls
+     - For each transformer, _log_message is called:
+       - First call: Line 74 `if not self.verbose:` is True (verbose=false) → taken=Y
+       - Second call: Line 74 `if not self.verbose:` is True (verbose=false) → taken=Y
+
+6. Back to fit_transform (line 67):
+   - Line 67: `if not results:` is False (results should contain transformed data) → taken=N
+   
+7. Line 71: `return self._hstack(Xs)`
+   - Inside _hstack (line 85-94):
+     - For each X in Xs:
+       - First output: Line 87 `if hasattr(X, 'shape') and len(X.shape) != 2:` is False (shape is (2,2)) → taken=N
+       - Second output: Line 87 `if hasattr(X, 'shape') and len(X.shape) != 2:` is False (shape is (2,2)) → taken=N
+
+So the order of branches taken:
+1. Line 54: N
+2. Line 56: Y
+3. Line 59: Y (first transformer)
+4. Line 59: Y (second transformer)
+5. Line 31: N (first transformer in _validate_transformers)
+6. Line 31: N (second transformer in _validate_transformers)
+7. Line 37: Y
+8. Line 47: N (first in _iter)
+9. Line 49: N (first in _iter)
+10. Line 47: N (second in _iter)
+11. Line 49: N (second in _iter)
+12. Line 74: Y (first call to _log_message)
+13. Line 74: Y (second call to _log_message)
+14. Line 67: N
+15. Line 87: N (first output in _hstack)
+16. Line 87: N (second output in _hstack)
+
+But wait, I need to check if line 62 (else) is ever taken. Line 62 is the else for line 59. Since both transformers have fit_transform, line 59 is always True, so line 62 is never taken.
+
+So line 62 should be empty list if not taken at all, or we need to check the code again...
+
+Actually, looking at the code structure:
+```python
+for name, obj in self.transformer_list:
+    if hasattr(obj, 'fit_transform'): ## [BRANCH]taken=??[/BRANCH]
+        routed_params[name] = Bunch(fit_transform={})
+        routed_params[name].fit_transform = params
+    else: ## [BRANCH]taken=??[/BRANCH]
+        routed_params[name] = Bunch(fit={})
+        routed_params[name] = Bunch(transform={})
+        routed_params[name].fit = params
+```
+
+The else clause at line 62 is part of the if-else at line 59. Since both transformers have fit_transform, line 59 is True for both, so line 62's else is never taken. So line 62 should be taken=[]? No, that doesn't make sense.
+
+Let me reconsider. The instruction says "For each time that branch point is encountered during execution". So if a branch is never encountered, what do we do? Looking at the example, it shows branches being taken or not taken during the execution. If we have 2 transformers and the if at line 59 is true both times, then line 59 would be ['Y', 'Y'].
+
+For line 62 (the else), if the if condition is true both times, the else is never executed. So line 62 would be taken=[]. But is that the right format?
+
+Actually, re-reading the instructions: "For each time that branch point is encountered during execution: Append 'Y' if that branch is taken. Append 'N' if that branch is not taken."
+
+So if a branch point is never encountered, we don't append anything to its list? Or the list remains empty? Let me check...
+
+Actually, I think the intent is that every branch point in the code will be annotated. If a branch is never taken, it would be taken=[] (empty list). But that seems odd. Let me think about the if-else structure.
+
+In Python, an if-else is a single control structure. When the if condition is true, the if branch is taken. When the if condition is false, the else branch is taken. So exactly one of them is taken each time the if-else is encountered.
+
+So at line 59-62, we have:
+```
+if hasattr(obj, 'fit_transform'): ## [BRANCH]taken=??[/BRANCH]
+    ...
+else: ## [BRANCH]taken=??[/BRANCH]
+    ...
+```
+
+In the loop iteration 1, the if is true, so line 59 is Y and line 62 is N.
+In the loop iteration 2, the if is true, so line 59 is Y and line 62 is N.
+
+So line 59: ['Y', 'Y']
+And line 62: ['N', 'N']
+
+Now let me compile the full list in order:
+
+1. Line 31 (in _validate_transformers, loop 1): N
+2. Line 31 (in _validate_transformers, loop 2): N
+3. Line 37 (in _validate_transformer_weights): Y
+4. Line 47 (in _iter, loop 1): N
+5. Line 49 (in _iter, loop 1): N
+6. Line 47 (in _iter, loop 2): N
+7. Line 49 (in _iter, loop 2): N
+8. Line 54 (in fit_transform): N
+9. Line 56 (in fit_transform): Y
+10. Line 59 (in fit_transform, loop 1): Y
+11. Line 62 (in fit_transform, loop 1): N
+12. Line 59 (in fit_transform, loop 2): Y
+13. Line 62 (in fit_transform, loop 2): N
+14. Line 67 (in fit_transform): N
+15. Line 74 (in _log_message, call 1): Y
+16. Line 74 (in _log_message, call 2): Y
+17. Line 87 (in _hstack, loop 1): N
+18. Line 87 (in _hstack, loop 2): N
+
+But I need to order these by the line number they appear in the code, not by execution order. Let me reorganize:
+
+Line 31: ['N', 'N']
+Line 37: ['Y']
+Line 47: ['N', 'N']
+Line 49: ['N', 'N']
+Line 54: ['N']
+Line 56: ['Y']
+Line 59: ['Y', 'Y']
+Line 62: ['N', 'N']
+Line 67: ['N']
+Line 74: ['Y', 'Y']
+Line 87: ['N', 'N']
+
+Hmm, but I'm still not 100% certain about the order. Let me think about whether the _log_message calls happen before or after the _hstack...
+
+In fit_transform, line 66 returns `self._parallel_func(...)`. This parallel function executes the transformers using the delayed calls, which include calls to _log_message. So _log_message is called during the parallel execution in line 66. Then after line 66 returns, line 67 checks if results is empty. After that, line 71 calls _hstack.
+
+So the execution order is:
+1. Lines 54-64 happen in fit_transform
+2. Line 66 calls _parallel_func, which internally calls _validate_transformers, _validate_transformer_weights, _iter, and then parallelizes the calls (which include _log_message and _fit_transform_one)
+3. Line 67 checks results
+4. Line 71 calls _hstack
+
+Given this, the branches would be encountered in this order:
+- Line 54
+- Line 56 (else block is taken)
+- Lines 59, 62 (in loop, 2 iterations)
+- Line 66 calls _parallel_func which encounters:
+  - Line 31 (in _validate_transformers, 2 iterations)
+  - Line 37 (in _validate_transformer_weights)
+  - Lines 47, 49 (in _iter, 2 iterations each)
+  - Line 74 (in _log_message, called in parallel, but let's say 2 times)
+- Line 67
+- Line 87 (in _hstack, 2 iterations)
+
+So the encountered order is:
+['N', 'Y', 'Y', 'N', 'Y', 'N', 'N', 'N', 'N', 'N', 'Y', 'Y', 'Y', 'N', 'N', 'N']
+
+But I need to group by line number:
+Line 31: First time in _validate_transformers loop 1 = N, Loop 2 = N → ['N', 'N']
+Line 37: In _validate_transformer_weights → ['Y']
+Line 47: In _iter loop 1 = N, Loop 2 = N → ['N', 'N']
+Line 49: In _iter loop 1 = N, Loop 2 = N → ['N', 'N']
+Line 54: In fit_transform → ['N']
+Line 56: In fit_transform else → ['Y']
+Line 59: In fit_transform loop 1 = Y, Loop 2 = Y → ['Y', 'Y']
+Line 62: In fit_transform loop 1 = N, Loop 2 = N → ['N', 'N']
+Line 67: In fit_transform → ['N']
+Line 74: In _log_message call 1 = Y, Call 2 = Y → ['Y', 'Y']
+Line 87: In _hstack loop 1 = N, Loop 2 = N → ['N', 'N']
+
+Wait, but line 56 is marked as `else: ## [BRANCH]taken=??[/BRANCH]`. The else clause is only "taken" once when the if at line 54 is false. It's not like a traditional branch that can be taken multiple times in a loop. The else block is executed once.
+
+Similarly, lines 59-62 are in a loop, so they are encountered twice. Line 59's if condition is true both times, and line 62's else is not taken both times.
+
+Let me reconsider the semantics. Looking at the code:
+```python
+if _routing_enabled(): ## [BRANCH]taken=??[/BRANCH]
+    routed_params = process_routing(...)
+else: ## [BRANCH]taken=??[/BRANCH]
+    routed_params = Bunch()
+    for name, obj in self.transformer_list:
+        if hasattr(obj, 'fit_transform'): ## [BRANCH]taken=??[/BRANCH]
+            ...
+        else: ## [BRANCH]taken=??[/BRANCH]
+            ...
+```
+
+The first if-else (lines 54-56) is encountered once: the if at line 54 is false, the else at line 56 is true.
+The second if-else (lines 59-62) is in a loop: it's encountered twice, each time the if at line 59 is true, the else at line 62 is false.
+
+So:
+- Line 54: [' N'] (single encounter, condition false)
+- Line 56: ['Y'] (else block is taken once)
+- Line 59: ['Y', 'Y'] (two encounters, condition true both times)
+- Line 62: ['N', 'N'] (else block not taken in either encounter)
+
+Similarly, for line 74 in _log_message:
+```python
+def _log_message(self, name, idx, total):
+    if not self.verbose: ## [BRANCH]taken=??[/BRANCH]
+        return None
+    return '(step %d of %d) Processing %s' % (idx, total, name)
+```
+
+This function is called in _parallel_func for each transformer (2 times). Each time, the if at line 74 is true (verbose=false). So:
+- Line 74: ['Y', 'Y']
+
+And for line 87 in _hstack:
+```python
+def _hstack(self, Xs):
+    for X, (name, _) in zip(Xs, self.transformer_list):
+        if hasattr(X, 'shape') and len(X.shape) != 2: ## [BRANCH]taken=??[/BRANCH]
+            ...
+```
+
+This loop is over 2 outputs (Xs has 2 elements). Each iteration, the if is false. So:
+- Line 87: ['N', 'N']
+
+OK so my analysis seems correct. But now I realize the annotations in the code might not be in execution order. Let me just list them as they appear in the code:
+
+Line 31: ['N', 'N']
+Line 37: ['Y']
+Line 47: ['N', 'N']
+Line 49: ['N', 'N']
+Line 54: ['N']
+Line 56: ['Y']
+Line 59: ['Y', 'Y']
+Line 62: ['N', 'N']
+Line 67: ['N']
+Line 74: ['Y', 'Y']
+Line 87: ['N', 'N']
+</THOUGHT>
+
+[THOUGHT]
+Let me trace through the execution of `fit_transform` with the given input.
+
+Given:
+- transformer_list: [["simpleimputer", "SimpleImputer(...)"], ["missingindicator", "MissingIndicator()"]]
+- transformer_weights: null
+- verbose: false
+- X: numpy array with shape (2, 2)
+- y: null
+- params: {} (empty)
+
+Execution trace:
+
+**fit_transform (line 53-71):**
+1. Line 54: `if _routing_enabled():` - sklearn's routing is typically disabled by default → taken=N
+2. Line 56: else block is executed → taken=Y
+3. Lines 58-64: Loop through transformer_list (2 iterations):
+   - First iteration (SimpleImputer):
+     - Line 59: `if hasattr(obj, 'fit_transform'):` - SimpleImputer has fit_transform → taken=Y
+     - Line 62: else not taken → taken=N
+   - Second iteration (MissingIndicator):
+     - Line 59: `if hasattr(obj, 'fit_transform'):` - MissingIndicator has fit_transform → taken=Y
+     - Line 62: else not taken → taken=N
+
+4. Line 66: `results = self._parallel_func(...)` calls _parallel_func, which executes:
+
+   **_parallel_func → _validate_transformers (line 27-34):**
+   Loop through transformers (2 iterations):
+   - First transformer:
+     - Line 31: `if t in ('drop', 'passthrough'):` - SimpleImputer is neither → taken=N
+   - Second transformer:
+     - Line 31: `if t in ('drop', 'passthrough'):` - MissingIndicator is neither → taken=N
+
+   **_validate_transformer_weights (line 36-42):**
+   - Line 37: `if not self.transformer_weights:` - transformer_weights is null, so not null = True → taken=Y
+   - Line 38: returns early
+
+   **_iter (line 44-51):**
+   Loop through transformer_list (2 iterations):
+   - First iteration:
+     - Line 47: `if trans == 'drop':` - SimpleImputer != 'drop' → taken=N
+     - Line 49: `if trans == 'passthrough':` - SimpleImputer != 'passthrough' → taken=N
+   - Second iteration:
+     - Line 47: `if trans == 'drop':` - MissingIndicator != 'drop' → taken=N
+     - Line 49: `if trans == 'passthrough':` - MissingIndicator != 'passthrough' → taken=N
+
+   **_log_message (line 73-76):**
+   Called twice (once for each transformer in parallel):
+   - First call:
+     - Line 74: `if not self.verbose:` - verbose=false, so not false = True → taken=Y
+   - Second call:
+     - Line 74: `if not self.verbose:` - verbose=false → taken=Y
+
+5. Line 67: `if not results:` - results contains transformed outputs, not empty → taken=N
+
+6. Line 71: calls _hstack(Xs)
+
+   **_hstack (line 85-94):**
+   Loop through outputs (2 iterations):
+   - First output (from SimpleImputer):
+     - Line 87: `if hasattr(X, 'shape') and len(X.shape) != 2:` - shape is (2,2) so len=2, condition false → taken=N
+   - Second output (from MissingIndicator):
+     - Line 87: `if hasattr(X, 'shape') and len(X.shape) != 2:` - shape is (2,2) so len=2, condition false → taken=N
+
+</THOUGHT>
+
+[ANSWER]
+1 import numpy as np
+2 from scipy import sparse
+3 from sklearn.base import TransformerMixin, _fit_context, clone
+4 from sklearn.preprocessing import FunctionTransformer
+5 from sklearn.utils import Bunch
+6 from sklearn.utils._set_output import _get_container_adapter, _safe_set_output
+7 from sklearn.utils.metadata_routing import (
+8     MetadataRouter,
+9     MethodMapping,
+10     _raise_for_params,
+11     _routing_enabled,
+12     get_routing_for_object,
+13     process_routing,
+14 )
+15 from sklearn.utils.metaestimators import _BaseComposition, available_if
+16 from sklearn.utils.parallel import Parallel, delayed
+17 
+18 class FeatureUnion(TransformerMixin, _BaseComposition):
+19 
+20     def __init__(self, transformer_list, *, n_jobs=None, transformer_weights=None, verbose=False, verbose_feature_names_out=True):
+21         self.transformer_list = transformer_list
+22         self.n_jobs = n_jobs
+23         self.transformer_weights = transformer_weights
+24         self.verbose = verbose
+25         self.verbose_feature_names_out = verbose_feature_names_out
+26 
+27     def _validate_transformers(self):
+28         names, transformers = zip(*self.transformer_list)
+29         self._validate_names(names)
+30         for t in transformers:
+31             if t in ('drop', 'passthrough'): ## [BRANCH]taken=['N', 'N'][/BRANCH]
+32                 continue
+33             if not (hasattr(t, 'fit') or hasattr(t, 'fit_transform')) or not hasattr(t, 'transform'):
+34                 raise TypeError("All estimators should implement fit and transform. '%s' (type %s) doesn't" % (t, type(t)))
+35 
+36     def _validate_transformer_weights(self):
+37         if not self.transformer_weights: ## [BRANCH]taken=['Y'][/BRANCH]
+38             return
+39         transformer_names = set((name for name, _ in self.transformer_list))
+40         for name in self.transformer_weights:
+41             if name not in transformer_names:
+42                 raise ValueError(f'Attempting to weight transformer "{name}", but it is not present in transformer_list.')
+43 
+44     def _iter(self):
+45         get_weight = (self.transformer_weights or {}).get
+46         for name, trans in self.transformer_list:
+47             if trans == 'drop': ## [BRANCH]taken=['N', 'N'][/BRANCH]
+48                 continue
+49             if trans == 'passthrough': ## [BRANCH]taken=['N', 'N'][/BRANCH]
+50                 trans = FunctionTransformer(feature_names_out='one-to-one')
+51             yield (name, trans, get_weight(name))
+52 
+53     def fit_transform(self, X, y=None, **params):
+54         if _routing_enabled(): ## [BRANCH]taken=['N'][/BRANCH]
+55             routed_params = process_routing(self, 'fit_transform', **params)
+56         else: ## [BRANCH]taken=['Y'][/BRANCH]
+57             routed_params = Bunch()
+58             for name, obj in self.transformer_list:
+59                 if hasattr(obj, 'fit_transform'): ## [BRANCH]taken=['Y', 'Y'][/BRANCH]
+60                     routed_params[name] = Bunch(fit_transform={})
+61                     routed_params[name].fit_transform = params
+62                 else: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+63                     routed_params[name] = Bunch(fit={})
+64                     routed_params[name] = Bunch(transform={})
+65                     routed_params[name].fit = params
+66         results = self._parallel_func(X, y, _fit_transform_one, routed_params)
+67         if not results: ## [BRANCH]taken=['N'][/BRANCH]
+68             return np.zeros((X.shape[0], 0))
+69         Xs, transformers = zip(*results)
+70         self._update_transformer_list(transformers)
+71         return self._hstack(Xs)
+72 
+73     def _log_message(self, name, idx, total):
+74         if not self.verbose: ## [BRANCH]taken=['Y', 'Y'][/BRANCH]
+75             return None
+76         return '(step %d of %d) Processing %s' % (idx, total, name)
+77 
+78     def _parallel_func(self, X, y, func, routed_params):
+79         self.transformer_list = list(self.transformer_list)
+80         self._validate_transformers()
+81         self._validate_transformer_weights()
+82         transformers = list(self._iter())
+83         return Parallel(n_jobs=self.n_jobs)((delayed(func)(transformer, X, y, weight, message_clsname='FeatureUnion', message=self._log_message(name, idx, len(transformers)), params=routed_params[name]) for idx, (name, transformer, weight) in enumerate(transformers, 1)))
+84 
+85     def _hstack(self, Xs):
+86         for X, (name, _) in zip(Xs, self.transformer_list):
+87             if hasattr(X, 'shape') and len(X.shape) != 2: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+88                 raise ValueError(f"Transformer '{name}' returned an array or dataframe with {len(X.shape)} dimensions, but expected 2 dimensions (n_samples, n_features).")
+89         adapter = _get_container_adapter('transform', self)
+90         if adapter and all((adapter.is_supported_container(X) for X in Xs)):
+91             return adapter.hstack(Xs)
+92         if any((sparse.issparse(f) for f in Xs)):
+93             return sparse.hstack(Xs).tocsr()
+94         return np.hstack(Xs)
+95 
+96     def _update_transformer_list(self, transformers):
+97         transformers = iter(transformers)
+98         self.transformer_list[:] = [(name, old if old == 'drop' else next(transformers)) for name, old in self.transformer_list]
+99 
+[/ANSWER]

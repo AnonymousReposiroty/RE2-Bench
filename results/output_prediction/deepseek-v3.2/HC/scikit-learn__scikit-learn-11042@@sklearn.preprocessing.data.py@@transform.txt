@@ -1,0 +1,147 @@
+Let's go through the function step by step.
+
+We have an instance of `OneHotEncoder` with attributes:  
+- `n_values = "auto"`  
+- `categorical_features = null`  
+- `dtype` is a custom object (probably representing `np.float64`, but here in the input it's shown as a dictionary of methods)  
+- `sparse = True`  
+- `handle_unknown = "error"`  
+- `n_values_ = [4 3 2]` (means feature 0 has 4 categories (0,1,2,3), feature 1 has 3 (0,1,2), feature 2 has 2 (0,1))  
+- `feature_indices_ = [0 4 7 9]` (cumulative sum of n_values_: 0, 0+4=4, 4+3=7, 7+2=9)  
+- `active_features_ = [0 3 5 6 8]` (only these columns were kept after fit, meaning only these categories existed in the training data)  
+
+Now the `transform` method is called with `X = [[1, 1, 1]]`.  
+
+First, in `transform`, it calls `_transform_selected`. But from the example, `categorical_features = null`, which is effectively 'all'. And `_transform_selected` will pass the data to `_transform` with appropriate selection. Since all features are categorical, `_transform` will be called on all of `X`.
+
+Inside `_transform`:
+
+1. `X = check_array(X, dtype=np.int)`:  
+   Input `X = [[1, 1, 1]]` will be converted to a 2D int array, shape (1, 3).  
+   `check_array` ensures it's non-negative integers and shape matches `indices.shape[0] - 1 = 3`.
+
+2. `n_samples, n_features = 1, 3`.
+
+3. `indices = [0, 4, 7, 9]`.
+
+4. Check `n_features != indices.shape[0] - 1`? `3 != 3`? False, so okay.
+
+5. `mask = (X < self.n_values_).ravel()`:  
+   `n_values_ = [4, 3, 2]`.  
+   `X = [1, 1, 1]`.  
+   Compare: `1 < 4` → True, `1 < 3` → True, `1 < 2` → True.  
+   So `mask = [True, True, True]`.
+
+6. Since `mask` all True, `~mask` is all False, so no unknown categories issue.
+
+7. `column_indices = (X + indices[:-1]).ravel()[mask]`:  
+   `indices[:-1] = [0, 4, 7]`.  
+   `X + indices[:-1] = [1+0, 1+4, 1+7] = [1, 5, 8]`.  
+   `.ravel()` → `[1, 5, 8]`.  
+   `[mask]` → all True, so `column_indices = [1, 5, 8]`.
+
+8. `row_indices = np.repeat(np.arange(n_samples, dtype=np.int32), n_features)[mask]`:  
+   `np.arange(1) = [0]`, repeat 3 times → `[0, 0, 0]`.  
+   `[mask]` → all True, so `row_indices = [0, 0, 0]`.
+
+9. `data = np.ones(np.sum(mask))`: `np.sum([True,True,True]) = 3`, so `data = [1, 1, 1]`.
+
+10. `out = sparse.coo_matrix((data, (row_indices, column_indices)), shape=(n_samples, indices[-1]), dtype=self.dtype).tocsr()`:  
+    `indices[-1] = 9`. Shape = (1, 9).  
+    So `coo_matrix` with:  
+    row: [0,0,0], col: [1,5,8], data: [1,1,1].  
+
+    Then convert to CSR.
+
+11. Since `n_values = "auto"`, we have `active_features_` defined:  
+    `active_features_ = [0, 3, 5, 6, 8]`.  
+    We need to slice `out` to keep only these columns:  
+    `out = out[:, self.active_features_]`.  
+
+    Our current column indices: 1, 5, 8.  
+    Check which are in `active_features_`:  
+    1 → not in `[0,3,5,6,8]`? Actually `[0,3,5,6,8]` doesn't have 1, so column 1 is not active.  
+    5 → yes,  
+    8 → yes.  
+
+    Wait, but column 1 was in the original indices, but after fit we removed columns without any training examples. So column 1 corresponds to category 1 of feature 0 — but maybe it didn't appear in training? Let's verify:  
+
+    `active_features_` given: [0, 3, 5, 6, 8]  
+    We need to map these back to original feature/category:  
+    `feature_indices_ = [0,4,7,9]`.  
+    So original columns 0..8:  
+    cols 0-3: feature 0 categories 0,1,2,3  
+    cols 4-6: feature 1 categories 0,1,2  
+    cols 7-8: feature 2 categories 0,1  
+
+    `active_features_`:  
+    0 → feature 0, category 0  
+    3 → feature 0, category 3  
+    5 → feature 1, category 1 (col index = 4 + 1)  
+    6 → feature 1, category 2  
+    8 → feature 2, category 1 (col index = 7 + 1)  
+
+    So indeed, category 1 of feature 0 (col index 1) is **not** active. But our `X` has feature 0 value 1, which is not in active features. That means this is an unseen category for feature 0?  
+
+    Actually, `mask` only checks if value is less than n_values, so 1 < 4 is true, so it passes mask. But in `n_values="auto"` case, after fitting, we only keep columns with at least one training example. So in training, feature 0 never took value 1, so it's not in `active_features_`. Therefore, when we slice `out[:, active_features_]`, column index 1 will be dropped.  
+
+    So in final CSR matrix, column indices are remapped:  
+    We keep only columns [0,3,5,6,8] from the original 0..8 matrix.  
+    Our original columns 1,5,8 → after slicing:  
+    col 1 → not kept → discarded (so no entry for feature 0 category 1)  
+    col 5 → index in `active_features_`? 5 is 3rd in active_features_ (0-indexed: active_features_[0]=0, [1]=3, [2]=5, [3]=6, [4]=8) → new col index = 2  
+    col 8 → in active_features_[4] → new col index = 4  
+
+    Row indices still [0,0] for these two kept entries.  
+
+    So final shape: (1, 5).  
+
+    Data: two 1’s.  
+
+    Let’s construct CSR:
+
+    Row 0: columns 2 and 4 have 1’s.  
+    So `indptr = [0, 2]` (start of row 0 = 0, start of row 1 = 2).  
+    `indices = [2, 4]`.  
+    `data = [1, 1]`.  
+
+    Shape = (1, 5).
+
+Now the output structure asks for:  
+- `_shape`: tuple of shape  
+- `maxprint`: likely from CSR representation? Maybe `maxprint` is `data.size`?  
+  Wait, possibly they want `maxprint` as in `scipy.sparse.csr_matrix` attribute? Actually `maxprint` is not a standard CSR attribute. Maybe it’s `nnz` (number of nonzeros).  
+  Let’s check: In scipy sparse matrices, `nnz` is number of stored values. `maxprint` might be something else. Possibly `maxprint` is the length of data array? Actually `maxprint` in CSR printing context? Not sure.  
+
+  Looking back at example: they gave `maxprint` as maybe the number of elements? But in the example they didn’t ask for `maxprint`. Let’s think: maybe `maxprint` refers to `maxprint` attribute of np.array? But this is sparse.  
+
+  Alternatively, maybe `maxprint` in structure is `indices` size? Let’s guess: possibly `maxprint` is `data.size` (number of non-zero entries).  
+
+  Given the structure keys: `_shape`, `maxprint`, `indices`, `indptr`, `data` — these match CSR internal representation:  
+  `_shape` = shape tuple  
+  `maxprint` = maybe `nnz`? Or maybe `maxprint` is `data.size`? Could be `nnz`. Let’s assume `maxprint` = `nnz` = 2.  
+
+  `indices` = column indices array as list  
+  `indptr` = row pointer array as list  
+  `data` = data array as list  
+
+So:  
+`_shape = (1, 5)`  
+`maxprint = 2`  
+`indices = [2, 4]`  
+`indptr = [0, 2]`  
+`data = [1, 1]`  
+
+Thus:
+
+[OUTPUT]
+```
+{
+    "_shape": [1, 5],
+    "maxprint": 2,
+    "indices": [2, 4],
+    "indptr": [0, 2],
+    "data": [1.0, 1.0]
+}
+```
+[/OUTPUT]

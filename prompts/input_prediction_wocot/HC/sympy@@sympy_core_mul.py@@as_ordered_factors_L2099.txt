@@ -1,0 +1,331 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from typing import TYPE_CHECKING, ClassVar, overload, Literal
+from .singleton import S
+from .operations import AssocOp, AssocOpDispatcher
+from .logic import fuzzy_not, _fuzzy_group
+from .expr import Expr
+from .kind import KindDispatcher
+
+class Mul(Expr, AssocOp):
+    __slots__ = ()
+    is_Mul = True
+    _args_type = Expr
+    _kind_dispatcher = KindDispatcher('Mul_kind_dispatcher', commutative=True)
+    identity: ClassVar[Expr]
+    if TYPE_CHECKING:
+
+        def __new__(cls, *args: Expr | complex, evaluate: bool=True) -> Expr:
+            ...
+
+        @property
+        def args(self) -> tuple[Expr, ...]:
+            ...
+    _eval_is_commutative = lambda self: _fuzzy_group((a.is_commutative for a in self.args))
+
+    def as_ordered_factors(self, order=None):
+        cpart, ncpart = self.args_cnc()
+        cpart.sort(key=lambda expr: expr.sort_key(order=order))
+        return cpart + ncpart
+
+    def args_cnc(self, cset=False, warn=True, split_1=True):
+        args = list(Mul.make_args(self))
+        for i, mi in enumerate(args):
+            if not mi.is_commutative:
+                c = args[:i]
+                nc = args[i:]
+                break
+        else:
+            c = args
+            nc = []
+        if c and split_1 and (c[0].is_Number and c[0].is_extended_negative and (c[0] is not S.NegativeOne)):
+            c[:1] = [S.NegativeOne, -c[0]]
+        if cset:
+            clen = len(c)
+            c = set(c)
+            if clen and warn and (len(c) != clen):
+                raise ValueError('repeated commutative arguments: %s' % [ci for ci in c if list(self.args).count(ci) > 1])
+        return [c, nc]
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.decorators._func
+
+@wraps(func)
+def _func(self, other):
+    # XXX: The check for _op_priority here should be removed. It is
+    # needed to stop mutable matrices from being sympified to
+    # immutable matrices which breaks things in quantum...
+    if not hasattr(other, '_op_priority'):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return retval
+    if not isinstance(other, expectedcls):
+        return retval
+    return func(self, other)
+
+sympy.sympy.core.expr.args_cnc
+
+def args_cnc(self, cset=False, warn=True, split_1=True):
+    """Return [commutative factors, non-commutative factors] of self.
+
+    Explanation
+    ===========
+
+    self is treated as a Mul and the ordering of the factors is maintained.
+    If ``cset`` is True the commutative factors will be returned in a set.
+    If there were repeated factors (as may happen with an unevaluated Mul)
+    then an error will be raised unless it is explicitly suppressed by
+    setting ``warn`` to False.
+
+    Note: -1 is always separated from a Number unless split_1 is False.
+
+    Examples
+    ========
+
+    >>> from sympy import symbols, oo
+    >>> A, B = symbols('A B', commutative=0)
+    >>> x, y = symbols('x y')
+    >>> (-2*x*y).args_cnc()
+    [[-1, 2, x, y], []]
+    >>> (-2.5*x).args_cnc()
+    [[-1, 2.5, x], []]
+    >>> (-2*x*A*B*y).args_cnc()
+    [[-1, 2, x, y], [A, B]]
+    >>> (-2*x*A*B*y).args_cnc(split_1=False)
+    [[-2, x, y], [A, B]]
+    >>> (-2*x*y).args_cnc(cset=True)
+    [{-1, 2, x, y}, []]
+
+    The arg is always treated as a Mul:
+
+    >>> (-2 + x + A).args_cnc()
+    [[], [x - 2 + A]]
+    >>> (-oo).args_cnc() # -oo is a singleton
+    [[-1, oo], []]
+    """
+    args = list(Mul.make_args(self))
+
+    for i, mi in enumerate(args):
+        if not mi.is_commutative:
+            c = args[:i]
+            nc = args[i:]
+            break
+    else:
+        c = args
+        nc = []
+
+    if c and split_1 and (
+        c[0].is_Number and
+        c[0].is_extended_negative and
+            c[0] is not S.NegativeOne):
+        c[:1] = [S.NegativeOne, -c[0]]
+
+    if cset:
+        clen = len(c)
+        c = set(c)
+        if clen and warn and len(c) != clen:
+            raise ValueError('repeated commutative arguments: %s' %
+                             [ci for ci in c if list(self.args).count(ci) > 1])
+    return [c, nc]
+
+sympy.sympy.core.mul.<lambda>
+
+cpart.sort(key=lambda expr: expr.sort_key(order=order))
+
+
+sympy.sympy.core.numbers.__eq__
+
+def __eq__(self, other):
+    return other is S.NegativeInfinity or other == float('-inf')
+
+sympy.sympy.core.numbers.__lt__
+
+def __lt__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p < other.p)
+    return Rational.__lt__(self, other)
+
+sympy.sympy.core.numbers.__gt__
+
+def __gt__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p > other.p)
+    return Rational.__gt__(self, other)
+
+sympy.sympy.logic.boolalg.__bool__
+
+def __bool__(self):
+    return False
+
+sympy.sympy.matrices.expressions.matmul.args_cnc
+
+def args_cnc(self, cset=False, warn=True, **kwargs):
+    coeff_c = [x for x in self.args if x.is_commutative]
+    coeff_nc = [x for x in self.args if not x.is_commutative]
+    if cset:
+        clen = len(coeff_c)
+        coeff_c = set(coeff_c)
+        if clen and warn and len(coeff_c) != clen:
+            raise ValueError('repeated commutative arguments: %s' %
+                             [ci for ci in coeff_c if list(self.args).count(ci) > 1])
+    return [coeff_c, coeff_nc]
+
+
+[/PYTHON]
+What will be the input of `as_ordered_factors`, given the following output:
+[OUTPUT]
+```
+{
+    "output": [
+        "w",
+        "z"
+    ]
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": XXX,
+    "args": {
+        "order": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

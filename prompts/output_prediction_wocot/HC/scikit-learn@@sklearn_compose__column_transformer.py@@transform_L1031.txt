@@ -1,0 +1,1054 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from collections import Counter
+from functools import partial
+from itertools import chain
+from numbers import Integral, Real
+import numpy as np
+from scipy import sparse
+from sklearn.base import TransformerMixin, _fit_context, clone
+from sklearn.pipeline import _fit_transform_one, _name_estimators, _transform_one
+from sklearn.preprocessing import FunctionTransformer
+from sklearn.utils import Bunch
+from sklearn.utils._indexing import _determine_key_type, _get_column_indices, _safe_indexing
+from sklearn.utils._metadata_requests import METHODS
+from sklearn.utils._param_validation import HasMethods, Hidden, Interval, StrOptions
+from sklearn.utils._set_output import _get_container_adapter, _get_output_config, _safe_set_output
+from sklearn.utils.metadata_routing import MetadataRouter, MethodMapping, _raise_for_params, _routing_enabled, process_routing
+from sklearn.utils.metaestimators import _BaseComposition
+from sklearn.utils.parallel import Parallel, delayed
+from sklearn.utils.validation import _check_feature_names_in, _check_n_features, _get_feature_names, _is_pandas_df, _num_samples, check_array, check_is_fitted, validate_data
+import pandas as pd
+
+class ColumnTransformer(TransformerMixin, _BaseComposition):
+    _parameter_constraints: dict = {'transformers': [list, Hidden(tuple)], 'remainder': [StrOptions({'drop', 'passthrough'}), HasMethods(['fit', 'transform']), HasMethods(['fit_transform', 'transform'])], 'sparse_threshold': [Interval(Real, 0, 1, closed='both')], 'n_jobs': [Integral, None], 'transformer_weights': [dict, None], 'verbose': ['verbose'], 'verbose_feature_names_out': ['boolean', str, callable], 'force_int_remainder_cols': ['boolean', Hidden(StrOptions({'deprecated'}))]}
+
+    def __init__(self, transformers, *, remainder='drop', sparse_threshold=0.3, n_jobs=None, transformer_weights=None, verbose=False, verbose_feature_names_out=True, force_int_remainder_cols='deprecated'):
+        self.transformers = transformers
+        self.remainder = remainder
+        self.sparse_threshold = sparse_threshold
+        self.n_jobs = n_jobs
+        self.transformer_weights = transformer_weights
+        self.verbose = verbose
+        self.verbose_feature_names_out = verbose_feature_names_out
+        self.force_int_remainder_cols = force_int_remainder_cols
+
+    def _iter(self, fitted, column_as_labels, skip_drop, skip_empty_columns):
+        if fitted:
+            transformers = self.transformers_
+        else:
+            transformers = [(name, trans, column) for (name, trans, _), column in zip(self.transformers, self._columns)]
+            if self._remainder[2]:
+                transformers = chain(transformers, [self._remainder])
+        get_weight = (self.transformer_weights or {}).get
+        for name, trans, columns in transformers:
+            if skip_drop and trans == 'drop':
+                continue
+            if skip_empty_columns and _is_empty_column_selection(columns):
+                continue
+            if column_as_labels:
+                columns_is_scalar = np.isscalar(columns)
+                indices = self._transformer_to_input_indices[name]
+                columns = self.feature_names_in_[indices]
+                if columns_is_scalar:
+                    columns = columns[0]
+            yield (name, trans, columns, get_weight(name))
+
+    @property
+    def named_transformers_(self):
+        return Bunch(**{name: trans for name, trans, _ in self.transformers_})
+
+    def _add_prefix_for_feature_names_out(self, transformer_with_feature_names_out):
+        feature_names_out_callable = None
+        if callable(self.verbose_feature_names_out):
+            feature_names_out_callable = self.verbose_feature_names_out
+        elif isinstance(self.verbose_feature_names_out, str):
+            feature_names_out_callable = partial(_feature_names_out_with_str_format, str_format=self.verbose_feature_names_out)
+        elif self.verbose_feature_names_out is True:
+            feature_names_out_callable = partial(_feature_names_out_with_str_format, str_format='{transformer_name}__{feature_name}')
+        if feature_names_out_callable is not None:
+            names = list(chain.from_iterable(((feature_names_out_callable(name, i) for i in feature_names_out) for name, feature_names_out in transformer_with_feature_names_out)))
+            return np.asarray(names, dtype=object)
+        feature_names_count = Counter(chain.from_iterable((s for _, s in transformer_with_feature_names_out)))
+        top_6_overlap = [name for name, count in feature_names_count.most_common(6) if count > 1]
+        top_6_overlap.sort()
+        if top_6_overlap:
+            if len(top_6_overlap) == 6:
+                names_repr = str(top_6_overlap[:5])[:-1] + ', ...]'
+            else:
+                names_repr = str(top_6_overlap)
+            raise ValueError(f'Output feature names: {names_repr} are not unique. Please set verbose_feature_names_out=True to add prefixes to feature names')
+        return np.concatenate([name for _, name in transformer_with_feature_names_out])
+
+    def _validate_output(self, result):
+        names = [name for name, _, _, _ in self._iter(fitted=True, column_as_labels=False, skip_drop=True, skip_empty_columns=True)]
+        for Xs, name in zip(result, names):
+            if not getattr(Xs, 'ndim', 0) == 2 and (not hasattr(Xs, '__dataframe__')):
+                raise ValueError("The output of the '{0}' transformer should be 2D (numpy array, scipy sparse array, dataframe).".format(name))
+        if _get_output_config('transform', self)['dense'] == 'pandas':
+            return
+        try:
+            import pandas as pd
+        except ImportError:
+            return
+        for Xs, name in zip(result, names):
+            if not _is_pandas_df(Xs):
+                continue
+            for col_name, dtype in Xs.dtypes.to_dict().items():
+                if getattr(dtype, 'na_value', None) is not pd.NA:
+                    continue
+                if pd.NA not in Xs[col_name].values:
+                    continue
+                class_name = self.__class__.__name__
+                raise ValueError(f"The output of the '{name}' transformer for column '{col_name}' has dtype {dtype} and uses pandas.NA to represent null values. Storing this output in a numpy array can cause errors in downstream scikit-learn estimators, and inefficiencies. To avoid this problem you can (i) store the output in a pandas DataFrame by using {class_name}.set_output(transform='pandas') or (ii) modify the input data or the '{name}' transformer to avoid the presence of pandas.NA (for example by using pandas.DataFrame.astype).")
+
+    def _log_message(self, name, idx, total):
+        if not self.verbose:
+            return None
+        return '(%d of %d) Processing %s' % (idx, total, name)
+
+    def _call_func_on_transformers(self, X, y, func, column_as_labels, routed_params):
+        if func is _fit_transform_one:
+            fitted = False
+        else:
+            fitted = True
+        transformers = list(self._iter(fitted=fitted, column_as_labels=column_as_labels, skip_drop=True, skip_empty_columns=True))
+        try:
+            jobs = []
+            for idx, (name, trans, columns, weight) in enumerate(transformers, start=1):
+                if func is _fit_transform_one:
+                    if trans == 'passthrough':
+                        output_config = _get_output_config('transform', self)
+                        trans = FunctionTransformer(accept_sparse=True, check_inverse=False, feature_names_out='one-to-one').set_output(transform=output_config['dense'])
+                    extra_args = dict(message_clsname='ColumnTransformer', message=self._log_message(name, idx, len(transformers)))
+                else:
+                    extra_args = {}
+                jobs.append(delayed(func)(transformer=clone(trans) if not fitted else trans, X=_safe_indexing(X, columns, axis=1), y=y, weight=weight, **extra_args, params=routed_params[name]))
+            return Parallel(n_jobs=self.n_jobs)(jobs)
+        except ValueError as e:
+            if 'Expected 2D array, got 1D array instead' in str(e):
+                raise ValueError(_ERR_MSG_1DCOLUMN) from e
+            else:
+                raise
+
+    def transform(self, X, **params):
+        _raise_for_params(params, self, 'transform')
+        check_is_fitted(self)
+        X = _check_X(X)
+        fit_dataframe_and_transform_dataframe = hasattr(self, 'feature_names_in_') and (_is_pandas_df(X) or hasattr(X, '__dataframe__'))
+        n_samples = _num_samples(X)
+        column_names = _get_feature_names(X)
+        if fit_dataframe_and_transform_dataframe:
+            named_transformers = self.named_transformers_
+            non_dropped_indices = [ind for name, ind in self._transformer_to_input_indices.items() if name in named_transformers and named_transformers[name] != 'drop']
+            all_indices = set(chain(*non_dropped_indices))
+            all_names = set((self.feature_names_in_[ind] for ind in all_indices))
+            diff = all_names - set(column_names)
+            if diff:
+                raise ValueError(f'columns are missing: {diff}')
+        else:
+            _check_n_features(self, X, reset=False)
+        if _routing_enabled():
+            routed_params = process_routing(self, 'transform', **params)
+        else:
+            routed_params = self._get_empty_routing()
+        Xs = self._call_func_on_transformers(X, None, _transform_one, column_as_labels=fit_dataframe_and_transform_dataframe, routed_params=routed_params)
+        self._validate_output(Xs)
+        if not Xs:
+            return np.zeros((n_samples, 0))
+        return self._hstack(list(Xs), n_samples=n_samples)
+
+    def _hstack(self, Xs, *, n_samples):
+        if self.sparse_output_:
+            try:
+                converted_Xs = [check_array(X, accept_sparse=True, ensure_all_finite=False) for X in Xs]
+            except ValueError as e:
+                raise ValueError('For a sparse output, all columns should be a numeric or convertible to a numeric.') from e
+            return sparse.hstack(converted_Xs).tocsr()
+        else:
+            Xs = [f.toarray() if sparse.issparse(f) else f for f in Xs]
+            adapter = _get_container_adapter('transform', self)
+            if adapter and all((adapter.is_supported_container(X) for X in Xs)):
+                transformer_names = [t[0] for t in self._iter(fitted=True, column_as_labels=False, skip_drop=True, skip_empty_columns=True)]
+                feature_names_outs = [X.columns for X in Xs if X.shape[1] != 0]
+                if self.verbose_feature_names_out:
+                    feature_names_outs = self._add_prefix_for_feature_names_out(list(zip(transformer_names, feature_names_outs)))
+                else:
+                    feature_names_outs = list(chain.from_iterable(feature_names_outs))
+                    feature_names_count = Counter(feature_names_outs)
+                    if any((count > 1 for count in feature_names_count.values())):
+                        duplicated_feature_names = sorted((name for name, count in feature_names_count.items() if count > 1))
+                        err_msg = f'Duplicated feature names found before concatenating the outputs of the transformers: {duplicated_feature_names}.\n'
+                        for transformer_name, X in zip(transformer_names, Xs):
+                            if X.shape[1] == 0:
+                                continue
+                            dup_cols_in_transformer = sorted(set(X.columns).intersection(duplicated_feature_names))
+                            if len(dup_cols_in_transformer):
+                                err_msg += f'Transformer {transformer_name} has conflicting columns names: {dup_cols_in_transformer}.\n'
+                        raise ValueError(err_msg + 'Either make sure that the transformers named above do not generate columns with conflicting names or set verbose_feature_names_out=True to automatically prefix to the output feature names with the name of the transformer to prevent any conflicting names.')
+                names_idx = 0
+                for X in Xs:
+                    if X.shape[1] == 0:
+                        continue
+                    names_out = feature_names_outs[names_idx:names_idx + X.shape[1]]
+                    adapter.rename_columns(X, names_out)
+                    names_idx += X.shape[1]
+                output = adapter.hstack(Xs)
+                output_samples = output.shape[0]
+                if output_samples != n_samples:
+                    raise ValueError("Concatenating DataFrames from the transformer's output lead to an inconsistent number of samples. The output may have Pandas Indexes that do not match, or that transformers are returning number of samples which are not the same as the number input samples.")
+                return output
+            return np.hstack(Xs)
+
+    def _get_empty_routing(self):
+        return Bunch(**{name: Bunch(**{method: {} for method in METHODS}) for name, step, _, _ in self._iter(fitted=False, column_as_labels=False, skip_drop=True, skip_empty_columns=True)})
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.compose._column_transformer._hstack
+
+def _hstack(self, Xs, *, n_samples):
+    """Stacks Xs horizontally.
+
+    This allows subclasses to control the stacking behavior, while reusing
+    everything else from ColumnTransformer.
+
+    Parameters
+    ----------
+    Xs : list of {array-like, sparse matrix, dataframe}
+        The container to concatenate.
+    n_samples : int
+        The number of samples in the input data to checking the transformation
+        consistency.
+    """
+    if self.sparse_output_:
+        try:
+            # since all columns should be numeric before stacking them
+            # in a sparse matrix, `check_array` is used for the
+            # dtype conversion if necessary.
+            converted_Xs = [
+                check_array(X, accept_sparse=True, ensure_all_finite=False)
+                for X in Xs
+            ]
+        except ValueError as e:
+            raise ValueError(
+                "For a sparse output, all columns should "
+                "be a numeric or convertible to a numeric."
+            ) from e
+
+        return sparse.hstack(converted_Xs).tocsr()
+    else:
+        Xs = [f.toarray() if sparse.issparse(f) else f for f in Xs]
+        adapter = _get_container_adapter("transform", self)
+        if adapter and all(adapter.is_supported_container(X) for X in Xs):
+            # rename before stacking as it avoids to error on temporary duplicated
+            # columns
+            transformer_names = [
+                t[0]
+                for t in self._iter(
+                    fitted=True,
+                    column_as_labels=False,
+                    skip_drop=True,
+                    skip_empty_columns=True,
+                )
+            ]
+            feature_names_outs = [X.columns for X in Xs if X.shape[1] != 0]
+            if self.verbose_feature_names_out:
+                # `_add_prefix_for_feature_names_out` takes care about raising
+                # an error if there are duplicated columns.
+                feature_names_outs = self._add_prefix_for_feature_names_out(
+                    list(zip(transformer_names, feature_names_outs))
+                )
+            else:
+                # check for duplicated columns and raise if any
+                feature_names_outs = list(chain.from_iterable(feature_names_outs))
+                feature_names_count = Counter(feature_names_outs)
+                if any(count > 1 for count in feature_names_count.values()):
+                    duplicated_feature_names = sorted(
+                        name
+                        for name, count in feature_names_count.items()
+                        if count > 1
+                    )
+                    err_msg = (
+                        "Duplicated feature names found before concatenating the"
+                        " outputs of the transformers:"
+                        f" {duplicated_feature_names}.\n"
+                    )
+                    for transformer_name, X in zip(transformer_names, Xs):
+                        if X.shape[1] == 0:
+                            continue
+                        dup_cols_in_transformer = sorted(
+                            set(X.columns).intersection(duplicated_feature_names)
+                        )
+                        if len(dup_cols_in_transformer):
+                            err_msg += (
+                                f"Transformer {transformer_name} has conflicting "
+                                f"columns names: {dup_cols_in_transformer}.\n"
+                            )
+                    raise ValueError(
+                        err_msg
+                        + "Either make sure that the transformers named above "
+                        "do not generate columns with conflicting names or set "
+                        "verbose_feature_names_out=True to automatically "
+                        "prefix to the output feature names with the name "
+                        "of the transformer to prevent any conflicting "
+                        "names."
+                    )
+
+            names_idx = 0
+            for X in Xs:
+                if X.shape[1] == 0:
+                    continue
+                names_out = feature_names_outs[names_idx : names_idx + X.shape[1]]
+                adapter.rename_columns(X, names_out)
+                names_idx += X.shape[1]
+
+            output = adapter.hstack(Xs)
+            output_samples = output.shape[0]
+            if output_samples != n_samples:
+                raise ValueError(
+                    "Concatenating DataFrames from the transformer's output lead to"
+                    " an inconsistent number of samples. The output may have Pandas"
+                    " Indexes that do not match, or that transformers are returning"
+                    " number of samples which are not the same as the number input"
+                    " samples."
+                )
+
+            return output
+
+        return np.hstack(Xs)
+
+scikit-learn.sklearn.compose._column_transformer._get_empty_routing
+
+def _get_empty_routing(self):
+    """Return empty routing.
+
+    Used while routing can be disabled.
+
+    TODO: Remove when ``set_config(enable_metadata_routing=False)`` is no
+    more an option.
+    """
+    return Bunch(
+        **{
+            name: Bunch(**{method: {} for method in METHODS})
+            for name, step, _, _ in self._iter(
+                fitted=False,
+                column_as_labels=False,
+                skip_drop=True,
+                skip_empty_columns=True,
+            )
+        }
+    )
+
+scikit-learn.sklearn.compose._column_transformer._check_X
+
+def _check_X(X):
+    """Use check_array only when necessary, e.g. on lists and other non-array-likes."""
+    if (
+        (hasattr(X, "__array__") and hasattr(X, "shape"))
+        or hasattr(X, "__dataframe__")
+        or sparse.issparse(X)
+    ):
+        return X
+    return check_array(X, ensure_all_finite="allow-nan", dtype=object)
+
+scikit-learn.sklearn.compose._column_transformer._validate_output
+
+def _validate_output(self, result):
+    """
+    Ensure that the output of each transformer is 2D. Otherwise
+    hstack can raise an error or produce incorrect results.
+    """
+    names = [
+        name
+        for name, _, _, _ in self._iter(
+            fitted=True,
+            column_as_labels=False,
+            skip_drop=True,
+            skip_empty_columns=True,
+        )
+    ]
+    for Xs, name in zip(result, names):
+        if not getattr(Xs, "ndim", 0) == 2 and not hasattr(Xs, "__dataframe__"):
+            raise ValueError(
+                "The output of the '{0}' transformer should be 2D (numpy array, "
+                "scipy sparse array, dataframe).".format(name)
+            )
+    if _get_output_config("transform", self)["dense"] == "pandas":
+        return
+    try:
+        import pandas as pd
+    except ImportError:
+        return
+    for Xs, name in zip(result, names):
+        if not _is_pandas_df(Xs):
+            continue
+        for col_name, dtype in Xs.dtypes.to_dict().items():
+            if getattr(dtype, "na_value", None) is not pd.NA:
+                continue
+            if pd.NA not in Xs[col_name].values:
+                continue
+            class_name = self.__class__.__name__
+            raise ValueError(
+                f"The output of the '{name}' transformer for column"
+                f" '{col_name}' has dtype {dtype} and uses pandas.NA to"
+                " represent null values. Storing this output in a numpy array"
+                " can cause errors in downstream scikit-learn estimators, and"
+                " inefficiencies. To avoid this problem you can (i)"
+                " store the output in a pandas DataFrame by using"
+                f" {class_name}.set_output(transform='pandas') or (ii) modify"
+                f" the input data or the '{name}' transformer to avoid the"
+                " presence of pandas.NA (for example by using"
+                " pandas.DataFrame.astype)."
+            )
+
+scikit-learn.sklearn.compose._column_transformer._call_func_on_transformers
+
+def _call_func_on_transformers(self, X, y, func, column_as_labels, routed_params):
+    """
+    Private function to fit and/or transform on demand.
+
+    Parameters
+    ----------
+    X : {array-like, dataframe} of shape (n_samples, n_features)
+        The data to be used in fit and/or transform.
+
+    y : array-like of shape (n_samples,)
+        Targets.
+
+    func : callable
+        Function to call, which can be _fit_transform_one or
+        _transform_one.
+
+    column_as_labels : bool
+        Used to iterate through transformers. If True, columns are returned
+        as strings. If False, columns are returned as they were given by
+        the user. Can be True only if the ``ColumnTransformer`` is already
+        fitted.
+
+    routed_params : dict
+        The routed parameters as the output from ``process_routing``.
+
+    Returns
+    -------
+    Return value (transformers and/or transformed X data) depends
+    on the passed function.
+    """
+    if func is _fit_transform_one:
+        fitted = False
+    else:  # func is _transform_one
+        fitted = True
+
+    transformers = list(
+        self._iter(
+            fitted=fitted,
+            column_as_labels=column_as_labels,
+            skip_drop=True,
+            skip_empty_columns=True,
+        )
+    )
+    try:
+        jobs = []
+        for idx, (name, trans, columns, weight) in enumerate(transformers, start=1):
+            if func is _fit_transform_one:
+                if trans == "passthrough":
+                    output_config = _get_output_config("transform", self)
+                    trans = FunctionTransformer(
+                        accept_sparse=True,
+                        check_inverse=False,
+                        feature_names_out="one-to-one",
+                    ).set_output(transform=output_config["dense"])
+
+                extra_args = dict(
+                    message_clsname="ColumnTransformer",
+                    message=self._log_message(name, idx, len(transformers)),
+                )
+            else:  # func is _transform_one
+                extra_args = {}
+            jobs.append(
+                delayed(func)(
+                    transformer=clone(trans) if not fitted else trans,
+                    X=_safe_indexing(X, columns, axis=1),
+                    y=y,
+                    weight=weight,
+                    **extra_args,
+                    params=routed_params[name],
+                )
+            )
+
+        return Parallel(n_jobs=self.n_jobs)(jobs)
+
+    except ValueError as e:
+        if "Expected 2D array, got 1D array instead" in str(e):
+            raise ValueError(_ERR_MSG_1DCOLUMN) from e
+        else:
+            raise
+
+scikit-learn.sklearn.utils._metadata_requests.process_routing
+
+def process_routing(_obj, _method, /, **kwargs):
+    """Validate and route metadata.
+
+    This function is used inside a :term:`router`'s method, e.g. :term:`fit`,
+    to validate the metadata and handle the routing.
+
+    Assuming this signature of a router's fit method:
+    ``fit(self, X, y, sample_weight=None, **fit_params)``,
+    a call to this function would be:
+    ``process_routing(self, "fit", sample_weight=sample_weight, **fit_params)``.
+
+    Note that if routing is not enabled and ``kwargs`` is empty, then it
+    returns an empty routing where ``process_routing(...).ANYTHING.ANY_METHOD``
+    is always an empty dictionary.
+
+    .. versionadded:: 1.3
+
+    Parameters
+    ----------
+    _obj : object
+        An object implementing ``get_metadata_routing``. Typically a
+        :term:`meta-estimator`.
+
+    _method : str
+        The name of the router's method in which this function is called.
+
+    **kwargs : dict
+        Metadata to be routed.
+
+    Returns
+    -------
+    routed_params : Bunch
+        A :class:`~utils.Bunch` of the form ``{"object_name": {"method_name":
+        {metadata: value}}}`` which can be used to pass the required metadata to
+        A :class:`~sklearn.utils.Bunch` of the form ``{"object_name": {"method_name":
+        {metadata: value}}}`` which can be used to pass the required metadata to
+        corresponding methods or corresponding child objects. The object names
+        are those defined in `obj.get_metadata_routing()`.
+    """
+    if not kwargs:
+        # If routing is not enabled and kwargs are empty, then we don't have to
+        # try doing any routing, we can simply return a structure which returns
+        # an empty dict on routed_params.ANYTHING.ANY_METHOD.
+        class EmptyRequest:
+            def get(self, name, default=None):
+                return Bunch(**{method: dict() for method in METHODS})
+
+            def __getitem__(self, name):
+                return Bunch(**{method: dict() for method in METHODS})
+
+            def __getattr__(self, name):
+                return Bunch(**{method: dict() for method in METHODS})
+
+        return EmptyRequest()
+
+    if not (hasattr(_obj, "get_metadata_routing") or isinstance(_obj, MetadataRouter)):
+        raise AttributeError(
+            f"The given object ({_routing_repr(_obj)}) needs to either"
+            " implement the routing method `get_metadata_routing` or be a"
+            " `MetadataRouter` instance."
+        )
+    if _method not in METHODS:
+        raise TypeError(
+            f"Can only route and process input on these methods: {METHODS}, "
+            f"while the passed method is: {_method}."
+        )
+
+    request_routing = get_routing_for_object(_obj)
+    request_routing.validate_metadata(params=kwargs, method=_method)
+    routed_params = request_routing.route_params(params=kwargs, caller=_method)
+
+    return routed_params
+
+scikit-learn.sklearn.utils._metadata_requests._routing_enabled
+
+def _routing_enabled():
+    """Return whether metadata routing is enabled.
+
+    .. versionadded:: 1.3
+
+    Returns
+    -------
+    enabled : bool
+        Whether metadata routing is enabled. If the config is not set, it
+        defaults to False.
+    """
+    return get_config().get("enable_metadata_routing", False)
+
+scikit-learn.sklearn.utils._metadata_requests._raise_for_params
+
+def _raise_for_params(params, owner, method, allow=None):
+    """Raise an error if metadata routing is not enabled and params are passed.
+
+    .. versionadded:: 1.4
+
+    Parameters
+    ----------
+    params : dict
+        The metadata passed to a method.
+
+    owner : object
+        The object to which the method belongs.
+
+    method : str
+        The name of the method, e.g. "fit".
+
+    allow : list of str, default=None
+        A list of parameters which are allowed to be passed even if metadata
+        routing is not enabled.
+
+    Raises
+    ------
+    ValueError
+        If metadata routing is not enabled and params are passed.
+    """
+    caller = f"{_routing_repr(owner)}.{method}" if method else _routing_repr(owner)
+
+    allow = allow if allow is not None else {}
+
+    if not _routing_enabled() and (params.keys() - allow):
+        raise ValueError(
+            f"Passing extra keyword arguments to {caller} is only supported if"
+            " enable_metadata_routing=True, which you can set using"
+            " `sklearn.set_config`. See the User Guide"
+            " <https://scikit-learn.org/stable/metadata_routing.html> for more"
+            f" details. Extra parameters passed are: {set(params)}"
+        )
+
+scikit-learn.sklearn.utils.validation.check_is_fitted
+
+def check_is_fitted(estimator, attributes=None, *, msg=None, all_or_any=all):
+    """Perform is_fitted validation for estimator.
+
+    Checks if the estimator is fitted by verifying the presence of
+    fitted attributes (ending with a trailing underscore) and otherwise
+    raises a :class:`~sklearn.exceptions.NotFittedError` with the given message.
+
+    If an estimator does not set any attributes with a trailing underscore, it
+    can define a ``__sklearn_is_fitted__`` method returning a boolean to
+    specify if the estimator is fitted or not. See
+    :ref:`sphx_glr_auto_examples_developing_estimators_sklearn_is_fitted.py`
+    for an example on how to use the API.
+
+    If no `attributes` are passed, this function will pass if an estimator is stateless.
+    An estimator can indicate it's stateless by setting the `requires_fit` tag. See
+    :ref:`estimator_tags` for more information. Note that the `requires_fit` tag
+    is ignored if `attributes` are passed.
+
+    Parameters
+    ----------
+    estimator : estimator instance
+        Estimator instance for which the check is performed.
+
+    attributes : str, list or tuple of str, default=None
+        Attribute name(s) given as string or a list/tuple of strings
+        Eg.: ``["coef_", "estimator_", ...], "coef_"``
+
+        If `None`, `estimator` is considered fitted if there exist an
+        attribute that ends with a underscore and does not start with double
+        underscore.
+
+    msg : str, default=None
+        The default error message is, "This %(name)s instance is not fitted
+        yet. Call 'fit' with appropriate arguments before using this
+        estimator."
+
+        For custom messages if "%(name)s" is present in the message string,
+        it is substituted for the estimator name.
+
+        Eg. : "Estimator, %(name)s, must be fitted before sparsifying".
+
+    all_or_any : callable, {all, any}, default=all
+        Specify whether all or any of the given attributes must exist.
+
+    Raises
+    ------
+    TypeError
+        If the estimator is a class or not an estimator instance
+
+    NotFittedError
+        If the attributes are not found.
+
+    Examples
+    --------
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> from sklearn.utils.validation import check_is_fitted
+    >>> from sklearn.exceptions import NotFittedError
+    >>> lr = LogisticRegression()
+    >>> try:
+    ...     check_is_fitted(lr)
+    ... except NotFittedError as exc:
+    ...     print(f"Model is not fitted yet.")
+    Model is not fitted yet.
+    >>> lr.fit([[1, 2], [1, 3]], [1, 0])
+    LogisticRegression()
+    >>> check_is_fitted(lr)
+    """
+    if isclass(estimator):
+        raise TypeError("{} is a class, not an instance.".format(estimator))
+    if msg is None:
+        msg = (
+            "This %(name)s instance is not fitted yet. Call 'fit' with "
+            "appropriate arguments before using this estimator."
+        )
+
+    if not hasattr(estimator, "fit"):
+        raise TypeError("%s is not an estimator instance." % (estimator))
+
+    tags = get_tags(estimator)
+
+    if not tags.requires_fit and attributes is None:
+        return
+
+    if not _is_fitted(estimator, attributes, all_or_any):
+        raise NotFittedError(msg % {"name": type(estimator).__name__})
+
+scikit-learn.sklearn.utils.validation._get_feature_names
+
+def _get_feature_names(X):
+    """Get feature names from X.
+
+    Support for other array containers should place its implementation here.
+
+    Parameters
+    ----------
+    X : {ndarray, dataframe} of shape (n_samples, n_features)
+        Array container to extract feature names.
+
+        - pandas dataframe : The columns will be considered to be feature
+          names. If the dataframe contains non-string feature names, `None` is
+          returned.
+        - All other array containers will return `None`.
+
+    Returns
+    -------
+    names: ndarray or None
+        Feature names of `X`. Unrecognized array containers will return `None`.
+    """
+    feature_names = None
+
+    # extract feature names for support array containers
+    if _is_pandas_df(X):
+        # Make sure we can inspect columns names from pandas, even with
+        # versions too old to expose a working implementation of
+        # __dataframe__.column_names() and avoid introducing any
+        # additional copy.
+        # TODO: remove the pandas-specific branch once the minimum supported
+        # version of pandas has a working implementation of
+        # __dataframe__.column_names() that is guaranteed to not introduce any
+        # additional copy of the data without having to impose allow_copy=False
+        # that could fail with other libraries. Note: in the longer term, we
+        # could decide to instead rely on the __dataframe_namespace__ API once
+        # adopted by our minimally supported pandas version.
+        feature_names = np.asarray(X.columns, dtype=object)
+    elif hasattr(X, "__dataframe__"):
+        df_protocol = X.__dataframe__()
+        feature_names = np.asarray(list(df_protocol.column_names()), dtype=object)
+
+    if feature_names is None or len(feature_names) == 0:
+        return
+
+    types = sorted(t.__qualname__ for t in set(type(v) for v in feature_names))
+
+    # mixed type of string and non-string is not supported
+    if len(types) > 1 and "str" in types:
+        raise TypeError(
+            "Feature names are only supported if all input features have string names, "
+            f"but your input has {types} as feature name / column name types. "
+            "If you want feature names to be stored and validated, you must convert "
+            "them all to strings, by using X.columns = X.columns.astype(str) for "
+            "example. Otherwise you can remove feature / column names from your input "
+            "data, or convert them all to a non-string data type."
+        )
+
+    # Only feature names of all strings are supported
+    if len(types) == 1 and types[0] == "str":
+        return feature_names
+
+scikit-learn.sklearn.utils.validation._check_n_features
+
+def _check_n_features(estimator, X, reset):
+    """Set the `n_features_in_` attribute, or check against it on an estimator.
+
+    .. note::
+        To only check n_features without conducting a full data validation, prefer
+        using `validate_data(..., skip_check_array=True)` if possible.
+
+    .. versionchanged:: 1.6
+        Moved from :class:`~sklearn.base.BaseEstimator` to
+        :mod:`~sklearn.utils.validation`.
+
+    Parameters
+    ----------
+    estimator : estimator instance
+        The estimator to validate the input for.
+
+    X : {ndarray, sparse matrix} of shape (n_samples, n_features)
+        The input samples.
+
+    reset : bool
+        Whether to reset the `n_features_in_` attribute.
+        If True, the `n_features_in_` attribute is set to `X.shape[1]`.
+        If False and the attribute exists, then check that it is equal to
+        `X.shape[1]`. If False and the attribute does *not* exist, then
+        the check is skipped.
+
+        .. note::
+           It is recommended to call `reset=True` in `fit` and in the first
+           call to `partial_fit`. All other methods that validate `X`
+           should set `reset=False`.
+    """
+    try:
+        n_features = _num_features(X)
+    except TypeError as e:
+        if not reset and hasattr(estimator, "n_features_in_"):
+            raise ValueError(
+                "X does not contain any features, but "
+                f"{estimator.__class__.__name__} is expecting "
+                f"{estimator.n_features_in_} features"
+            ) from e
+        # If the number of features is not defined and reset=True,
+        # then we skip this check
+        return
+
+    if reset:
+        estimator.n_features_in_ = n_features
+        return
+
+    if not hasattr(estimator, "n_features_in_"):
+        # Skip this check if the expected number of expected input features
+        # was not recorded by calling fit first. This is typically the case
+        # for stateless transformers.
+        return
+
+    if n_features != estimator.n_features_in_:
+        raise ValueError(
+            f"X has {n_features} features, but {estimator.__class__.__name__} "
+            f"is expecting {estimator.n_features_in_} features as input."
+        )
+
+scikit-learn.sklearn.utils.validation._num_samples
+
+def _num_samples(x):
+    """Return number of samples in array-like x."""
+    message = "Expected sequence or array-like, got %s" % type(x)
+    if hasattr(x, "fit") and callable(x.fit):
+        # Don't get num_samples from an ensembles length!
+        raise TypeError(message)
+
+    if _use_interchange_protocol(x):
+        return x.__dataframe__().num_rows()
+
+    if not hasattr(x, "__len__") and not hasattr(x, "shape"):
+        if hasattr(x, "__array__"):
+            xp, _ = get_namespace(x)
+            x = xp.asarray(x)
+        else:
+            raise TypeError(message)
+
+    if hasattr(x, "shape") and x.shape is not None:
+        if len(x.shape) == 0:
+            raise TypeError(
+                "Input should have at least 1 dimension i.e. satisfy "
+                f"`len(x.shape) > 0`, got scalar `{x!r}` instead."
+            )
+        # Check that shape is returning an integer or default to len
+        # Dask dataframes may not return numeric shape[0] value
+        if isinstance(x.shape[0], numbers.Integral):
+            return x.shape[0]
+
+    try:
+        return len(x)
+    except TypeError as type_error:
+        raise TypeError(message) from type_error
+
+
+[/PYTHON]
+What will be the output of `transform`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "transformers": [
+            [
+                "trans",
+                "Trans()",
+                [
+                    0,
+                    1
+                ]
+            ]
+        ],
+        "remainder": "drop",
+        "sparse_threshold": 0.3,
+        "n_jobs": null,
+        "transformer_weights": null,
+        "verbose": false,
+        "verbose_feature_names_out": true,
+        "force_int_remainder_cols": "deprecated",
+        "n_features_in_": 2,
+        "_columns": [
+            [
+                0,
+                1
+            ]
+        ],
+        "_transformer_to_input_indices": {
+            "trans": [
+                0,
+                1
+            ],
+            "remainder": []
+        },
+        "_remainder": [
+            "remainder",
+            "drop",
+            []
+        ],
+        "sparse_output_": false,
+        "transformers_": [
+            [
+                "trans",
+                "Trans()",
+                [
+                    0,
+                    1
+                ]
+            ]
+        ],
+        "output_indices_": {
+            "trans": "slice(0, 2, None)",
+            "remainder": "slice(0, 0, None)"
+        }
+    },
+    "args": {
+        "X": "array([[0, 2],\n       [1, 4],\n       [2, 6]])"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]

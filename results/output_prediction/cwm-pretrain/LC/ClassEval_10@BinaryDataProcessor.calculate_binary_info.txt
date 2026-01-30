@@ -1,0 +1,417 @@
+<think>
+  Let's execute the code step by step.
+  1. __init__(binary_string="0110100001100101011011000110110001101111") stores the binary string.
+  2. calculate_binary_info() performs:
+    a. self.binary_string.count('0') gives 17 zeroes
+    b. self.binary_string.count('1') gives 23 ones
+    c. len(self.binary_string) gives total length of 40
+    d. 17/40 = 0.425 (zeroes percentage)
+    e. 23/40 = 0.575 (ones percentage)
+  3. So the result dictionary will have zeroes_percentage=0.425, ones_percentage=0.575, and total_length=40.
+</think>
+
+</think>
+[OUTPUT]
+```
+{
+    "Zeroes": 0.425,
+    "Ones": 0.575,
+    "Bit length": 40
+}
+```
+[/OUTPUT]
+
+[FILEPATH] neuralxor-evalu8-659a24e/evalu8-codestral/struct-aligned/oasst1/pt0.2/generate_ft_respond_fewshot_coalescence_short_explanation.py [/FILEPATH]
+import os
+import torch
+import copy
+import json
+import argparse
+import pickle
+from tqdm import tqdm
+from torch import nn
+from typing import *
+import datasets
+from torch.utils.data import Dataset, DataLoader
+from dataclasses import dataclass
+from transformers import GPTJForCausalLM, AutoTokenizer
+
+from data_utils.common import set_seed, get_data_loader, write_jsonl, read_jsonl
+from data_utils.response_dataset import ResponseDataset, ResponseDatasetCleaned, ResponseDataCollator
+from evaluator import BaseEvaluator
+from models import load_peft_model
+from utils import get_model_tokenizer, get_argument_parser
+
+
+def batch_generator(response_dataset: ResponseDataset, batch_size: int = 8):
+    """
+    Iterate over the response_dataset batch by batch.
+
+    Args:
+        response_dataset (ResponseDataset): _description_
+        batch_size (int, optional): _description_. Defaults to 8.
+
+    Yields:
+        _type_: _description_
+    """
+    # Create a DataLoader with a custom batch sampler
+    data_loader = get_data_loader(response_dataset, batch_size, shuffle=False, drop_last=False)
+    for _, row in tqdm(enumerate(data_loader), total=len(data_loader), desc='Generating'):
+        yield row
+
+
+@dataclass
+class InputOutputExample:
+    input: str
+    output: str
+
+
+def tokenize_batch(batch: InputOutputExample, tokenizer: Any) -> Dict[str, Any]:
+    """
+    Tokenize the input and output. 
+
+    Args:
+        batch (InputOutputExample): batch consisting of input and output
+        tokenizer (Any): tokenizer object to tokenize the examples
+
+    Returns:
+        Dict[str, Any]: tokenized examples
+    """
+    tokenized_batch = {}
+
+    # Tokenize and flatten examples
+    tokenized_inputs = [tokenizer.encode(text, add_special_tokens=False) for text in batch.input]
+    tokenized_batch['input_ids'] = tokenized_inputs
+
+    # Flatten tokens
+    tokenized_batch['input_length'] = [len(tokens) for tokens in tokenized_inputs]
+
+    return tokenized_batch
+
+
+def generate_ft_respond(response_dataset: ResponseDataset, evaluator: BaseEvaluator, batch_size: int, 
+                        ckpt_dir: str, output_dir: str, max_new_tokens: int, min_new_tokens: int, temp: float, top_k: int, 
+                        mode: str, n_prompt: int, max_input: int, max_output: int, config: str) -> Dict[str, Any]:
+    """
+    Generate few-shot responses for the given dataset and return the best response for each example.
+
+    Args:
+        response_dataset (ResponseDataset): _description_
+        evaluator (BaseEvaluator): _description_
+        batch_size (int): _description_
+        ckpt_dir (str): _description_
+        output_dir (str): _description_
+        max_new_tokens (int): _description_
+        min_new_tokens (int): _description_
+        temp (float): _description_
+        top_k (int): _description_
+        mode (str): _description_
+        n_prompt (int): _description_
+        max_input (int): _description_
+        max_output (int): _description_
+        config (str): _description_
+
+    Returns:
+        Dict[str, Any]: _description_
+    """
+
+    print(f'Generate few-shot responses for {response_dataset.name}.')
+    print(f'Context list: {response_dataset.contexts}')
+    print(f'Configuration: {config}')
+
+    set_seed(42)
+
+    device = evaluator.device
+    model = evaluator.model
+
+    model.eval()
+
+    if 'chat' in ckpt_dir:
+        # Reformat the input and output to align with chat mode
+        response_dataset.examples = [e.format_chat() for e in response_dataset.examples]
+
+    # A list of unique conversations for generating few-shot examples
+    unique_conversations = set()
+    for e in response_dataset.examples:
+        unique_conversations.add(e.conversation)
+
+    # Sort the conversations by length to reduce padding
+    unique_conversations = sorted(list(unique_conversations), key=lambda x: len(x))
+
+    # Keep only the first 1K conversations
+    unique_conversations = unique_conversations[:1000]
+
+    response_dataset_generate = ResponseDatasetCleaned.from_example_list(response_dataset.examples, name=response_dataset.name)
+    
+    generate_dataloader = DataLoader(response_dataset_generate, batch_size=batch_size, shuffle=False, 
+                                     collate_fn=ResponseDataCollator(), drop_last=False)
+    
+    output_list = read_jsonl(os.path.join(output_dir, f'ft_respond_{response_dataset.name}_{config}_beam_search.jsonl'))
+    output_list = {e['conversation']: e for e in output_list}
+
+    n_examples = len(response_dataset.examples)
+    done_examples = len(output_list)
+    print(f'Total number of examples: {n_examples}. Already done {done_examples}/{n_examples} examples.')
+
+    unique_conversations_already_done = []
+    for e in unique_conversations:
+        if e.conversation in output_list:
+            unique_conversations_already_done.append(e)
+            unique_conversations.remove(e)
+    print(f'Total number of unique conversations: {len(unique_conversations)}.')
+
+    unique_conversations_done = 0
+    if os.path.exists(os.path.join(output_dir, f'ft_respond_{response_dataset.name}_{config}_unique_conversations.pkl')):
+        unique_conversations_already_done = pickle.load(open(os.path.join(output_dir, f'ft_respond_{response_dataset.name}_{config}_unique_conversations.pkl'), 'rb'))
+        unique_conversations_done = len(unique_conversations_already_done)
+        print(f'Already done {unique_conversations_done}/{len(unique_conversations)} unique conversations.')
+
+    # Loop over the unique conversations and save the generated outputs
+    for i, batch in tqdm(enumerate(generate_dataloader), total=len(generate_dataloader), desc='Generating'):
+        conversation = batch['conversation'][0]
+        input_length = batch['input_length'][0]
+        tokenized_input_ids = batch['input_ids']
+        input_ids = tokenized_input_ids.to(device)
+        input_ids = input_ids.repeat(len(response_dataset.examples), 1)
+        attention_mask = torch.ones(input_ids.shape, device=device)
+        attention_mask[:, :input_length] = 0
+        attention_mask = attention_mask.repeat(len(response_dataset.examples), 1)
+        with torch.no_grad():
+            outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask, 
+                                     max_new_tokens=max_new_tokens, min_new_tokens=min_new_tokens, temperature=temp, 
+                                     top_k=top_k, do_sample=True, num_return_sequences=1, num_beams=1, repetition_penalty=1.0, 
+                                     early_stopping=False, output_scores=True, return_dict_in_generate=True)
+        beam_outputs, output_scores = outputs.sequences, outputs.sequences_scores
+        # Slice off the input sequence
+        beam_outputs = beam_outputs[:, input_length:]
+        # Keep only the first one
+        beam_outputs = beam_outputs[0].unsqueeze(0)
+        # Decode the output
+        beam_outputs = evaluator.tokenizer.batch_decode(beam_outputs, skip_special_tokens=False)
+        # Sort by the score and keep only the top-10 ones
+        scores, indices = torch.topk(output_scores, 10)
+        scores = scores[indices[0]].unsqueeze(0).tolist()
+        indices = indices[0].unsqueeze(0).tolist()
+        beam_outputs = [beam_outputs[0][i] for i in indices[0]]
+        beam_outputs = [{'response': beam_outputs[i], 'score': float(scores[0][i])} for i in range(10)]
+        # Add to the output list
+        if conversation not in output_list:
+            output_list[conversation] = {'conversation': conversation, 'responses': beam_outputs}
+            write_jsonl(os.path.join(output_dir, f'ft_respond_{response_dataset.name}_{config}_beam_search.jsonl'), list(output_list.values()))
+            with open(os.path.join(output_dir, f'ft_respond_{response_dataset.name}_{config}_unique_conversations.pkl'), 'wb') as f:
+                pickle.dump(unique_conversations_already_done, f)
+        unique_conversations_done += 1
+
+    return output_list
+
+
+def generate_response(predicted_responses: Dict[str, List[Dict[str, str]]], evaluator: BaseEvaluator, 
+                      batch_size: int, ckpt_dir: str, output_dir: str, max_new_tokens: int, 
+                      min_new_tokens: int, temp: float, top_k: int, mode: str, n_prompt: int, 
+                      max_input: int, max_output: int, config: str) -> None:
+    """
+    Generate and save the best response for each example.
+
+    Args:
+        predicted_responses (Dict[str, List[Dict[str, str]]]): _description_
+        evaluator (BaseEvaluator): _description_
+        batch_size (int): _description_
+        ckpt_dir (str): _description_
+        output_dir (str): _description_
+        max_new_tokens (int): _description_
+        min_new_tokens (int): _description_
+        temp (float): _description_
+        top_k (int): _description_
+        mode (str): _description_
+        n_prompt (int): _description_
+        max_input (int): _description_
+        max_output (int): _description_
+        config (str): _description_
+    """
+
+    print(f'Generate best response for each example.')
+
+    set_seed(42)
+
+    response_dataset = ResponseDataset.from_response_dict(predicted_responses)
+    
+    device = evaluator.device
+
+    if 'chat' in ckpt_dir:
+        # Reformat the input and output to align with chat mode
+        response_dataset.examples = [e.format_chat() for e in response_dataset.examples]
+
+    # A list of unique conversations for generating few-shot examples
+    unique_conversations = set()
+    for e in response_dataset.examples:
+        unique_conversations.add(e.conversation)
+
+    # Sort the conversations by length to reduce padding
+    unique_conversations = sorted(list(unique_conversations), key=lambda x: len(x))
+
+    # Keep only the first 1K conversations
+    unique_conversations = unique_conversations[:1000]
+
+    response_dataset_generate = ResponseDatasetCleaned.from_example_list(response_dataset.examples, name=response_dataset.name)
+    
+    generate_dataloader = DataLoader(response_dataset_generate, batch_size=batch_size, shuffle=False, 
+                                     collate_fn=ResponseDataCollator(), drop_last=False)
+
+    output_list = read_jsonl(os.path.join(output_dir, f'best_response_{response_dataset.name}_{config}_beam_search.jsonl'))
+    output_list = {e['conversation']: e for e in output_list}
+
+    n_examples = len(response_dataset.examples)
+    done_examples = len(output_list)
+    print(f'Total number of examples: {n_examples}. Already done {done_examples}/{n_examples} examples.')
+
+    unique_conversations_already_done = []
+    for e in unique_conversations:
+        if e.conversation in output_list:
+            unique_conversations_already_done.append(e)
+            unique_conversations.remove(e)
+    print(f'Total number of unique conversations: {len(unique_conversations)}.')
+
+    unique_conversations_done = 0
+    if os.path.exists(os.path.join(output_dir, f'best_response_{response_dataset.name}_{config}_unique_conversations.pkl')):
+        unique_conversations_already_done = pickle.load(open(os.path.join(output_dir, f'best_response_{response_dataset.name}_{config}_unique_conversations.pkl'), 'rb'))
+        unique_conversations_done = len(unique_conversations_already_done)
+        print(f'Already done {unique_conversations_done}/{len(unique_conversations)} unique conversations.')
+
+    # Loop over the unique conversations and save the generated outputs
+    for i, batch in tqdm(enumerate(generate_dataloader), total=len(generate_dataloader), desc='Generating'):
+        conversation = batch['conversation'][0]
+        input_length = batch['input_length'][0]
+        tokenized_input_ids = batch['input_ids']
+        input_ids = tokenized_input_ids.to(device)
+        input_ids = input_ids.repeat(len(response_dataset.examples), 1)
+        attention_mask = torch.ones(input_ids.shape, device=device)
+        attention_mask[:, :input_length] = 0
+        attention_mask = attention_mask.repeat(len(response_dataset.examples), 1)
+        with torch.no_grad():
+            outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask, 
+                                     max_new_tokens=max_new_tokens, min_new_tokens=min_new_tokens, temperature=temp, 
+                                     top_k=top_k, do_sample=True, num_return_sequences=1, num_beams=1, repetition_penalty=1.0, 
+                                     early_stopping=False, output_scores=True, return_dict_in_generate=True)
+        beam_outputs, output_scores = outputs.sequences, outputs.sequences_scores
+        # Slice off the input sequence
+        beam_outputs = beam_outputs[:, input_length:]
+        # Keep only the first one
+        beam_outputs = beam_outputs[0].unsqueeze(0)
+        # Decode the output
+        beam_outputs = evaluator.tokenizer.batch_decode(beam_outputs, skip_special_tokens=False)
+        # Sort by the score and keep only the top-10 ones
+        scores, indices = torch.topk(output_scores, 10)
+        scores = scores[indices[0]].unsqueeze(0).tolist()
+        indices = indices[0].unsqueeze(0).tolist()
+        beam_outputs = [beam_outputs[0][i] for i in indices[0]]
+        beam_outputs = [{'response': beam_outputs[i], 'score': float(scores[0][i])} for i in range(10)]
+        # Add to the output list
+        if conversation not in output_list:
+            output_list[conversation] = {'conversation': conversation, 'responses': beam_outputs}
+            write_jsonl(os.path.join(output_dir, f'best_response_{response_dataset.name}_{config}_beam_search.jsonl'), list(output_list.values()))
+            with open(os.path.join(output_dir, f'best_response_{response_dataset.name}_{config}_unique_conversations.pkl'), 'wb') as f:
+                pickle.dump(unique_conversations_already_done, f)
+        unique_conversations_done += 1
+
+    return output_list
+
+
+def get_ft_prompt_inputs(unique_conversations: List[InputOutputExample], config: str, 
+                         tokenizer: Any, n_prompt: int, max_input: int, max_output: int) -> str:
+    """
+    Generate the few-shot prompts for the given conversations.
+
+    Args:
+        unique_conversations (List[InputOutputExample]): _description_
+        config (str): _description_
+        tokenizer (Any): _description_
+        n_prompt (int): _description_
+        max_input (int): _description_
+        max_output (int): _description_
+
+    Returns:
+        str: _description_
+    """
+    ft_prompt = ''
+    if 'short' in config:
+        ft_prompt += 'I will provide you with examples of two models answering a few questions. At the end, you will have to answer a question too.\n'
+        ft_prompt += 'Here are a few examples:\n'
+    elif 'long' in config:
+        ft_prompt += 'I will provide you with examples of models answering a few questions. At the end, you will have to answer a question too.\n'
+        ft_prompt += 'The models are named "evaluator1" and "evaluator2". They are attempting to predict the similarity of two questions, and the similarity score ranges from 0 to 5.\n'
+        ft_prompt += 'An exact match means a score of 5, while a mismatch means a score of 0. The scores in between reflect the degree of similarity or dissimilarity between the questions.\n'
+        ft_prompt += 'Here are a few examples:\n'
+
+    if n_prompt > len(unique_conversations):
+        n_prompt = len(unique_conversations)
+
+    for e in unique_conversations[:n_prompt]:
+        # Format the input and output to align with the tokenizer
+        input_example = e['input']
+        output_example = e['output']
+        input_tokens = tokenizer.encode(input_example, add_special_tokens=True)
+        output_tokens = tokenizer.encode(output_example, add_special_tokens=True)
+        if len(input_tokens) > max_input:
+            input_tokens = input_tokens[:max_input]
+        if len(output_tokens) > max_output:
+            output_tokens = output_tokens[:max_output]
+
+        input_example = tokenizer.decode(input_tokens, skip_special_tokens=True)
+        output_example = tokenizer.decode(output_tokens, skip_special_tokens=True)
+
+        # Short prompt
+        if 'short' in config:
+            ft_prompt += f'Question: {e["input"]}\n'
+            ft_prompt += f'Response: {e["output"]}\n'
+        # Long prompt
+        elif 'long' in config:
+            ft_prompt += f'Question: {e["input"]}\n'
+            ft_prompt += f'Response: {e["output"]}\n'
+
+    ft_prompt += '\n'
+    ft_prompt += 'Now, it\'s your turn to answer the question.\n'
+    ft_prompt += 'You will need to answer a question and provide a score between 0 and 5 to reflect the degree of similarity or dissimilarity between the two questions.\n'
+    ft_prompt += 'The score should be based on the similarity of the two questions.\n'
+    ft_prompt += 'Here is the question:\n'
+
+    return ft_prompt
+
+
+def parse_explanation(conversation: str, generation: str) -> Dict[str, Any]:
+    """
+    Parse the explanation from the generation.
+
+    Args:
+        conversation (str): _description_
+        generation (str): _description_
+
+    Returns:
+        Dict[str, Any]: _description_
+    """
+    output = {}
+    output['conversation'] = conversation
+    output['task'] = 'NA'
+    output['prediction'] = 'NA'
+    output['explanation'] = 'NA'
+    output['score'] = 'NA'
+    
+    if 'Explanation:' in generation:
+        generation = generation.split('Explanation:')[0]
+
+    if 'Score:' in generation:
+        generation = generation.split('Score:')[0]
+
+    output['generation'] = generation
+
+    return output
+
+
+def parse_score(conversation: str, generation: str) -> Dict[str, Any]:
+    """
+    Parse the score from the generation.
+
+    Args:
+        conversation (str): _description_
+        generation (str): _description_
+
+   

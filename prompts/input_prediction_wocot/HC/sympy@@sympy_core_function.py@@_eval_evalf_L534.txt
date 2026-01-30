@@ -1,0 +1,440 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from .expr import Expr, AtomicExpr
+from .logic import fuzzy_and, fuzzy_or, fuzzy_not, FuzzyBool
+from .numbers import Rational, Float, Integer
+from sympy.utilities.lambdify import MPMATH_TRANSLATIONS
+import mpmath
+from mpmath import mpf, mpc
+
+class Function(Application, Expr):
+
+    def _eval_evalf(self, prec):
+
+        def _get_mpmath_func(fname):
+            if isinstance(self, AppliedUndef):
+                return None
+            if not hasattr(mpmath, fname):
+                fname = MPMATH_TRANSLATIONS.get(fname, None)
+                if fname is None:
+                    return None
+            return getattr(mpmath, fname)
+        _eval_mpmath = getattr(self, '_eval_mpmath', None)
+        if _eval_mpmath is None:
+            func = _get_mpmath_func(self.func.__name__)
+            args = self.args
+        else:
+            func, args = _eval_mpmath()
+        if func is None:
+            imp = getattr(self, '_imp_', None)
+            if imp is None:
+                return None
+            try:
+                return Float(imp(*[i.evalf(prec) for i in self.args]), prec)
+            except (TypeError, ValueError):
+                return None
+        try:
+            args = [arg._to_mpmath(prec + 5) for arg in args]
+
+            def bad(m):
+                from mpmath import mpf, mpc
+                if isinstance(m, mpf):
+                    m = m._mpf_
+                    return m[1] != 1 and m[-1] == 1
+                elif isinstance(m, mpc):
+                    m, n = m._mpc_
+                    return m[1] != 1 and m[-1] == 1 and (n[1] != 1) and (n[-1] == 1)
+                else:
+                    return False
+            if any((bad(a) for a in args)):
+                raise ValueError
+        except ValueError:
+            return
+        with mpmath.workprec(prec):
+            v = func(*args)
+        return Expr._from_mpmath(v, prec)
+    _singularities: FuzzyBool | tuple[Expr, ...] = None
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.basic.args
+
+@property
+def args(self) -> tuple[Basic, ...]:
+    """Returns a tuple of arguments of 'self'.
+
+    Examples
+    ========
+
+    >>> from sympy import cot
+    >>> from sympy.abc import x, y
+
+    >>> cot(x).args
+    (x,)
+
+    >>> cot(x).args[0]
+    x
+
+    >>> (x*y).args
+    (x, y)
+
+    >>> (x*y).args[1]
+    y
+
+    Notes
+    =====
+
+    Never use self._args, always use self.args.
+    Only use _args in __new__ when creating a new function.
+    Do not override .args() from Basic (so that it is easy to
+    change the interface in the future if needed).
+    """
+    return self._args
+
+sympy.sympy.core.expr._from_mpmath
+
+@staticmethod
+def _from_mpmath(x, prec):
+    if hasattr(x, "_mpf_"):
+        return Float._new(x._mpf_, prec)
+    elif hasattr(x, "_mpc_"):
+        re, im = x._mpc_
+        re = Float._new(re, prec)
+        im = Float._new(im, prec)*S.ImaginaryUnit
+        return re + im
+    else:
+        raise TypeError("expected mpmath number (mpf or mpc)")
+
+sympy.sympy.core.function.func
+
+@property
+def func(self):
+    return self.__class__
+
+sympy.sympy.core.function._get_mpmath_func
+
+def _get_mpmath_func(fname):
+    """Lookup mpmath function based on name"""
+    if isinstance(self, AppliedUndef):
+        # Shouldn't lookup in mpmath but might have ._imp_
+        return None
+
+    if not hasattr(mpmath, fname):
+        fname = MPMATH_TRANSLATIONS.get(fname, None)
+        if fname is None:
+            return None
+    return getattr(mpmath, fname)
+
+sympy.sympy.core.function.<listcomp>
+
+args = [arg._to_mpmath(prec + 5) for arg in args]
+
+
+sympy.sympy.core.function.<genexpr>
+
+if any(bad(a) for a in args):
+    raise ValueError  # one or more args failed to compute with significance
+
+
+sympy.sympy.core.numbers.__new__
+
+def __new__(cls, num, dps=None, precision=None):
+    if dps is not None and precision is not None:
+        raise ValueError('Both decimal and binary precision supplied. '
+                         'Supply only one. ')
+
+    if isinstance(num, str):
+        _num = num = num.strip()  # Python ignores leading and trailing space
+        num = num.replace(' ', '_').lower()  # Float treats spaces as digit sep; E -> e
+        if num.startswith('.') and len(num) > 1:
+            num = '0' + num
+        elif num.startswith('-.') and len(num) > 2:
+            num = '-0.' + num[2:]
+        elif num in ('inf', '+inf'):
+            return S.Infinity
+        elif num == '-inf':
+            return S.NegativeInfinity
+        elif num == 'nan':
+            return S.NaN
+        elif not _literal_float(num):
+            raise ValueError('string-float not recognized: %s' % _num)
+    elif isinstance(num, float) and num == 0:
+        num = '0'
+    elif isinstance(num, float) and num == float('inf'):
+        return S.Infinity
+    elif isinstance(num, float) and num == float('-inf'):
+        return S.NegativeInfinity
+    elif isinstance(num, float) and math.isnan(num):
+        return S.NaN
+    elif isinstance(num, (SYMPY_INTS, Integer)):
+        num = str(num)
+    elif num is S.Infinity or num is S.NegativeInfinity or num is S.NaN:
+        return num
+    elif _is_numpy_instance(num):  # support for numpy datatypes
+        num = _convert_numpy_types(num)
+    elif isinstance(num, mpmath.mpf):
+        if precision is None:
+            if dps is None:
+                precision = num.context.prec
+        num = num._mpf_
+
+    if dps is None and precision is None:
+        dps = 15
+        if isinstance(num, Float):
+            return num
+        if isinstance(num, str):
+            try:
+                Num = decimal.Decimal(num)
+            except decimal.InvalidOperation:
+                pass
+            else:
+                isint = '.' not in num
+                num, dps = _decimal_to_Rational_prec(Num)
+                if num.is_Integer and isint:
+                    # 12e3 is shorthand for int, not float;
+                    # 12.e3 would be the float version
+                    dps = max(dps, num_digits(num))
+                dps = max(15, dps)
+                precision = dps_to_prec(dps)
+    elif precision == '' and dps is None or precision is None and dps == '':
+        if not isinstance(num, str):
+            raise ValueError('The null string can only be used when '
+            'the number to Float is passed as a string or an integer.')
+        try:
+            Num = decimal.Decimal(num)
+        except decimal.InvalidOperation:
+            raise ValueError('string-float not recognized by Decimal: %s' % num)
+        else:
+            isint = '.' not in num
+            num, dps = _decimal_to_Rational_prec(Num)
+            if num.is_Integer and isint:
+                # without dec, e-notation is short for int
+                dps = max(dps, num_digits(num))
+                precision = dps_to_prec(dps)
+
+    # decimal precision(dps) is set and maybe binary precision(precision)
+    # as well.From here on binary precision is used to compute the Float.
+    # Hence, if supplied use binary precision else translate from decimal
+    # precision.
+
+    if precision is None or precision == '':
+        precision = dps_to_prec(dps)
+
+    precision = int(precision)
+
+    if isinstance(num, float):
+        _mpf_ = mlib.from_float(num, precision, rnd)
+    elif isinstance(num, str):
+        _mpf_ = mlib.from_str(num, precision, rnd)
+    elif isinstance(num, decimal.Decimal):
+        if num.is_finite():
+            _mpf_ = mlib.from_str(str(num), precision, rnd)
+        elif num.is_nan():
+            return S.NaN
+        elif num.is_infinite():
+            if num > 0:
+                return S.Infinity
+            return S.NegativeInfinity
+        else:
+            raise ValueError("unexpected decimal value %s" % str(num))
+    elif isinstance(num, tuple) and len(num) in (3, 4):
+        if isinstance(num[1], str):
+            # it's a hexadecimal (coming from a pickled object)
+            num = list(num)
+            # If we're loading an object pickled in Python 2 into
+            # Python 3, we may need to strip a tailing 'L' because
+            # of a shim for int on Python 3, see issue #13470.
+            # Strip leading '0x' - gmpy2 only documents such inputs
+            # with base prefix as valid when the 2nd argument (base) is 0.
+            # When mpmath uses Sage as the backend, however, it
+            # ends up including '0x' when preparing the picklable tuple.
+            # See issue #19690.
+            num[1] = num[1].removeprefix('0x').removesuffix('L')
+            # Now we can assume that it is in standard form
+            num[1] = MPZ(num[1], 16)
+            _mpf_ = tuple(num)
+        else:
+            if len(num) == 4:
+                # handle normalization hack
+                return Float._new(num, precision)
+            else:
+                if not all((
+                        num[0] in (0, 1),
+                        num[1] >= 0,
+                        all(type(i) in (int, int) for i in num)
+                        )):
+                    raise ValueError('malformed mpf: %s' % (num,))
+                # don't compute number or else it may
+                # over/underflow
+                return Float._new(
+                    (num[0], num[1], num[2], num[1].bit_length()),
+                    precision)
+    elif isinstance(num, (Number, NumberSymbol)):
+        _mpf_ = num._as_mpf_val(precision)
+    else:
+        _mpf_ = mpmath.mpf(num, prec=precision)._mpf_
+
+    return cls._new(_mpf_, precision, zero=False)
+
+sympy.sympy.functions.special.beta_functions._eval_mpmath
+
+def _eval_mpmath(self):
+    return betainc_mpmath_fix, (*self.args, S(1))
+
+sympy.sympy.functions.special.beta_functions.betainc_mpmath_fix
+
+def betainc_mpmath_fix(a, b, x1, x2, reg=0):
+    from mpmath import betainc, mpf
+    if x1 == x2:
+        return mpf(0)
+    else:
+        return betainc(a, b, x1, x2, reg)
+
+
+[/PYTHON]
+What will be the input of `_eval_evalf`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "1.5430806"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "nargs": XXX
+    },
+    "args": {
+        "prec": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

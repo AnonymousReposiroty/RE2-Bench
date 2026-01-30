@@ -1,0 +1,110 @@
+[THOUGHT]
+The method `_get_kernel_params` initializes `params` to an empty dictionary because `self.kernel_params` is `None`.
+It then checks if `self.kernel` is callable or 'precomputed'. `self.kernel` is "polynomial", so it enters the `else` block (or rather, the main logic inside the `if` since the condition is `not callable ... and != ...`).
+
+Line 70 iterates over `KERNEL_PARAMS[self.kernel]`.
+`KERNEL_PARAMS` is a dictionary imported from `sklearn.metrics.pairwise`. For the key `"polynomial"`, the value is the list `["gamma", "degree", "coef0"]`.
+
+We trace the loop:
+Iteration 1:
+- `param` takes the first value: `"gamma"`.
+- `getattr(self, "gamma")` is `None` (from input). The `if` body is skipped.
+
+Iteration 2:
+- `param` takes the second value: `"degree"`.
+- `getattr(self, "degree")` is `3.1`. The `if` body sets `params["degree"] = 3.1`.
+
+Iteration 3:
+- `param` takes the third value: `"coef0"`.
+- `getattr(self, "coef0")` is `0.1`. The `if` body sets `params["coef0"] = 0.1`.
+
+The loop finishes. 
+
+Variables:
+- `param` iterates: `['gamma', 'degree', 'coef0']`.
+- `KERNEL_PARAMS[self.kernel]` is the list `['gamma', 'degree', 'coef0']` and remains constant throughout the 3 iterations.
+[/THOUGHT]
+
+[ANSWER]
+1 import warnings
+2 import numpy as np
+3 import scipy.sparse as sp
+4 from scipy.linalg import svd
+5 from .base import BaseEstimator
+6 from .base import TransformerMixin
+7 from .utils import check_array, check_random_state, as_float_array
+8 from .utils.extmath import safe_sparse_dot
+9 from .utils.validation import check_is_fitted
+10 from .metrics.pairwise import pairwise_kernels, KERNEL_PARAMS
+11 
+12 class Nystroem(BaseEstimator, TransformerMixin):
+13 
+14     def __init__(self, kernel="rbf", gamma=None, coef0=None, degree=None,
+15                  kernel_params=None, n_components=100, random_state=None):
+16         self.kernel = kernel
+17         self.gamma = gamma
+18         self.coef0 = coef0
+19         self.degree = degree
+20         self.kernel_params = kernel_params
+21         self.n_components = n_components
+22         self.random_state = random_state
+23 
+24     def fit(self, X, y=None):
+25         X = check_array(X, accept_sparse='csr')
+26         rnd = check_random_state(self.random_state)
+27         n_samples = X.shape[0]
+28 
+29         if self.n_components > n_samples:
+30 
+31             n_components = n_samples
+32             warnings.warn("n_components > n_samples. This is not possible.\n"
+33                           "n_components was set to n_samples, which results"
+34                           " in inefficient evaluation of the full kernel.")
+35 
+36         else:
+37             n_components = self.n_components
+38         n_components = min(n_samples, n_components)
+39         inds = rnd.permutation(n_samples)
+40         basis_inds = inds[:n_components]
+41         basis = X[basis_inds]
+42 
+43         basis_kernel = pairwise_kernels(basis, metric=self.kernel,
+44                                         filter_params=True,
+45                                         **self._get_kernel_params())
+46 
+47         U, S, V = svd(basis_kernel)
+48         S = np.maximum(S, 1e-12)
+49         self.normalization_ = np.dot(U / np.sqrt(S), V)
+50         self.components_ = basis
+51         self.component_indices_ = inds
+52         return self
+53 
+54     def transform(self, X):
+55         check_is_fitted(self)
+56         X = check_array(X, accept_sparse='csr')
+57 
+58         kernel_params = self._get_kernel_params()
+59         embedded = pairwise_kernels(X, self.components_,
+60                                     metric=self.kernel,
+61                                     filter_params=True,
+62                                     **kernel_params)
+63         return np.dot(embedded, self.normalization_.T)
+64 
+65     def _get_kernel_params(self):
+66         params = self.kernel_params
+67         if params is None:
+68             params = {}
+69         if not callable(self.kernel) and self.kernel != 'precomputed':
+70             for param in (KERNEL_PARAMS[self.kernel]):## [STATE]param=['gamma', 'degree', 'coef0'][/STATE] [STATE](KERNEL_PARAMS[self.kernel])=[['gamma', 'degree', 'coef0'], ['gamma', 'degree', 'coef0'], ['gamma', 'degree', 'coef0']][/STATE]
+71                 if getattr(self, param) is not None:
+72                     params[param] = getattr(self, param)
+73         else:
+74             if (self.gamma is not None or
+75                     self.coef0 is not None or
+76                     self.degree is not None):
+77                 raise ValueError("Don't pass gamma, coef0 or degree to "
+78                                  "Nystroem if using a callable "
+79                                  "or precomputed kernel")
+80 
+81         return params
+[/ANSWER]

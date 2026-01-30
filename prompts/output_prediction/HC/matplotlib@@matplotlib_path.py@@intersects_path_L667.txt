@@ -1,0 +1,253 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from weakref import WeakValueDictionary
+import numpy as np
+import matplotlib as mpl
+from . import _api, _path
+from .cbook import _to_unmasked_float_array, simple_linear_interpolation
+
+class Path:
+    code_type = np.uint8
+    STOP = code_type(0)
+    MOVETO = code_type(1)
+    LINETO = code_type(2)
+    CURVE3 = code_type(3)
+    CURVE4 = code_type(4)
+    CLOSEPOLY = code_type(79)
+    NUM_VERTICES_FOR_CODE = {STOP: 1, MOVETO: 1, LINETO: 1, CURVE3: 2, CURVE4: 3, CLOSEPOLY: 1}
+
+    def __init__(self, vertices, codes=None, _interpolation_steps=1, closed=False, readonly=False):
+        vertices = _to_unmasked_float_array(vertices)
+        _api.check_shape((None, 2), vertices=vertices)
+        if codes is not None and len(vertices):
+            codes = np.asarray(codes, self.code_type)
+            if codes.ndim != 1 or len(codes) != len(vertices):
+                raise ValueError(f"'codes' must be a 1D list or array with the same length of 'vertices'. Your vertices have shape {vertices.shape} but your codes have shape {codes.shape}")
+            if len(codes) and codes[0] != self.MOVETO:
+                raise ValueError(f"The first element of 'code' must be equal to 'MOVETO' ({self.MOVETO}).  Your first code is {codes[0]}")
+        elif closed and len(vertices):
+            codes = np.empty(len(vertices), dtype=self.code_type)
+            codes[0] = self.MOVETO
+            codes[1:-1] = self.LINETO
+            codes[-1] = self.CLOSEPOLY
+        self._vertices = vertices
+        self._codes = codes
+        self._interpolation_steps = _interpolation_steps
+        self._update_values()
+        if readonly:
+            self._vertices.flags.writeable = False
+            if self._codes is not None:
+                self._codes.flags.writeable = False
+            self._readonly = True
+        else:
+            self._readonly = False
+
+    def _update_values(self):
+        self._simplify_threshold = mpl.rcParams['path.simplify_threshold']
+        self._should_simplify = self._simplify_threshold > 0 and mpl.rcParams['path.simplify'] and (len(self._vertices) >= 128) and (self._codes is None or np.all(self._codes <= Path.LINETO))
+
+    def intersects_path(self, other, filled=True):
+        return _path.path_intersects_path(self, other, filled)
+    _unit_rectangle = None
+    _unit_regular_polygons = WeakValueDictionary()
+    _unit_regular_stars = WeakValueDictionary()
+    _unit_circle = None
+    _unit_circle_righthalf = None
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+matplotlib.lib.matplotlib.path.vertices
+
+@property
+def vertices(self):
+    """The vertices of the `Path` as an (N, 2) array."""
+    return self._vertices
+
+matplotlib.lib.matplotlib.path.codes
+
+@property
+def codes(self):
+    """
+    The list of codes in the `Path` as a 1D array.
+
+    Each code is one of `STOP`, `MOVETO`, `LINETO`, `CURVE3`, `CURVE4` or
+    `CLOSEPOLY`.  For codes that correspond to more than one vertex
+    (`CURVE3` and `CURVE4`), that code will be repeated so that the length
+    of `vertices` and `codes` is always the same.
+    """
+    return self._codes
+
+matplotlib.lib.matplotlib.path.simplify_threshold
+
+@property
+def simplify_threshold(self):
+    """
+    The fraction of a pixel difference below which vertices will
+    be simplified out.
+    """
+    return self._simplify_threshold
+
+matplotlib.lib.matplotlib.path.should_simplify
+
+@property
+def should_simplify(self):
+    """
+    `True` if the vertices array should be simplified.
+    """
+    return self._should_simplify
+
+
+[/PYTHON]
+What will be the output of `intersects_path`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_vertices": "[[0., 0.],[2., 0.]],
+        "_codes": null,
+        "_interpolation_steps": 1,
+        "_simplify_threshold": 0.1111111111111111,
+        "_should_simplify": false,
+        "_readonly": false
+    },
+    "args": {
+        "other": "Path([[ 0.        ,  0.        ],[ 1.99969539, -0.03490481]], None)",
+        "filled": true
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[THOUGHT]

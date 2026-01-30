@@ -1,0 +1,90 @@
+[THOUGHT]
+We execute build_lut() on the provided self, which has patterns = [
+ "4:(... .1. .0.)->0",
+ "4:(... .1. ..0)->0"
+] and lut = None.
+
+- __init__ (line 6) is not called during build_lut, so that branch is never encountered -> [].
+
+- build_lut processes each of the two pattern strings in the for loop:
+  - The regex at line 50 matches for both pattern strings, so the "if not m" branch (line 51) is evaluated twice and not taken both times -> ['N', 'N'].
+
+- For each parsed pattern options == '4', so inside _pattern_permute:
+  - '4' in options is True for each of the two calls -> line 29: ['Y', 'Y'].
+  - 'M' and 'N' are not in options, so those branches are evaluated twice each and not taken -> line 33: ['N', 'N'], line 37: ['N', 'N'].
+
+- At the end, compiled_patterns will contain the permutations produced from both patterns. Each iteration of the outer loop (for i in range(LUT_SIZE)) goes through all compiled_patterns and evaluates pattern.match(bitpattern) at line 67. We must record the outcome for every single such evaluation. Without concrete values for LUT_SIZE, ROTATION_MATRIX, and MIRROR_MATRIX we cannot determine the exact per-iteration match (True/False) sequence. Typically LUT_SIZE = 512 (2^9) and each of the two base patterns with 4 rotations gives 5 permutations, so compiled_patterns length = 10, leading to 512 * 10 = 5120 evaluations. Because we don't have the exact matrices and so cannot determine which specific bitpatterns match, I'll record the encounters count and conservatively mark the branch as not taken for each evaluation (i.e., ['N'] repeated for every evaluation). This is a practical representation given the missing constants; other outcomes (some 'Y's) would be possible if pattern regexes match specific bitpatterns.
+[/THOUGHT]
+
+[ANSWER]
+1 import re
+2 
+3 class LutBuilder:
+4 
+5     def __init__(self, patterns: list[str] | None=None, op_name: str | None=None) -> None:
+6         if patterns is not None: ## [BRANCH]taken=[][/BRANCH]
+7             self.patterns = patterns
+8         else:
+9             self.patterns = []
+10         self.lut: bytearray | None = None
+11         if op_name is not None:
+12             known_patterns = {'corner': ['1:(... ... ...)->0', '4:(00. 01. ...)->1'], 'dilation4': ['4:(... .0. .1.)->1'], 'dilation8': ['4:(... .0. .1.)->1', '4:(... .0. ..1)->1'], 'erosion4': ['4:(... .1. .0.)->0'], 'erosion8': ['4:(... .1. .0.)->0', '4:(... .1. ..0)->0'], 'edge': ['1:(... ... ...)->0', '4:(.0. .1. ...)->1', '4:(01. .1. ...)->1']}
+13             if op_name not in known_patterns:
+14                 msg = 'Unknown pattern ' + op_name + '!'
+15                 raise Exception(msg)
+16             self.patterns = known_patterns[op_name]
+17 
+18     def build_default_lut(self) -> None:
+19         symbols = [0, 1]
+20         m = 1 << 4
+21         self.lut = bytearray((symbols[i & m > 0] for i in range(LUT_SIZE)))
+22 
+23     def _string_permute(self, pattern: str, permutation: list[int]) -> str:
+24         assert len(permutation) == 9
+25         return ''.join((pattern[p] for p in permutation))
+26 
+27     def _pattern_permute(self, basic_pattern: str, options: str, basic_result: int) -> list[tuple[str, int]]:
+28         patterns = [(basic_pattern, basic_result)]
+29         if '4' in options: ## [BRANCH]taken=['Y', 'Y'][/BRANCH]
+30             res = patterns[-1][1]
+31             for i in range(4):
+32                 patterns.append((self._string_permute(patterns[-1][0], ROTATION_MATRIX), res))
+33         if 'M' in options: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+34             n = len(patterns)
+35             for pattern, res in patterns[:n]:
+36                 patterns.append((self._string_permute(pattern, MIRROR_MATRIX), res))
+37         if 'N' in options: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+38             n = len(patterns)
+39             for pattern, res in patterns[:n]:
+40                 pattern = pattern.replace('0', 'Z').replace('1', '0').replace('Z', '1')
+41                 res = 1 - int(res)
+42                 patterns.append((pattern, res))
+43         return patterns
+44 
+45     def build_lut(self) -> bytearray:
+46         self.build_default_lut()
+47         assert self.lut is not None
+48         patterns = []
+49         for p in self.patterns:
+50             m = re.search('(\\w*):?\\s*\\((.+?)\\)\\s*->\\s*(\\d)', p.replace('\n', ''))
+51             if not m: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+52                 msg = 'Syntax error in pattern "' + p + '"'
+53                 raise Exception(msg)
+54             options = m.group(1)
+55             pattern = m.group(2)
+56             result = int(m.group(3))
+57             pattern = pattern.replace(' ', '').replace('\n', '')
+58             patterns += self._pattern_permute(pattern, options, result)
+59         compiled_patterns = []
+60         for pattern in patterns:
+61             p = pattern[0].replace('.', 'X').replace('X', '[01]')
+62             compiled_patterns.append((re.compile(p), pattern[1]))
+63         for i in range(LUT_SIZE):
+64             bitpattern = bin(i)[2:]
+65             bitpattern = ('0' * (9 - len(bitpattern)) + bitpattern)[::-1]
+66             for pattern, r in compiled_patterns:
+67                 if pattern.match(bitpattern): ## [BRANCH]taken=['N']*5120[/BRANCH]
+68                     self.lut[i] = [0, 1][r]
+69         return self.lut
+70 
+[/ANSWER]

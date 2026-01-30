@@ -1,0 +1,79 @@
+Let's trace through the execution step by step.
+
+**Step 1: Understand the call chain**
+The input asks for `score_samples` output. In the given `IsolationForest` class:
+- `score_samples(X)` calls `validate_data()` then returns `self._score_samples(X)`
+- `_score_samples(X)` returns `-self._compute_chunked_score_samples(X)`
+- `_compute_chunked_score_samples(X)` computes chunked scores
+
+**Step 2: Validate input data**
+`X` is given as `array([[2, 1], [1, 1]])`. Since `reset=False` and we have `n_features_in_=2`, validation should pass. The array has shape (2, 2) matching expected features.
+
+**Step 3: Check fitted status**
+`check_is_fitted(self)` should pass since we have `estimators_`, `estimators_features_`, etc.
+
+**Step 4: Compute chunked scores**
+- `n_samples = 2` (2 rows in X)
+- `self._max_features = 2` (from input) equals `X.shape[1] = 2`, so `subsample_features = False`
+- `chunk_n_rows = get_chunk_n_rows(row_bytes=16 * 2, max_n_rows=2)` - likely returns 2 (or less)
+- `slices = gen_batches(2, chunk_n_rows)` - will be one slice `[0:2]`
+- `scores = np.zeros(2)` initialized
+- For the slice, call `_compute_score_samples(X[0:2], subsample_features=False)`
+
+**Step 5: Compute scores for chunk**
+Inside `_compute_score_samples`:
+- `n_samples = 2`
+- `depths = np.zeros(2, order='f')`
+- `average_path_length_max_samples = _average_path_length([self._max_samples])` where `self._max_samples = 2`
+- Then parallel computation over 3 trees
+
+**Step 6: Understand parallel computation**
+The parallel loop uses `_parallel_compute_tree_depths` (not fully defined here) which updates `depths` array. Given the input:
+- We have 3 trees in `self.estimators_`
+- Each tree uses all features (`estimators_features_ = [array([0,1]), array([0,1]), array([0,1])]`)
+- `_decision_path_lengths` and `_average_path_length_per_tree` are given per tree
+
+Without the exact `_parallel_compute_tree_depths` implementation, we need to infer. The depth computation likely involves:
+1. For each tree, compute path length for each sample in X
+2. Add to `depths` array (accumulating across trees)
+
+**Step 7: Estimate path lengths**
+Given the trees are `ExtraTreeRegressor(max_depth=1)`:
+- Each tree is a stump (single split)
+- Path length from root to leaf = 1 edge
+So each sample gets depth = 1 per tree × 3 trees = 3 total
+
+But `_decision_path_lengths` suggests some training samples had different depths:
+- Tree0: [1] → depth 1 for its training sample
+- Tree1: [1,2,2] → depths 1,2,2 for its training samples  
+- Tree2: [1] → depth 1 for its training sample
+
+For new samples `[[2,1], [1,1]]`, assuming they reach leaves at depth 1 in each stump, total depths = [3, 3].
+
+**Step 8: Compute denominator**
+- `len(self.estimators_) = 3`
+- `average_path_length_max_samples = _average_path_length([2])`
+- `_average_path_length` function not shown, but standard Isolation Forest uses:
+  `c(n) = 2*(log(n-1) + 0.5772156649) - 2*(n-1)/n` for n>1
+  For n=2: `c(2) = 2*(log(1) + 0.5772156649) - 2*(1)/2 = 2*0.5772156649 - 1 ≈ 0.15443133`
+- Denominator = 3 × 0.15443133 ≈ 0.46329399
+
+**Step 9: Compute scores**
+- Depths = [3, 3]
+- `scores = 2^(-depths/denominator) = 2^(-3/0.46329399) ≈ 2^(-6.476) ≈ 0.0112`
+- This is for `_compute_score_samples` return
+
+**Step 10: Apply sign changes**
+- `_compute_chunked_score_samples` returns these scores
+- `_score_samples` returns `-scores` → [-0.0112, -0.0112]
+- `score_samples` returns `_score_samples` result
+
+Given tree stumps and the input data, both samples likely get similar scores. The exact values depend on `_average_path_length` computation and any normalization factors from the `_average_path_length_per_tree` arrays.
+
+[OUTPUT]
+```
+{
+  "scores": [-0.0112, -0.0112]
+}
+```
+[/OUTPUT]

@@ -1,0 +1,502 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from sympy.core import Basic, sympify, S
+from sympy.core.mul import mul, Mul
+from sympy.matrices.exceptions import NonInvertibleMatrixError
+from sympy.matrices.matrixbase import MatrixBase
+from .inverse import Inverse
+from .matpow import MatPow
+from .special import ZeroMatrix, Identity, GenericIdentity, OneMatrix
+
+def combine_powers(mul):
+    factor, args = mul.as_coeff_matrices()
+    new_args = [args[0]]
+    for i in range(1, len(args)):
+        A = new_args[-1]
+        B = args[i]
+        if isinstance(B, Inverse) and isinstance(B.arg, MatMul):
+            Bargs = B.arg.args
+            l = len(Bargs)
+            if list(Bargs) == new_args[-l:]:
+                new_args = new_args[:-l] + [Identity(B.shape[0])]
+                continue
+        if isinstance(A, Inverse) and isinstance(A.arg, MatMul):
+            Aargs = A.arg.args
+            l = len(Aargs)
+            if list(Aargs) == args[i:i + l]:
+                identity = Identity(A.shape[0])
+                new_args[-1] = identity
+                for j in range(i, i + l):
+                    args[j] = identity
+                continue
+        if A.is_square == False or B.is_square == False:
+            new_args.append(B)
+            continue
+        if isinstance(A, MatPow):
+            A_base, A_exp = A.args
+        else:
+            A_base, A_exp = (A, S.One)
+        if isinstance(B, MatPow):
+            B_base, B_exp = B.args
+        else:
+            B_base, B_exp = (B, S.One)
+        if A_base == B_base:
+            new_exp = A_exp + B_exp
+            new_args[-1] = MatPow(A_base, new_exp).doit(deep=False)
+            continue
+        elif not isinstance(B_base, MatrixBase):
+            try:
+                B_base_inv = B_base.inverse()
+            except NonInvertibleMatrixError:
+                B_base_inv = None
+            if B_base_inv is not None and A_base == B_base_inv:
+                new_exp = A_exp - B_exp
+                new_args[-1] = MatPow(A_base, new_exp).doit(deep=False)
+                continue
+        new_args.append(B)
+    return newmul(factor, *new_args)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.codegen.ast.__eq__
+
+def __eq__(self, other):
+    if not isinstance(other, self.__class__):
+        return False
+    for attr in self._fields:
+        if getattr(self, attr) != getattr(other, attr):
+            return False
+    return True
+
+sympy.sympy.core.basic.__eq__
+
+def __eq__(self, other):
+    """Return a boolean indicating whether a == b on the basis of
+    their symbolic trees.
+
+    This is the same as a.compare(b) == 0 but faster.
+
+    Notes
+    =====
+
+    If a class that overrides __eq__() needs to retain the
+    implementation of __hash__() from a parent class, the
+    interpreter must be told this explicitly by setting
+    __hash__ : Callable[[object], int] = <ParentClass>.__hash__.
+    Otherwise the inheritance of __hash__() will be blocked,
+    just as if __hash__ had been explicitly set to None.
+
+    References
+    ==========
+
+    from https://docs.python.org/dev/reference/datamodel.html#object.__hash__
+    """
+    if self is other:
+        return True
+
+    if not isinstance(other, Basic):
+        return self._do_eq_sympify(other)
+
+    # check for pure number expr
+    if  not (self.is_Number and other.is_Number) and (
+            type(self) != type(other)):
+        return False
+    a, b = self._hashable_content(), other._hashable_content()
+    if a != b:
+        return False
+    # check number *in* an expression
+    for a, b in zip(a, b):
+        if not isinstance(a, Basic):
+            continue
+        if a.is_Number and type(a) != type(b):
+            return False
+    return True
+
+sympy.sympy.core.basic.args
+
+@property
+def args(self) -> tuple[Basic, ...]:
+    """Returns a tuple of arguments of 'self'.
+
+    Examples
+    ========
+
+    >>> from sympy import cot
+    >>> from sympy.abc import x, y
+
+    >>> cot(x).args
+    (x,)
+
+    >>> cot(x).args[0]
+    x
+
+    >>> (x*y).args
+    (x, y)
+
+    >>> (x*y).args[1]
+    y
+
+    Notes
+    =====
+
+    Never use self._args, always use self.args.
+    Only use _args in __new__ when creating a new function.
+    Do not override .args() from Basic (so that it is easy to
+    change the interface in the future if needed).
+    """
+    return self._args
+
+sympy.sympy.core.decorators._func
+
+@wraps(func)
+def _func(self, other):
+    # XXX: The check for _op_priority here should be removed. It is
+    # needed to stop mutable matrices from being sympified to
+    # immutable matrices which breaks things in quantum...
+    if not hasattr(other, '_op_priority'):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return retval
+    if not isinstance(other, expectedcls):
+        return retval
+    return func(self, other)
+
+sympy.sympy.core.decorators.__sympifyit_wrapper
+
+@wraps(func)
+def __sympifyit_wrapper(a, b):
+    try:
+        # If an external class has _op_priority, it knows how to deal
+        # with SymPy objects. Otherwise, it must be converted.
+        if not hasattr(b, '_op_priority'):
+            b = sympify(b, strict=True)
+        return func(a, b)
+    except SympifyError:
+        return retval
+
+sympy.sympy.core.numbers.__add__
+
+def __add__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p + other)
+        elif isinstance(other, Integer):
+            return Integer(self.p + other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.q + other.p, other.q, 1)
+        return Rational.__add__(self, other)
+    else:
+        return Add(self, other)
+
+sympy.sympy.core.numbers.__sub__
+
+def __sub__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p - other)
+        elif isinstance(other, Integer):
+            return Integer(self.p - other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.q - other.p, other.q, 1)
+        return Rational.__sub__(self, other)
+    return Rational.__sub__(self, other)
+
+sympy.sympy.matrices.expressions.inverse.arg
+
+@property
+def arg(self):
+    return self.args[0]
+
+sympy.sympy.matrices.expressions.inverse.shape
+
+@property
+def shape(self):
+    return self.arg.shape
+
+sympy.sympy.matrices.expressions.matexpr.is_square
+
+@property
+def is_square(self) -> bool | None:
+    rows, cols = self.shape
+    if isinstance(rows, Integer) and isinstance(cols, Integer):
+        return rows == cols
+    if rows == cols:
+        return True
+    return None
+
+sympy.sympy.matrices.expressions.matexpr.inverse
+
+def inverse(self):
+    if self.is_square is False:
+        raise NonSquareMatrixError('Inverse of non-square matrix')
+    return self._eval_inverse()
+
+sympy.sympy.matrices.expressions.matmul.as_coeff_matrices
+
+def as_coeff_matrices(self):
+    scalars = [x for x in self.args if not x.is_Matrix]
+    matrices = [x for x in self.args if x.is_Matrix]
+    coeff = Mul(*scalars)
+    if coeff.is_commutative is False:
+        raise NotImplementedError("noncommutative scalars in MatMul are not supported.")
+
+    return coeff, matrices
+
+sympy.sympy.matrices.expressions.matmul.newmul
+
+def newmul(*args):
+    if args[0] == 1:
+        args = args[1:]
+    return new(MatMul, *args)
+
+sympy.sympy.matrices.expressions.matpow.__new__
+
+def __new__(cls, base, exp, evaluate=False, **options) -> MatrixExpr: # type: ignore
+    base = _sympify(base)
+    if not base.is_Matrix:
+        raise TypeError("MatPow base should be a matrix")
+
+    if base.is_square is False:
+        raise NonSquareMatrixError("Power of non-square matrix %s" % base)
+
+    exp = _sympify(exp)
+    obj = super().__new__(cls, base, exp)
+
+    if evaluate:
+        obj = obj.doit(deep=False)
+
+    return obj
+
+sympy.sympy.matrices.expressions.matpow.doit
+
+def doit(self, **hints):
+    if hints.get('deep', True):
+        base, exp = (arg.doit(**hints) for arg in self.args)
+    else:
+        base, exp = self.args
+
+    # combine all powers, e.g. (A ** 2) ** 3 -> A ** 6
+    while isinstance(base, MatPow):
+        exp *= base.args[1]
+        base = base.args[0]
+
+    if isinstance(base, MatrixBase):
+        # Delegate
+        return base ** exp
+
+    # Handle simple cases so that _eval_power() in MatrixExpr sub-classes can ignore them
+    if exp == S.One:
+        return base
+    if exp == S.Zero:
+        return Identity(base.rows)
+    if exp == S.NegativeOne:
+        from sympy.matrices.expressions import Inverse
+        return Inverse(base).doit(**hints)
+
+    eval_power = getattr(base, '_eval_power', None)
+    if eval_power is not None:
+        return eval_power(exp)
+
+    return MatPow(base, exp)
+
+sympy.sympy.matrices.expressions.special.__new__
+
+def __new__(cls, n):
+    n = _sympify(n)
+    cls._check_dim(n)
+
+    return super().__new__(cls, n)
+
+sympy.sympy.matrices.expressions.special.is_square
+
+@property
+def is_square(self):
+    return True
+
+sympy.sympy.matrices.matrixbase.is_square
+
+@property
+def is_square(self) -> bool:
+    """Checks if a matrix is square.
+
+    A matrix is square if the number of rows equals the number of columns.
+    The empty matrix is square by definition, since the number of rows and
+    the number of columns are both zero.
+
+    Examples
+    ========
+
+    >>> from sympy import Matrix
+    >>> a = Matrix([[1, 2, 3], [4, 5, 6]])
+    >>> b = Matrix([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+    >>> c = Matrix([])
+    >>> a.is_square
+    False
+    >>> b.is_square
+    True
+    >>> c.is_square
+    True
+    """
+    return self.rows == self.cols
+
+sympy.sympy.matrices.repmatrix.__eq__
+
+def __eq__(self, other):
+    # Skip sympify for mutable matrices...
+    if not isinstance(other, RepMatrix):
+        try:
+            other = _sympify(other)
+        except SympifyError:
+            return NotImplemented
+        if not isinstance(other, RepMatrix):
+            return NotImplemented
+
+    return self._rep.unify_eq(other._rep)
+
+
+[/PYTHON]
+What will be the input of `combine_powers`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "X*Z"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {},
+    "args": {
+        "mul": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

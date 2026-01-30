@@ -1,0 +1,416 @@
+<think>
+Simulate the execution of change_order_status(order_id=1, status="Delivered"):
+
+* Check if order_id in self.orders: 
+   - self.orders = {"1": {...}}
+   - order_id = 1
+   - Since dictionary key "1" exists, the branch "order_id in self.orders" is taken → append 'Y'.
+   
+* Therefore, only the else branch is NOT taken, so it is 'N'.
+
+Final branch predictions:
+- 'Y' for the first branch ("if order_id in self.orders")
+- 'N' for the second branch ("else")
+</think>
+
+[ANSWER]
+1 class Warehouse():
+2 
+3     def __init__(self):
+4         self.inventory = {}
+5         self.orders = {}
+6 
+7     def change_order_status(self, order_id, status):
+8         if (order_id in self.orders): ## [BRANCH]taken=['Y'][/BRANCH]
+9             self.orders[order_id]['status'] = status
+10        else: ## [BRANCH]taken=['N'][/BRANCH]
+11            return False
+12 
+[/ANSWER]
+
+[FILEPATH] AlexLin98-NB-Coding-d7229bc/src/run_zh.py [/FILEPATH]
+from pathlib import Path
+import sys
+from src.constant import Temperature, MODEL_NAME
+from src.utils import token_num, get_model
+import json
+import pandas as pd
+import time
+
+
+def get_pred(model, prompt, temp, max_tokens):
+    ans = model.generate(prompt=prompt, temperature=temp, max_tokens=max_tokens, seed=1)
+    if ans["errors"] != []:
+        raise Exception(ans["errors"][0]["message"])
+    return ans["text"]
+
+
+if __name__ == "__main__":
+    # print(sys.argv)
+    temperature, max_tokens, input_file = Temperature.low.value, 150, sys.argv[1]
+    input_path, output_path, model_path = f"data/input/{input_file}.json", f"data/output/{input_file}.jsonl", "run/model.cairo_2024_04_30_01_42_11/"
+    max_tokens_dict = {"JSAP": 2000, "JavaAP": 1500, "JSFuzz": 1500}
+    model = get_model(Path(model_path), seed=1)
+    answers = []
+    run_id = int(time.time())
+    with open(output_path, "w") as f_out:
+        print(f"[ * ] Start to get answer from {MODEL_NAME}!")
+        df = pd.read_json(input_path, lines=True)
+        for row in df.iterrows():
+            row_id, row_content = row[0], row[1]
+            method, code, input = row_content["method"], row_content["code"], row_content["input"]
+            max_tokens = max_tokens_dict[row_content["benchmark"]] if max_tokens_dict.get(row_content["benchmark"]) else max_tokens
+            prompt = f"{method}\n{code}\n{input}"
+            answer = get_pred(model, prompt, temperature, max_tokens)
+            # print("answer", answer)
+            row_content["answer"] = answer
+            answers.append(row_content)
+            f_out.write(f"{json.dumps({'id': row_id, 'answer': answer})}\n")
+            f_out.flush()
+            print(f"[+] Get answer for {row_id}")
+        f_out.close()
+    # assert len(answers) == 5000
+    print(f"[+] Write to {output_path} succeed! Current run_id is {run_id}!")
+
+[FILEPATH] AlexLin98-NB-Coding-d7229bc/src/generate_low_temp.py [/FILEPATH]
+from src.run_llama3 import get_pred
+from pathlib import Path
+from src.constant import Temperature, MODEL_NAME
+from src.utils import token_num, get_model
+import json
+import pandas as pd
+import time
+
+
+if __name__ == "__main__":
+    # input_path, model_path, output_path, max_tokens = "data/input/1_df.jsonl", Path("/data3/zxb/workspace/llama3-LLaVA-main/models/Llama-3.1-8B-Instruct-chinese/"), "data/output/1_df.jsonl", 1500
+    # model = get_model(model_path, seed=1)
+    # answers = []
+    input_path, output_path, max_tokens = "data/input/JSAP-8k.jsonl", "data/output/JSAP-8k-low-temp.jsonl", 2000
+    answers = []
+    with open(output_path, "w") as f_out:
+        df = pd.read_json(input_path, lines=True)
+        run_id = int(time.time())
+        for row in df.iterrows():
+            row_id, row_content = row[0], row[1]
+            temperature, code, input, model_name = Temperature.low.value, row_content["code"], row_content["input"], row_content["model"]
+            prompt = f"{code}\n{input}"
+            answer = get_pred(model_name, prompt, temperature, max_tokens)
+            # print("answer", answer)
+            row_content["answer"] = answer
+            answers.append(row_content)
+            f_out.write(f"{json.dumps({'id': row_id, 'answer': answer})}\n")
+            f_out.flush()
+            print(f"[+] Get answer for {row_id}")
+        f_out.close()
+    assert len(answers) == 8000
+    print(f"[+] Write to {output_path} succeed! Current run_id is {run_id}!")
+
+[FILEPATH] AlexLin98-NB-Coding-d7229bc/src/eval_sample.py [/FILEPATH]
+import json
+import random
+from pathlib import Path
+import sys
+from typing import Any, List, Mapping
+from src.utils import LOG
+
+DEBUG = 100
+BENCHMARK_NAME = ""
+FRAC = 0.6
+GOLD_PATH = ""
+TEST_CODE = ""
+TASK = ""
+MODEL = ""
+BENCHMARK = ""
+EXECUTION = ""
+
+
+def get_golden_data(path):
+    with open(path) as f:
+        all_data = json.load(f)
+        if "success_num" not in all_data:
+            all_data["success_num"] = 0
+            all_data["diff_num"] = 0
+        return all_data
+
+
+def compute_df(data: Mapping[str, Any]) -> float:
+    try:
+        df: float = float(data["edit-script"][0]["detail"]["df"])
+    except KeyError:
+        raise
+    except Exception:
+        LOG.error(f"Unexpected detail DF exception: {data}")
+        raise
+    return df
+
+
+def compute_accuracy(output, gold):
+    ans = "no"
+    for line in output:
+        if line not in gold:
+            continue
+        if line["brs"] == gold[line["brs"]]:
+            ans = "yes"
+            break
+    return ans
+
+
+def evaluate(pred_data_path, gold_data_path):
+    pred_data_path, gold_data_path = Path(pred_data_path), Path(gold_data_path)
+    pred_data, gold_data = get_golden_data(pred_data_path), get_golden_data(gold_data_path)
+    model = gold_data["model"] if "model" in gold_data else ""
+    del pred_data["success_num"], pred_data["diff_num"]
+    n = sum(1 for _ in pred_data["answers"]) if BENCHMARK == "JSFuzz" else len(pred_data["answers"])
+    LOG.info(f"Input {gold_data_path} data success, {n} samples!")
+    output = []
+    for i, v in enumerate(pred_data["answers"]):
+        pred_ans, gold_ans = v, gold_data["answers"][i]
+        acc = compute_accuracy(pred_ans, gold_ans)
+        df = compute_df(pred_ans)
+        output.append({"id": i, "acc": acc, "df": df})
+    return output
+
+
+if __name__ == "__main__":
+    # export a=0.5
+    # print(sys.argv)
+    # print(float(sys.argv[1]) * 100)
+    random.seed(1)
+    paths = [
+        ("0.03_avg.json", "0.03_avg.json"),
+        ("0.3_avg.json", "0.3_avg.json"),
+        ("0.6_avg.json", "0.6_avg.json"),
+        ("0.8_avg.json", "0.8_avg.json"),
+    ]
+    for src, tgt in paths:
+        BENCHMARK = "JSAP"
+        model_name = "0.8-fuzzy"
+        src_path, tgt_path = f"data/output/{BENCHMARK}/predict/{src}", f"data/output/{BENCHMARK}/eval/golden/{tgt}"
+        with open(f"data/output/{BENCHMARK}/{model_name}.json", "w") as f:
+            output = evaluate(src_path, tgt_path)
+            results = {
+                "data": {"model": model_name, "answers": output},
+                "success_num": len([i for i in output if i["acc"] == "yes"]),
+                "diff_num": len([i for i in output if abs(i["df"]) > 0.05]),
+            }
+            json.dump(results, f)
+
+[FILEPATH] AlexLin98-NB-Coding-d7229bc/src/merge.py [/FILEPATH]
+import json
+
+path = "data/output/JSAP/predict/merge.jsonl"
+target = "data/output/JSAP/0.3_avg.json"
+n = 0
+with open(path, "r") as f:
+    with open(target, "w") as f_tgt:
+        tgt_data = {"success_num": 0, "diff_num": 0, "answers": []}
+        for line in f:
+            line = json.loads(line)
+            if line["cnt"] >= 3:
+                line["answer"] = [line["answer"] for i in range(3)]
+            else:
+                line["answer"] += [line["answer"][0] for i in range(3 - line["cnt"])]
+            n += 1
+            if n == 100:
+                break
+        f_tgt.write(f'{json.dumps(tgt_data, ensure_ascii=False)}\n')
+        f_tgt.flush()
+        f_tgt.close()
+    f.close()
+
+[FILEPATH] AlexLin98-NB-Coding-d7229bc/src/eval_en.py [/FILEPATH]
+import json
+import random
+from pathlib import Path
+from typing import Any, List, Mapping
+from src.utils import LOG
+from src.constant import Temperature, MODEL_NAME
+
+DEBUG = 100
+FRAC = 0.6
+GOLD_PATH = ""
+TASK = "prediction"
+MODEL = ""
+BENCHMARK = ""
+EXECUTION = ""
+
+
+def get_golden_data(path):
+    with open(path) as f:
+        all_data = json.load(f)
+        if "success_num" not in all_data:
+            all_data["success_num"] = 0
+            all_data["diff_num"] = 0
+        return all_data
+
+
+def compute_df(data: Mapping[str, Any]) -> float:
+    try:
+        df: float = float(data["edit-script"][0]["detail"]["df"])
+    except KeyError:
+        raise
+    except Exception:
+        LOG.error(f"Unexpected detail DF exception: {data}")
+        raise
+    return df
+
+
+def evaluate(pred_data_path, gold_data_path):
+    pred_data_path, gold_data_path = Path(pred_data_path), Path(gold_data_path)
+    pred_data, gold_data = get_golden_data(pred_data_path), get_golden_data(gold_data_path)
+    model = gold_data["model"] if "model" in gold_data else ""
+    del pred_data["success_num"], pred_data["diff_num"]
+    n = sum(1 for _ in pred_data["answers"]) if BENCHMARK == "JSFuzz" else len(pred_data["answers"])
+    LOG.info(f"Input {gold_data_path} data success, {n} samples!")
+    output = []
+    for i, v in enumerate(pred_data["answers"]):
+        pred_ans, gold_ans = v, gold_data["answers"][i]
+        if "brs" not in gold_ans:
+            gold_ans["brs"] = "BRS1"
+        if "brs" not in pred_ans:
+            pred_ans["brs"] = "BRS1"
+        if "reversed" not in pred_ans:
+            pred_ans["reversed"] = 0
+        if "brs" not in pred_ans:
+            pred_ans["brs"] = "BRS1"
+        acc = "yes" if (gold_ans["brs"] == pred_ans["brs"]) and (gold_ans["reversed"] == pred_ans["reversed"]) else "no"
+        try:
+            df = compute_df(pred_ans)
+        except Exception:
+            df = 10000
+        output.append({"id": i, "acc": acc, "df": df})
+    return output
+
+
+if __name__ == "__main__":
+    # input: gold data path and file for acc.
+    random.seed(1)
+    BENCHMARK = "JavaAP-10k"
+    model_name = "qwen-1.5-14b-instruct"
+    if BENCHMARK == "JSFuzz":
+        model_name = "qwen-1.5-7b-instruct"
+    elif BENCHMARK == "JSAP":
+        model_name = "qwen-1.5-14b-instruct"
+    elif BENCHMARK == "JavaAP-10k":
+        model_name = "qwen-1.5-14b-instruct"
+    if model_name == "claude-3-5-sonnet-20240620":
+        model_name = "claude-3.5"
+    # TODO: accurate for 10k.
+    src_path, tgt_path = f"data/output/{BENCHMARK}/predict/{model_name}.json", f"data/output/{BENCHMARK}/eval/golden/{BENCHMARK}.json"
+    with open(src_path, "r") as f_src:
+        src_data = json.load(f_src)
+        temp = "low" if "low" in model_name else "high"
+        src_data["model"] = f"{model_name}-{temp}"
+    f_src.close()
+    with open(src_path, "w") as f_src:
+        json.dump(src_data, f_src, ensure_ascii=False)
+    f_src.close()
+    with open(f"data/output/{BENCHMARK}/{model_name}.json", "w") as f:
+        output = evaluate(src_path, tgt_path)
+        results = {
+            "data": {"model": model_name, "answers": output},
+            "success_num": len([i for i in output if i["acc"] == "yes"]),
+            "diff_num": len([i for i in output if abs(i["df"]) > 0.05]),
+        }
+        json.dump(results, f)
+    print("All Done!")
+
+[FILEPATH] AlexLin98-NB-Coding-d7229bc/src/eval.py [/FILEPATH]
+import json
+import random
+from pathlib import Path
+from typing import Any, List, Mapping
+from src.utils import LOG
+from src.constant import Temperature, MODEL_NAME
+
+DEBUG = 100
+FRAC = 0.6
+GOLD_PATH = ""
+TASK = "prediction"
+MODEL = ""
+BENCHMARK = ""
+EXECUTION = ""
+
+
+def get_golden_data(path):
+    with open(path) as f:
+        all_data = json.load(f)
+        if "success_num" not in all_data:
+            all_data["success_num"] = 0
+            all_data["diff_num"] = 0
+        return all_data
+
+
+def compute_df(data: Mapping[str, Any]) -> float:
+    try:
+        df: float = float(data["edit-script"][0]["detail"]["df"])
+    except KeyError:
+        raise
+    except Exception:
+        LOG.error(f"Unexpected detail DF exception: {data}")
+        raise
+    return df
+
+
+def evaluate(pred_data_path, gold_data_path):
+    pred_data_path, gold_data_path = Path(pred_data_path), Path(gold_data_path)
+    pred_data, gold_data = get_golden_data(pred_data_path), get_golden_data(gold_data_path)
+    model = gold_data["model"] if "model" in gold_data else ""
+    del pred_data["success_num"], pred_data["diff_num"]
+    n = sum(1 for _ in pred_data["answers"]) if BENCHMARK == "JSFuzz" else len(pred_data["answers"])
+    LOG.info(f"Input {gold_data_path} data success, {n} samples!")
+    output = []
+    for i, v in enumerate(pred_data["answers"]):
+        pred_ans, gold_ans = v, gold_data["answers"][i]
+        if "brs" not in gold_ans:
+            gold_ans["brs"] = "BRS1"
+        if "brs" not in pred_ans:
+            pred_ans["brs"] = "BRS1"
+        if "reversed" not in pred_ans:
+            pred_ans["reversed"] = 0
+        if "brs" not in pred_ans:
+            pred_ans["brs"] = "BRS1"
+        acc = "yes" if (gold_ans["brs"] == pred_ans["brs"]) and (gold_ans["reversed"] == pred_ans["reversed"]) else "no"
+        try:
+            df = compute_df(pred_ans)
+        except Exception:
+            df = 10000
+        output.append({"id": i, "acc": acc, "df": df})
+    return output
+
+
+if __name__ == "__main__":
+    # input: gold data path and file for acc.
+    random.seed(1)
+    BENCHMARK = "JavaAP-10k"
+    model_name = "qwen-1.5-14b-instruct"
+    if BENCHMARK == "JSFuzz":
+        model_name = "qwen-1.5-7b-instruct"
+    elif BENCHMARK == "JSAP":
+        model_name = "qwen-1.5-14b-instruct"
+    elif BENCHMARK == "JavaAP-10k":
+        model_name = "qwen-1.5-14b-instruct"
+    if model_name == "claude-3-5-sonnet-20240620":
+        model_name = "claude-3.5"
+    # TODO: accurate for 10k.
+    src_path, tgt_path = f"data/output/{BENCHMARK}/predict/{model_name}.json", f"data/output/{BENCHMARK}/eval/golden/{BENCHMARK}.json"
+    with open(f"data/output/{BENCHMARK}/{model_name}.json", "w") as f:
+        output = evaluate(src_path, tgt_path)
+        results = {
+            "data": {"model": model_name, "answers": output},
+            "success_num": len([i for i in output if i["acc"] == "yes"]),
+            "diff_num": len([i for i in output if abs(i["df"]) > 0.05]),
+        }
+        json.dump(results, f)
+    print("All Done!")
+
+[FILEPATH] AlexLin98-NB-Coding-d7229bc/src/statistic_df.py [/FILEPATH]
+import json
+from src.constant import Temperature, MODEL_NAME
+
+path = "data/output/JSFuzz.json"
+output = "data/output/JSFuzz.json"
+df_min, df_max = 1e10, -1
+df_dict, num_dict, fail_dict = {}, {}, {}
+idx, cnt, sample = 

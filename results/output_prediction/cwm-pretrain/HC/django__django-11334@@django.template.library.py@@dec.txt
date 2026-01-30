@@ -1,0 +1,540 @@
+[/EXAMPLE]
+[PYTHON]
+import functools
+from importlib import import_module
+from inspect import getfullargspec, unwrap
+from django.utils.html import conditional_escape
+from django.utils.itercompat import is_iterable
+from .base import Node, Template, token_kwargs
+from .exceptions import TemplateSyntaxError
+
+class Library:
+
+    def __init__(self):
+        self.filters = {}
+        self.tags = {}
+
+    def tag(self, name=None, compile_function=None):
+        if name is None and compile_function is None:
+            return self.tag_function
+        elif name is not None and compile_function is None:
+            if callable(name):
+                return self.tag_function(name)
+            else:
+
+                def dec(func):
+                    return self.tag(name, func)
+                return dec
+        elif name is not None and compile_function is not None:
+            self.tags[name] = compile_function
+            return compile_function
+        else:
+            raise ValueError('Unsupported arguments to Library.tag: (%r, %r)' % (name, compile_function))
+
+    def tag_function(self, func):
+        self.tags[getattr(func, '_decorated_function', func).__name__] = func
+        return func
+
+    def filter(self, name=None, filter_func=None, **flags):
+        if name is None and filter_func is None:
+
+            def dec(func):
+                return self.filter_function(func, **flags)
+            return dec
+        elif name is not None and filter_func is None:
+            if callable(name):
+                return self.filter_function(name, **flags)
+            else:
+
+                def dec(func):
+                    return self.filter(name, func, **flags)
+                return dec
+        elif name is not None and filter_func is not None:
+            self.filters[name] = filter_func
+            for attr in ('expects_localtime', 'is_safe', 'needs_autoescape'):
+                if attr in flags:
+                    value = flags[attr]
+                    setattr(filter_func, attr, value)
+                    if hasattr(filter_func, '_decorated_function'):
+                        setattr(filter_func._decorated_function, attr, value)
+            filter_func._filter_name = name
+            return filter_func
+        else:
+            raise ValueError('Unsupported arguments to Library.filter: (%r, %r)' % (name, filter_func))
+
+    def filter_function(self, func, **flags):
+        name = getattr(func, '_decorated_function', func).__name__
+        return self.filter(name, func, **flags)
+
+    def simple_tag(self, func=None, takes_context=None, name=None):
+
+        def dec(func):
+            params, varargs, varkw, defaults, kwonly, kwonly_defaults, _ = getfullargspec(unwrap(func))
+            function_name = name or getattr(func, '_decorated_function', func).__name__
+
+            @functools.wraps(func)
+            def compile_func(parser, token):
+                bits = token.split_contents()[1:]
+                target_var = None
+                if len(bits) >= 2 and bits[-2] == 'as':
+                    target_var = bits[-1]
+                    bits = bits[:-2]
+                args, kwargs = parse_bits(parser, bits, params, varargs, varkw, defaults, kwonly, kwonly_defaults, takes_context, function_name)
+                return SimpleNode(func, takes_context, args, kwargs, target_var)
+            self.tag(function_name, compile_func)
+            return func
+        if func is None:
+            return dec
+        elif callable(func):
+            return dec(func)
+        else:
+            raise ValueError('Invalid arguments provided to simple_tag')
+
+    def inclusion_tag(self, filename, func=None, takes_context=None, name=None):
+
+        def dec(func):
+            params, varargs, varkw, defaults, kwonly, kwonly_defaults, _ = getfullargspec(unwrap(func))
+            function_name = name or getattr(func, '_decorated_function', func).__name__
+
+            @functools.wraps(func)
+            def compile_func(parser, token):
+                bits = token.split_contents()[1:]
+                args, kwargs = parse_bits(parser, bits, params, varargs, varkw, defaults, kwonly, kwonly_defaults, takes_context, function_name)
+                return InclusionNode(func, takes_context, args, kwargs, filename)
+            self.tag(function_name, compile_func)
+            return func
+        return dec
+[/PYTHON]
+
+What will be the output of `dec`, given the following input:
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "func": {
+            "__module__": "template_tests.test_library",
+            "__name__": "func",
+            "__qualname__": "SimpleTagRegistrationTests.test_simple_tag_wrapped.\"<locals>\".func",
+            "__doc__": null,
+            "__annotations__": {},
+            "__wrapped__": {}
+        }
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "__module__": XXX,
+    "__name__": XXX,
+    "__qualname__": XXX,
+    "__doc__": XXX,
+    "__annotations__": {},
+    "__wrapped__": {}
+}
+```
+[/STRUCTURE]
+
+<think>
+1. `dec` is a closure defined inside `simple_tag` that returns `func`.
+2. Since `func` is provided in the input, `dec(func)` will return the `func` function unchanged.
+3. The output structure must be filled with the attributes of the input `func`.
+</think>
+[OUTPUT]
+```
+{
+    "__module__": "template_tests.test_library",
+    "__name__": "func",
+    "__qualname__": "SimpleTagRegistrationTests.test_simple_tag_wrapped.\"<locals>\".func",
+    "__doc__": null,
+    "__annotations__": {},
+    "__wrapped__": {}
+}
+```
+[/OUTPUT]
+<|assistant|>
+
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+
+[EXAMPLE]
+
+[PYTHON]
+def main(n):
+    for i in range(n):
+        if i % 2 == 0:
+            print('even')
+        else:
+            print('odd')
+    return
+[/PYTHON]
+
+[INPUT]
+```
+{
+    "args": {
+        "n": 5
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "stdout": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+The input is n=5. The function iterates from 0 to 4.
+At i=0, it prints 'even'.
+At i=1, it prints 'odd'.
+At i=2, it prints 'even'.
+At i=3, it prints 'odd'.
+At i=4, it prints 'even'.
+The final output is a dictionary with the list of printed strings.
+</think>
+
+[OUTPUT]
+```
+{
+    "stdout": ["even", "odd", "even", "odd", "even"]
+}
+```
+[/OUTPUT]
+
+[/EXAMPLE]
+
+[PYTHON]
+import functools
+from importlib import import_module
+from inspect import getfullargspec, unwrap
+from django.utils.html import conditional_escape
+from django.utils.itercompat import is_iterable
+from .base import Node, Template, token_kwargs
+from .exceptions import TemplateSyntaxError
+
+class Library:
+
+    def __init__(self):
+        self.filters = {}
+        self.tags = {}
+
+    def tag(self, name=None, compile_function=None):
+        if name is None and compile_function is None:
+            return self.tag_function
+        elif name is not None and compile_function is None:
+            if callable(name):
+                return self.tag_function(name)
+            else:
+
+                def dec(func):
+                    return self.tag(name, func)
+                return dec
+        elif name is not None and compile_function is not None:
+            self.tags[name] = compile_function
+            return compile_function
+        else:
+            raise ValueError('Unsupported arguments to Library.tag: (%r, %r)' % (name, compile_function))
+
+    def tag_function(self, func):
+        self.tags[getattr(func, '_decorated_function', func).__name__] = func
+        return func
+
+    def filter(self, name=None, filter_func=None, **flags):
+        if name is None and filter_func is None:
+
+            def dec(func):
+                return self.filter_function(func, **flags)
+            return dec
+        elif name is not None and filter_func is None:
+            if callable(name):
+                return self.filter_function(name, **flags)
+            else:
+
+                def dec(func):
+                    return self.filter(name, func, **flags)
+                return dec
+        elif name is not None and filter_func is not None:
+            self.filters[name] = filter_func
+            for attr in ('expects_localtime', 'is_safe', 'needs_autoescape'):
+                if attr in flags:
+                    value = flags[attr]
+                    setattr(filter_func, attr, value)
+                    if hasattr(filter_func, '_decorated_function'):
+                        setattr(filter_func._decorated_function, attr, value)
+            filter_func._filter_name = name
+            return filter_func
+        else:
+            raise ValueError('Unsupported arguments to Library.filter: (%r, %r)' % (name, filter_func))
+
+    def filter_function(self, func, **flags):
+        name = getattr(func, '_decorated_function', func).__name__
+        return self.filter(name, func, **flags)
+
+    def simple_tag(self, func=None, takes_context=None, name=None):
+
+        def dec(func):
+            params, varargs, varkw, defaults, kwonly, kwonly_defaults, _ = getfullargspec(unwrap(func))
+            function_name = name or getattr(func, '_decorated_function', func).__name__
+
+            @functools.wraps(func)
+            def compile_func(parser, token):
+                bits = token.split_contents()[1:]
+                target_var = None
+                if len(bits) >= 2 and bits[-2] == 'as':
+                    target_var = bits[-1]
+                    bits = bits[:-2]
+                args, kwargs = parse_bits(parser, bits, params, varargs, varkw, defaults, kwonly, kwonly_defaults, takes_context, function_name)
+                return SimpleNode(func, takes_context, args, kwargs, target_var)
+            self.tag(function_name, compile_func)
+            return func
+        if func is None:
+            return dec
+        elif callable(func):
+            return dec(func)
+        else:
+            raise ValueError('Invalid arguments provided to simple_tag')
+
+    def inclusion_tag(self, filename, func=None, takes_context=None, name=None):
+
+        def dec(func):
+            params, varargs, varkw, defaults, kwonly, kwonly_defaults, _ = getfullargspec(unwrap(func))
+            function_name = name or getattr(func, '_decorated_function', func).__name__
+
+            @functools.wraps(func)
+            def compile_func(parser, token):
+                bits = token.split_contents()[1:]
+                args, kwargs = parse_bits(parser, bits, params, varargs, varkw, defaults, kwonly, kwonly_defaults, takes_context, function_name)
+                return InclusionNode(func, takes_context, args, kwargs, filename)
+            self.tag(function_name, compile_func)
+            return func
+        return dec
+[/PYTHON]
+
+What will be the output of `dec`, given the following input:
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "func": {
+            "__module__": "template_tests.test_library",
+            "__name__": "func",
+            "__qualname__": "SimpleTagRegistrationTests.test_simple_tag_wrapped.\"<locals>\".func",
+            "__doc__": null,
+            "__annotations__": {},
+            "__wrapped__": {}
+        }
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "__module__": XXX,
+    "__name__": XXX,
+    "__qualname__": XXX,
+    "__doc__": XXX,
+    "__annotations__": {},
+    "__wrapped__": {}
+}
+```
+[/STRUCTURE]
+
+Remember to enclose your reasoning process between <think> and </think>, and the predicted output between [OUTPUT] and [/OUTPUT]. Do not generate anything outside these tags.
+
+<think>
+The function `dec` is defined inside `simple_tag` and returns the input function `func` unchanged. Therefore, the output will have the same structure and values as the input `func`.
+</think>
+
+[OUTPUT]
+{
+    "__module__": "template_tests.test_library",
+    "__name__": "func",
+    "__qualname__": "SimpleTagRegistrationTests.test_simple_tag_wrapped.\"<locals>\".func",
+    "__doc__": null,
+    "__annotations__": {},
+    "__wrapped__": {}
+}
+[/OUTPUT]
+<|assistant|>
+/think>
+The function `dec` is defined inside `simple_tag` and returns the input function `func` unchanged. Therefore, the output will have the same structure and values as the input `func`.
+</think>
+
+[OUTPUT]
+{
+    "__module__": "template_tests.test_library",
+    "__name__": "func",
+    "__qualname__": "SimpleTagRegistrationTests.test_simple_tag_wrapped.\"<locals>\".func",
+    "__doc__": null,
+    "__annotations__": {},
+    "__wrapped__": {}
+}
+[/OUTPUT]
+<|assistant|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+
+[EXAMPLE]
+
+[PYTHON]
+def main(n):
+    for i in range(n):
+        if i % 2 == 0:
+            print('even')
+        else:
+            print('odd')
+    return
+[/PYTHON]
+
+[INPUT]
+```
+{
+    "args": {
+        "n": 5
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "stdout": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+The input is n=5. The function iterates from 0 to 4.
+At i=0, it prints 'even'.
+At i=1, it prints 'odd'.
+At i=2, it prints 'even'.
+At i=3, it prints 'odd'.
+At i=4, it prints 'even'.
+The final output is a dictionary with the list of printed strings.
+</think>
+
+[OUTPUT]
+```
+{
+    "stdout": ["even", "odd", "even", "odd", "even"]
+}
+```
+[/OUTPUT]
+
+[/EXAMPLE]
+
+[PYTHON]
+import functools
+from importlib import import_module
+from inspect import getfullargspec, unwrap
+from django.utils.html import conditional_escape
+from django.utils.itercompat import is_iterable
+from .base import Node, Template, token_kwargs
+from .exceptions import TemplateSyntaxError
+
+class Library:
+
+    def __init__(self):
+        self.filters = {}
+        self.tags = {}
+
+    def tag(self, name=None, compile_function=None):
+        if name is None and compile_function is None:
+            return self.tag_function
+        elif name is not None and compile_function is None:
+            if callable(name):
+                return self.tag_function(name)
+            else:
+
+                def dec(func):
+                    return self.tag(name, func)
+                return dec
+        elif name is not None and compile_function is not None:
+            self.tags[name] = compile_function
+            return compile_function
+        else:
+            raise ValueError('Unsupported arguments to Library.tag: (%r, %r)' % (name, compile_function))
+
+    def tag_function(self, func):
+        self.tags[getattr(func, '_decorated_function', func).__name__] = func
+        return func
+
+    def filter(self, name=None, filter_func=None, **flags):
+        if name is None and filter_func is None:
+
+            def dec(func):
+                return self.filter_function(func, **flags)
+            return dec
+        elif name is not None and filter_func is None:
+            if callable(name):
+                return self.filter_function(name, **flags)
+            else:
+
+                def dec(func):
+                    return self.filter(name, func, **flags)
+                return dec
+        elif name is not None and filter_func is not None:
+            self.filters[name] = filter_func
+            for attr in ('expects_localtime', 'is_safe', 'needs_autoescape'):
+                if attr in flags:
+                    value = flags[attr]
+                    setattr(filter_func, attr, value)
+                    if hasattr(filter_func, '_decorated_function'):
+                        setattr(filter_func._decorated_function, attr, value)
+            filter_func._filter_name = name
+            return filter_func
+        else:
+            raise ValueError('Unsupported arguments to Library.filter: (%r, %r)' % (name, filter_func))
+
+    def filter_function(self, func, **flags):
+        name = getattr(func, '_decorated_function', func).__name__
+        return self.filter(name, func, **flags)
+
+    def simple_tag(self, func=None, takes_context=None, name=None):
+
+        def dec(func):
+            params, varargs, varkw, defaults, kwonly, kwonly_defaults, _ = getfullargspec(unwrap(func))
+            function_name = name or getattr(func, '_decorated_function', func).__name__
+
+            @functools.wraps(func)
+            def compile_func(parser, token):
+                bits = token.split_contents()[1:]
+                target_var = None
+                if len(bits) >= 2 and bits[-2] == 'as':
+                    target_var = bits[-1]
+                    bits = bits[:-2]
+                args, kwargs = parse_bits(parser, bits, params, varargs, varkw, defaults, kwonly, kwonly_defaults, takes_context, function_name)
+                return SimpleNode(func, takes_context, args, kwargs, target_var)
+            self.tag(function_name, compile_func)
+            return func
+        if func is None:
+            return dec
+        elif callable(func):
+            return dec(func)
+        else:
+            raise ValueError('Invalid arguments provided to simple_tag')
+
+    def inclusion_tag(self, filename, func=None, takes_context=None, name=None):
+
+        def dec(func):
+            params, varargs, varkw, defaults, kwonly, kwonly_defaults, _ = getfullargspec(unwrap(func))
+            function_name = name or getattr(func, '_decorated_function', func).__name__
+
+            @functools.wraps(func)
+            def compile_func(parser, token):
+                bits = token.split_contents()[1:]
+                args, kwargs = parse_bits(parser, bits, params, varargs, varkw, defaults, kw

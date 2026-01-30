@@ -1,0 +1,478 @@
+<think>
+The method fit_transform is called on a FeatureUnion instance with the following inputs:
+* X: A 2D array [[nan, 1.0], [1.0, nan]]
+* y: None
+
+The method starts by checking if routing is enabled. Since the input does not specify any routing parameters, we can assume that routing is not enabled, so the else branch is taken (1st taken=).
+
+In the else block, the method creates an empty Bunch object and iterates over the transformer_list. For each transformer, it checks if it has a fit_transform method. Since both SimpleImputer and MissingIndicator have fit_transform methods, this branch is taken (2nd taken=).
+
+After the iteration, the method calls _parallel_func to execute fit_transform on each transformer in parallel. Since n_jobs is None, the transformers will be processed sequentially. The result is a list of tuples containing the transformed data and the updated transformers.
+
+Finally, the method checks if the results list is empty. Since there are 2 transformers in the list, this branch is not taken (3rd taken=).
+
+The method then calls _update_transformer_list to update the transformer_list with the updated transformers from the results.
+</think>
+
+[ANSWER]
+1 import numpy as np
+2 from scipy import sparse
+3 from sklearn.base import TransformerMixin, _fit_context, clone
+4 from sklearn.preprocessing import FunctionTransformer
+5 from sklearn.utils import Bunch
+6 from sklearn.utils._set_output import _get_container_adapter, _safe_set_output
+7 from sklearn.utils.metadata_routing import (
+8     MetadataRouter,
+9     MethodMapping,
+10     _raise_for_params,
+11     _routing_enabled,
+12     get_routing_for_object,
+13     process_routing,
+14 )
+15 from sklearn.utils.metaestimators import _BaseComposition, available_if
+16 from sklearn.utils.parallel import Parallel, delayed
+17 
+18 class FeatureUnion(TransformerMixin, _BaseComposition):
+19 
+20     def __init__(self, transformer_list, *, n_jobs=None, transformer_weights=None, verbose=False, verbose_feature_names_out=True):
+21         self.transformer_list = transformer_list
+22         self.n_jobs = n_jobs
+23         self.transformer_weights = transformer_weights
+24         self.verbose = verbose
+25         self.verbose_feature_names_out = verbose_feature_names_out
+26 
+27     def _validate_transformers(self):
+28         names, transformers = zip(*self.transformer_list)
+29         self._validate_names(names)
+30         for t in transformers:
+31             if t in ('drop', 'passthrough'): ## [BRANCH]taken=[N][/BRANCH]
+32                 continue
+33             if not (hasattr(t, 'fit') or hasattr(t, 'fit_transform')) or not hasattr(t, 'transform'):
+34                 raise TypeError("All estimators should implement fit and transform. '%s' (type %s) doesn't" % (t, type(t)))
+35 
+36     def _validate_transformer_weights(self):
+37         if not self.transformer_weights: ## [BRANCH]taken=[N][/BRANCH]
+38             return
+39         transformer_names = set((name for name, _ in self.transformer_list))
+40         for name in self.transformer_weights:
+41             if name not in transformer_names:
+42                 raise ValueError(f'Attempting to weight transformer "{name}", but it is not present in transformer_list.')
+43 
+44     def _iter(self):
+45         get_weight = (self.transformer_weights or {}).get
+46         for name, trans in self.transformer_list:
+47             if trans == 'drop': ## [BRANCH]taken=[N][/BRANCH]
+48                 continue
+49             if trans == 'passthrough': ## [BRANCH]taken=[N][/BRANCH]
+50                 trans = FunctionTransformer(feature_names_out='one-to-one')
+51             yield (name, trans, get_weight(name))
+52 
+53     def fit_transform(self, X, y=None, **params):
+54         if _routing_enabled(): ## [BRANCH]taken=[N][/BRANCH]
+55             routed_params = process_routing(self, 'fit_transform', **params)
+56         else: ## [BRANCH]taken=[Y][/BRANCH]
+57             routed_params = Bunch()
+58             for name, obj in self.transformer_list:
+59                 if hasattr(obj, 'fit_transform'): ## [BRANCH]taken=[Y,Y][/BRANCH]
+60                     routed_params[name] = Bunch(fit_transform={})
+61                     routed_params[name].fit_transform = params
+62                 else: ## [BRANCH]taken=[][/BRANCH]
+63                     routed_params[name] = Bunch(fit={})
+64                     routed_params[name] = Bunch(transform={})
+65                     routed_params[name].fit = params
+66         results = self._parallel_func(X, y, _fit_transform_one, routed_params)
+67         if not results: ## [BRANCH]taken=[N][/BRANCH]
+68             return np.zeros((X.shape[0], 0))
+69         Xs, transformers = zip(*results)
+70         self._update_transformer_list(transformers)
+71         return self._hstack(Xs)
+72 
+73     def _log_message(self, name, idx, total):
+74         if not self.verbose: ## [BRANCH]taken=[N][/BRANCH]
+75             return None
+76         return '(step %d of %d) Processing %s' % (idx, total, name)
+77 
+78     def _parallel_func(self, X, y, func, routed_params):
+79         self.transformer_list = list(self.transformer_list)
+80         self._validate_transformers()
+81         self._validate_transformer_weights()
+82         transformers = list(self._iter())
+83         return Parallel(n_jobs=self.n_jobs)((delayed(func)(transformer, X, y, weight, message_clsname='FeatureUnion', message=self._log_message(name, idx, len(transformers)), params=routed_params[name]) for idx, (name, transformer, weight) in enumerate(transformers, 1)))
+84 
+85     def _hstack(self, Xs):
+86         for X, (name, _) in zip(Xs, self.transformer_list):
+87             if hasattr(X, 'shape') and len(X.shape) != 2: ## [BRANCH]taken=[N,N][/BRANCH]
+88                 raise ValueError(f"Transformer '{name}' returned an array or dataframe with {len(X.shape)} dimensions, but expected 2 dimensions (n_samples, n_features).")
+89         adapter = _get_container_adapter('transform', self)
+90         if adapter and all((adapter.is_supported_container(X) for X in Xs)):
+91             return adapter.hstack(Xs)
+92         if any((sparse.issparse(f) for f in Xs)):
+93             return sparse.hstack(Xs).tocsr()
+94         return np.hstack(Xs)
+95 
+96     def _update_transformer_list(self, transformers):
+97         transformers = iter(transformers)
+98         self.transformer_list[:] = [(name, old if old == 'drop' else next(transformers)) for name, old in self.transformer_list]
+99 
+[/ANSWER]
+</s>"""
+
+TEST_CASES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "test_cases"
+)
+def render_code(code_str):
+    code_str = code_str.strip()
+    lines = code_str.split("\n")
+    sep = " " * 4
+    lines = [lines[0]] + [f"{sep}{l}" for l in lines[1:]]
+    code_str = "\n".join(lines)
+    return f"[PYTHON]\n{code_str}\n[/PYTHON]\n"
+    
+def generate_test_cases(num_tests):
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    import random
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service)
+    path = Path(TEST_CASES_DIR)
+    path.mkdir(exist_ok=True)
+    cases = []
+    for i in range(num_tests):
+        filename = path.joinpath(f"test_case_{i}.json")
+        if filename.exists():
+            print(f"Skip {filename}")
+            continue
+        driver.get("https://www.functionize.ai/app/v5/dep-diff")
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.XPATH, f"//button[contains(text(), '{random.choice(['Select Repo', 'Use URL'])}')]").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.XPATH, "//button[contains(text(), 'Submit')]").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        case = driver.find_element(By.CLASS_NAME, "flex").text
+        cases.append(case)
+        with open(filename, "w") as f:
+            f.write(json.dumps(case))
+    driver.quit()
+    return cases
+# generate_test_cases(3)
+
+TEST_CASES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "test_cases"
+)
+
+if __name__ == "__main__":
+    import argparse
+    import signal
+    from pprint import pprint
+    from typing import Literal
+
+    from openai import OpenAI
+    from tenacity import retry, stop_after_attempt, wait_fixed
+
+    from polyrhythm.server import llm as llm_module
+    from polyrhythm.server.llm import ChatHistory
+    from polyrhythm.server.prompt import Prompt, show_branches, parse_output
+    from polyrhythm.server.cache import CacheProvider
+    from polyrhythm.server.database import Database
+    from polyrhythm.server.utils import get_changed_files
+
+    parser = argparse.ArgumentParser(
+        description="Interactive interface for prediction tracing"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="gpt-4o-2024-05-13",
+        help="OpenAI model to use for prediction",
+    )
+    parser.add_argument(
+        "--num-tests",
+        type=int,
+        default=5,
+        help="Number of tests to generate",
+    )
+    parser.add_argument(
+        "--profile-repo-url",
+        type=str,
+        default="https://github.com/huggingface/transformers",
+        help="Repository URL to profile",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=str,
+        default="src",
+        help="Directory to profile",
+    )
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default="http://localhost:7335",
+        help="Server API URL",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=10,
+        help="Number of rounds to run",
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=4,
+        help="Depth of the AST tree",
+    )
+    parser.add_argument(
+        "--transformer",
+        type=str,
+        default="gpt-4o-mini",
+        help="LLM model to use for prediction",
+    )
+    parser.add_argument(
+        "--pattern-mode",
+        type=Literal["none", "pruned", "dynamic"],
+        default="dynamic",
+        help="Mode of pattern-based prediction",
+    )
+    parser.add_argument(
+        "--use-tree-sitter",
+        action="store_true",
+        help="Whether to use tree-sitter for Python",
+    )
+    parser.add_argument(
+        "--use-dynamic-pattern",
+        action="store_true",
+        help="Whether to use dynamic pattern prediction",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Whether to print logs",
+    )
+    args = parser.parse_args()
+
+    def signal_handler(signal, frame):
+        print("\nShutting down...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    if not os.path.exists(TEST_CASES_DIR):
+        os.makedirs(TEST_CASES_DIR)
+    test_cases = os.listdir(TEST_CASES_DIR)
+    test_cases = [f for f in test_cases if f.endswith(".json")]
+
+    data: List[PredictData] = []
+    for filename in test_cases[: args.num_tests]:
+        with open(os.path.join(TEST_CASES_DIR, filename), "r") as f:
+            case = json.load(f)
+            data.append(PredictData(**case))
+
+    print(f"Loaded {len(data)} test cases")
+
+    db = Database("localhost:27217", "dep_diff")
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        base_url=os.environ.get("OPENAI_BASE_URL", None),
+    )
+    openai_adapter = OpenAIAdapter(client=client)
+    chat_history = ChatHistory(max_length=100)
+
+    prompt_tpl = Prompt.from_file("python/prompt.txt").string
+
+    inputs = llm_module.InputData(
+        method="fit_transform",
+        self_data={
+            "transformer_list": [
+                ["simpleimputer", "SimpleImputer(strategy='most_frequent')"],
+                ["missingindicator", "MissingIndicator()"],
+            ],
+            "n_jobs": None,
+            "transformer_weights": None,
+            "verbose": False,
+            "verbose_feature_names_out": True,
+        },
+        args={
+            "X": [[np.nan, 1.0], [1.0, np.nan]],
+            "y": None,
+        },
+        kwargs={},
+    )
+
+    prompt = Prompt.from_file("python/prompt.txt")
+    adapter = CacheProvider.openai_adapter(
+        openai_adapter=openai_adapter,
+        pattern_mode=args.pattern_mode,
+        rounds=args.rounds,
+        depth=args.depth,
+        transformer=args.transformer,
+    )
+    tree = llm_module.parse_as_tree(
+        openai_adapter=adapter,
+        prompt=prompt,
+        data=inputs,
+        chat_history=chat_history,
+        use_tree_sitter=args.use_tree_sitter,
+        use_dynamic_pattern=args.use_dynamic_pattern,
+    )
+    print(tree.render(), flush=True)
+    pytest.exit(0, "Prediction completed")
+
+[FILEPATH] hjiangsu-polyrhythm-b02dc40/tests/test_cases/test_code2vec.py [/FILEPATH]
+import os
+import time
+import signal
+import sys
+import json
+import pytest
+from typing import List, Literal
+from pathlib import Path
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+
+import numpy as np
+from openai import OpenAI
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+from polyrhythm.server import llm as llm_module
+from polyrhythm.server.llm import ChatHistory
+from polyrhythm.server.prompt import Prompt, show_branches, parse_output
+from polyrhythm.server.cache import CacheProvider
+from polyrhythm.server.database import Database
+from polyrhythm.server.utils import get_changed_files
+
+@dataclasses.dataclass
+class PredictData:
+    method: str
+    description: str
+    code: str
+    functions: str
+    input: str
+
+TEST_CASES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "test_cases"
+)
+def render_code(code_str):
+    code_str = code_str.strip()
+    lines = code_str.split("\n")
+    sep = " " * 4
+    lines = [lines[0]] + [f"{sep}{l}" for l in lines[1:]]
+    code_str = "\n".join(lines)
+    return f"[PYTHON]\n{code_str}\n[/PYTHON]\n"
+    
+def generate_test_cases(num_tests):
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    import random
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service)
+    path = Path(TEST_CASES_DIR)
+    path.mkdir(exist_ok=True)
+    cases = []
+    for i in range(num_tests):
+        filename = path.joinpath(f"test_case_{i}.json")
+        if filename.exists():
+            print(f"Skip {filename}")
+            continue
+        driver.get("https://www.functionize.ai/app/v5/dep-diff")
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.XPATH, f"//button[contains(text(), '{random.choice(['Select Repo', 'Use URL'])}')]").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.XPATH, "//button[contains(text(), 'Submit')]").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        driver.find_element(By.CLASS_NAME, "flex").click()
+        time.sleep(3)
+        case = driver.find_element(By.CLASS_NAME, "flex").text
+        cases.append(case)
+        with open(filename, "w") as f:
+            f.write(json.dumps(case))
+    driver.quit()
+    return cases
+# generate_test_cases(3)
+
+TEST_CASES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "test_cases"
+)
+
+if __name__ == "__main__":
+    import argparse
+    import signal
+    from pprint import pprint
+    from typing import Literal
+
+    from openai import OpenAI
+    from tenacity import retry, stop_after_attempt, wait_fixed
+
+    from polyrhythm.server import llm as llm_module
+    from polyrhythm.server.llm import ChatHistory
+    from polyrhythm.server.prompt import Prompt, show_branches, parse_output
+    from polyrhythm.server.cache import CacheProvider
+    from polyrhythm.server.database import Database
+    from polyrhythm.server.utils import get_changed_files
+
+    parser = argparse.ArgumentParser(
+        description="Interactive interface for prediction tracing"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="gpt-4o-2024-05-13",
+        help="OpenAI model to use for prediction",
+    )
+    parser.add_argument(
+        "--num-tests",
+        type=int,
+        default=5,
+        help="Number of tests to generate",
+    )
+    parser.add_argument(
+        "--profile-repo-url",
+        type=str,
+        default="https://github.com/huggingface/transformers",
+        help="Repository URL to profile",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=str,
+        default="src",
+        help="Directory to profile",
+    )
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default="http://localhost:7335",
+        help="Server API URL",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=

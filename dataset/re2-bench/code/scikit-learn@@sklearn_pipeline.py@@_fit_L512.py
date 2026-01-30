@@ -1,0 +1,247 @@
+from itertools import chain, islice
+from sklearn.base import TransformerMixin, _fit_context, clone
+from sklearn.utils import Bunch
+from sklearn.utils._param_validation import HasMethods, Hidden
+from sklearn.utils._user_interface import _print_elapsed_time
+from sklearn.utils.metadata_routing import (
+    MetadataRouter,
+    MethodMapping,
+    _raise_for_params,
+    _routing_enabled,
+    get_routing_for_object,
+    process_routing,
+)
+from sklearn.utils.metaestimators import _BaseComposition, available_if
+from sklearn.utils.validation import check_is_fitted, check_memory
+
+class Pipeline(_BaseComposition):
+    """
+    A sequence of data transformers with an optional final predictor.
+
+    `Pipeline` allows you to sequentially apply a list of transformers to
+    preprocess the data and, if desired, conclude the sequence with a final
+    :term:`predictor` for predictive modeling.
+
+    Intermediate steps of the pipeline must be transformers, that is, they
+    must implement `fit` and `transform` methods.
+    The final :term:`estimator` only needs to implement `fit`.
+    The transformers in the pipeline can be cached using ``memory`` argument.
+
+    The purpose of the pipeline is to assemble several steps that can be
+    cross-validated together while setting different parameters. For this, it
+    enables setting parameters of the various steps using their names and the
+    parameter name separated by a `'__'`, as in the example below. A step's
+    estimator may be replaced entirely by setting the parameter with its name
+    to another estimator, or a transformer removed by setting it to
+    `'passthrough'` or `None`.
+
+    For an example use case of `Pipeline` combined with
+    :class:`~sklearn.model_selection.GridSearchCV`, refer to
+    :ref:`sphx_glr_auto_examples_compose_plot_compare_reduction.py`. The
+    example :ref:`sphx_glr_auto_examples_compose_plot_digits_pipe.py` shows how
+    to grid search on a pipeline using `'__'` as a separator in the parameter names.
+
+    Read more in the :ref:`User Guide <pipeline>`.
+
+    .. versionadded:: 0.5
+
+    Parameters
+    ----------
+    steps : list of tuples
+        List of (name of step, estimator) tuples that are to be chained in
+        sequential order. To be compatible with the scikit-learn API, all steps
+        must define `fit`. All non-last steps must also define `transform`. See
+        :ref:`Combining Estimators <combining_estimators>` for more details.
+
+    transform_input : list of str, default=None
+        The names of the :term:`metadata` parameters that should be transformed by the
+        pipeline before passing it to the step consuming it.
+
+        This enables transforming some input arguments to ``fit`` (other than ``X``)
+        to be transformed by the steps of the pipeline up to the step which requires
+        them. Requirement is defined via :ref:`metadata routing <metadata_routing>`.
+        For instance, this can be used to pass a validation set through the pipeline.
+
+        You can only set this if metadata routing is enabled, which you
+        can enable using ``sklearn.set_config(enable_metadata_routing=True)``.
+
+        .. versionadded:: 1.6
+
+    memory : str or object with the joblib.Memory interface, default=None
+        Used to cache the fitted transformers of the pipeline. The last step
+        will never be cached, even if it is a transformer. By default, no
+        caching is performed. If a string is given, it is the path to the
+        caching directory. Enabling caching triggers a clone of the transformers
+        before fitting. Therefore, the transformer instance given to the
+        pipeline cannot be inspected directly. Use the attribute ``named_steps``
+        or ``steps`` to inspect estimators within the pipeline. Caching the
+        transformers is advantageous when fitting is time consuming. See
+        :ref:`sphx_glr_auto_examples_neighbors_plot_caching_nearest_neighbors.py`
+        for an example on how to enable caching.
+
+    verbose : bool, default=False
+        If True, the time elapsed while fitting each step will be printed as it
+        is completed.
+
+    Attributes
+    ----------
+    named_steps : :class:`~sklearn.utils.Bunch`
+        Dictionary-like object, with the following attributes.
+        Read-only attribute to access any step parameter by user given name.
+        Keys are step names and values are steps parameters.
+
+    classes_ : ndarray of shape (n_classes,)
+        The classes labels. Only exist if the last step of the pipeline is a
+        classifier.
+
+    n_features_in_ : int
+        Number of features seen during :term:`fit`. Only defined if the
+        underlying first estimator in `steps` exposes such an attribute
+        when fit.
+
+        .. versionadded:: 0.24
+
+    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+        Names of features seen during :term:`fit`. Only defined if the
+        underlying estimator exposes such an attribute when fit.
+
+        .. versionadded:: 1.0
+
+    See Also
+    --------
+    make_pipeline : Convenience function for simplified pipeline construction.
+
+    Examples
+    --------
+    >>> from sklearn.svm import SVC
+    >>> from sklearn.preprocessing import StandardScaler
+    >>> from sklearn.datasets import make_classification
+    >>> from sklearn.model_selection import train_test_split
+    >>> from sklearn.pipeline import Pipeline
+    >>> X, y = make_classification(random_state=0)
+    >>> X_train, X_test, y_train, y_test = train_test_split(X, y,
+    ...                                                     random_state=0)
+    >>> pipe = Pipeline([('scaler', StandardScaler()), ('svc', SVC())])
+    >>> # The pipeline can be used as any other estimator
+    >>> # and avoids leaking the test set into the train set
+    >>> pipe.fit(X_train, y_train).score(X_test, y_test)
+    0.88
+    >>> # An estimator's parameter can be set using '__' syntax
+    >>> pipe.set_params(svc__C=10).fit(X_train, y_train).score(X_test, y_test)
+    0.76
+    """
+    _parameter_constraints: dict = {'steps': [list, Hidden(tuple)], 'transform_input': [list, None], 'memory': [None, str, HasMethods(['cache'])], 'verbose': ['boolean']}
+
+    def __init__(self, steps, *, transform_input=None, memory=None, verbose=False):
+        self.steps = steps
+        self.transform_input = transform_input
+        self.memory = memory
+        self.verbose = verbose
+
+    def _validate_steps(self):
+        if not self.steps:
+            raise ValueError('The pipeline is empty. Please add steps.')
+        names, estimators = zip(*self.steps)
+        self._validate_names(names)
+        transformers = estimators[:-1]
+        estimator = estimators[-1]
+        for t in transformers:
+            if t is None or t == 'passthrough':
+                continue
+            if not (hasattr(t, 'fit') or hasattr(t, 'fit_transform')) or not hasattr(t, 'transform'):
+                raise TypeError("All intermediate steps should be transformers and implement fit and transform or be the string 'passthrough' '%s' (type %s) doesn't" % (t, type(t)))
+        if estimator is not None and estimator != 'passthrough' and (not hasattr(estimator, 'fit')):
+            raise TypeError("Last step of Pipeline should implement fit or be the string 'passthrough'. '%s' (type %s) doesn't" % (estimator, type(estimator)))
+
+    def _iter(self, with_final=True, filter_passthrough=True):
+        """
+        Generate (idx, (name, trans)) tuples from self.steps
+
+        When filter_passthrough is True, 'passthrough' and None transformers
+        are filtered out.
+        """
+        stop = len(self.steps)
+        if not with_final:
+            stop -= 1
+        for idx, (name, trans) in enumerate(islice(self.steps, 0, stop)):
+            if not filter_passthrough:
+                yield (idx, name, trans)
+            elif trans is not None and trans != 'passthrough':
+                yield (idx, name, trans)
+
+    def _log_message(self, step_idx):
+        if not self.verbose:
+            return None
+        name, _ = self.steps[step_idx]
+        return '(step %d of %d) Processing %s' % (step_idx + 1, len(self.steps), name)
+
+    def _get_metadata_for_step(self, *, step_idx, step_params, all_params):
+        """Get params (metadata) for step `name`.
+
+        This transforms the metadata up to this step if required, which is
+        indicated by the `transform_input` parameter.
+
+        If a param in `step_params` is included in the `transform_input` list,
+        it will be transformed.
+
+        Parameters
+        ----------
+        step_idx : int
+            Index of the step in the pipeline.
+
+        step_params : dict
+            Parameters specific to the step. These are routed parameters, e.g.
+            `routed_params[name]`. If a parameter name here is included in the
+            `pipeline.transform_input`, then it will be transformed. Note that
+            these parameters are *after* routing, so the aliases are already
+            resolved.
+
+        all_params : dict
+            All parameters passed by the user. Here this is used to call
+            `transform` on the slice of the pipeline itself.
+
+        Returns
+        -------
+        dict
+            Parameters to be passed to the step. The ones which should be
+            transformed are transformed.
+        """
+        if self.transform_input is None or not all_params or (not step_params) or (step_idx == 0):
+            return step_params
+        sub_pipeline = self[:step_idx]
+        sub_metadata_routing = get_routing_for_object(sub_pipeline)
+        transform_params = {key: value for key, value in all_params.items() if key in sub_metadata_routing.consumes(method='transform', params=all_params.keys())}
+        transformed_params = dict()
+        transformed_cache = dict()
+        for method, method_params in step_params.items():
+            transformed_params[method] = Bunch()
+            for param_name, param_value in method_params.items():
+                if param_name in self.transform_input:
+                    transformed_params[method][param_name] = _cached_transform(sub_pipeline, cache=transformed_cache, param_name=param_name, param_value=param_value, transform_params=transform_params)
+                else:
+                    transformed_params[method][param_name] = param_value
+        return transformed_params
+
+    def _fit(self, X, y=None, routed_params=None, raw_params=None):
+        """Fit the pipeline except the last step.
+
+        routed_params is the output of `process_routing`
+        raw_params is the parameters passed by the user, used when `transform_input`
+            is set by the user, to transform metadata using a sub-pipeline.
+        """
+        self.steps = list(self.steps)
+        self._validate_steps()
+        memory = check_memory(self.memory)
+        fit_transform_one_cached = memory.cache(_fit_transform_one)
+        for step_idx, name, transformer in self._iter(with_final=False, filter_passthrough=False):
+            if transformer is None or transformer == 'passthrough':
+                with _print_elapsed_time('Pipeline', self._log_message(step_idx)):
+                    continue
+            if hasattr(memory, 'location') and memory.location is None:
+                cloned_transformer = transformer
+            else:
+                cloned_transformer = clone(transformer)
+            step_params = self._get_metadata_for_step(step_idx=step_idx, step_params=routed_params[name], all_params=raw_params)
+            X, fitted_transformer = fit_transform_one_cached(cloned_transformer, X, y, weight=None, message_clsname='Pipeline', message=self._log_message(step_idx), params=step_params)
+            self.steps[step_idx] = (name, fitted_transformer)
+        return X

@@ -1,0 +1,404 @@
+[OUTPUT]
+<think>
+The method `_eval_real_imag` is being called with `self = "11*pi/6"` and `real = True`. 
+
+1. The loop iterates over `self.args`, which is `11*pi/6`. Each element of `self.args` is checked for conditions.
+2. The first condition, `if (t.is_complex or t.is_infinite) is False and t.is_extended_real is False:`, is checked for each element of `self.args`. Since `t = 11` and `t = pi/6` are not complex, infinite, or imaginary, and are extended real, this condition is not met.
+3. The second condition, `elif t.is_imaginary:`, is not met because none of the elements are imaginary.
+4. The third condition, `elif t.is_extended_real:`, is met for `t = 11` and `t = pi/6`. 
+   - Inside this block, `if not zero:`, which is `True` since `zero = False`.
+   - Then `z = t.is_zero`, which is `False` for both `t = 11` and `t = pi/6`.
+   - The condition `if not z and zero is False:` is met for both, but it does not change the value of `zero`.
+5. The fourth condition, `elif t.is_extended_real is False:`, is not met for any of the elements.
+6. The fifth condition, `elif t.is_imaginary is False:`, is met for all elements, but since `t_not_re_im` is already set, the function does not return.
+7. The final condition, `else:`, is not met for any of the elements.
+
+After the loop, the function checks `if t_not_re_im:` which is `True` since `t_not_re_im = pi/6`. The nested conditions inside this block do not change the outcome. Since `real` is `True`, and `zero` is `False`, the function returns `real`.
+
+
+</think>
+
+[ANSWER]
+1 from typing import TYPE_CHECKING, ClassVar, overload, Literal
+2 from .operations import AssocOp, AssocOpDispatcher
+3 from .logic import fuzzy_not, _fuzzy_group
+4 from .expr import Expr
+5 from .kind import KindDispatcher
+6 
+7 class Mul(Expr, AssocOp):
+8     __slots__ = ()
+9     is_Mul = True
+10     _args_type = Expr
+11     _kind_dispatcher = KindDispatcher('Mul_kind_dispatcher', commutative=True)
+12     identity: ClassVar[Expr]
+13     if TYPE_CHECKING:
+14 
+15         def __new__(cls, *args: Expr | complex, evaluate: bool=True) -> Expr:
+16             ...
+17 
+18         @property
+19         def args(self) -> tuple[Expr, ...]:
+20             ...
+21     _eval_is_commutative = lambda self: _fuzzy_group((a.is_commutative for a in self.args))
+22 
+23     def _eval_real_imag(self, real):
+24         zero = False
+25         t_not_re_im = None
+26         for t in self.args:
+27             if (t.is_complex or t.is_infinite) is False and t.is_extended_real is False: ## [BRANCH]taken=[N][/BRANCH]
+28                 return False
+29             elif t.is_imaginary: ## [BRANCH]taken=[N][/BRANCH]
+30                 real = not real
+31             elif t.is_extended_real:
+32                 if not zero: ## [BRANCH]taken=[Y][/BRANCH]
+33                     z = t.is_zero
+34                     if not z and zero is False: ## [BRANCH]taken=[N][/BRANCH]
+35                         zero = z
+36                     elif z:
+37                         if all((a.is_finite for a in self.args)):
+38                             return True
+39                         return
+40             elif t.is_extended_real is False:
+41                 if t_not_re_im: ## [BRANCH]taken=[N][/BRANCH]
+42                     return
+43                 t_not_re_im = t
+44             elif t.is_imaginary is False:
+45                 if t_not_re_im:
+46                     return
+47                 t_not_re_im = t
+48             else: ## [BRANCH]taken=[N][/BRANCH]
+49                 return
+50         if t_not_re_im:
+51             if t_not_re_im.is_extended_real is False:
+52                 if real:
+53                     return zero
+54             if t_not_re_im.is_imaginary is False:
+55                 if not real:
+56                     return zero
+57         elif zero is False:
+58             return real
+59         elif real:
+60             return real
+61 
+[/ANSWER]
+[/OUTPUT]
+</s>
+
+[FILEPATH] shauntakoodin-Finetune-f3711e2/20240807_174552-nodeswarm-38a76a0f/scikit-learn/source/sklearn/metrics/cluster/_supervised.py [/FILEPATH]
+import warnings
+import numpy as np
+
+from ..pairwise import pairwise_distances
+from ..dist_metrics import PAIR_METRICS
+from .._pairwise_distances_reduction import _argmin_max_dist
+from ._unsupervised import _check_clusterings, cluster_perfect_score
+from .._ranking import _weighted_rank
+from ._base import _apply_metric_histogram
+from ...utils import check_random_state, _is_arraylike_not_scalar
+from ..._loss.loss import HalfBinomialLoss
+
+
+def _entropy(labels):
+    """Compute entropy given a distribution."""
+    labels = labels / labels.sum()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", r"invalid value encountered in multiply")
+        entropy = -np.sum(labels * np.log(labels))
+    return entropy
+
+
+def adjusted_rand_score(labels_true, labels_pred):
+    """Rand index adjusted for chance.
+
+    The Rand Index computes a similarity measure between two clusterings
+    by considering all pairs of samples and counting pairs that are
+    assigned in the same or different clusters in the predicted and
+    true clusterings.
+
+    The raw RI score is then "adjusted for chance" into the ARI score
+    using the following scheme:
+
+        ARI = (RI - Expected_RI) / (max(RI) - Expected_RI)
+
+    The adjusted Rand index is thus ensured to have a value close to
+    0.0 for random labeling independently of the number of clusters and
+    samples and exactly 1.0 when the clusterings are identical (up to
+    a permutation).
+
+    ARI is a symmetric measure:
+
+        ```python
+        >>> from sklearn.metrics import adjusted_rand_score
+        >>> adjusted_rand_score([0, 0, 1, 1], [0, 0, 1, 1])
+        1.0
+        >>> adjusted_rand_score([0, 0, 1, 1], [1, 1, 0, 0])
+        1.0
+        ```
+
+    ARI is normalized with respect to the agreement of the assignment
+    of labels to instances, called *labelings*. If A and B are two labelings
+    to compare, the normalized (adjusted for chance) Rand index is given by:
+
+        .. math::
+            R_{AB} = \\frac{\\Index{ARI}{A, B}}
+                              {\\frac{1}{2}(n_C + n_D)
+                                - \\frac{[n_C + n_D](n_A + n_B)}
+                                         {n_{AB}}
+                                + \\frac{2n_Cn_D}
+                                         {n_{AB}}}
+
+    Where:
+
+        :math:`n_C`: the number of ordered pairs of entities in the same
+            set in A and B,
+
+        :math:`n_D`: the number of ordered pairs of entities in the different
+            sets in A and B,
+
+        :math:`n_{AB}`: the total number of pairs in A and B,
+
+        :math:`n_A` (or :math:`n_B`): the sum of squares of each set sizes in A
+            (or B).
+
+    Read more in the :ref:`User Guide <adjusted_rand_score>`.
+
+    Parameters
+    ----------
+    labels_true : int array, shape = [n_samples]
+        Ground truth class labels to be used as a reference.
+
+    labels_pred : array, shape = [n_samples]
+        Cluster labels to evaluate.
+
+    Returns
+    -------
+    score : float
+        Similarity score between -1.0 and 1.0. Random labelings have an
+        ARI close to 0.0. 1.0 stands for perfect match.
+
+    Examples
+    --------
+    Perfect labeling:
+
+    >>> from sklearn.metrics import adjusted_rand_score
+    >>> adjusted_rand_score([0, 0, 1, 1], [0, 0, 1, 1])
+    1.0
+    >>> adjusted_rand_score([0, 0, 1, 1], [1, 1, 0, 0])
+    1.0
+
+    No agreement:
+
+    >>> adjusted_rand_score([0, 0, 1, 1], [1, 0, 0, 1])
+    0.3333333333333333
+
+    Partial agreement:
+
+    >>> adjusted_rand_score([0, 0, 1, 1, 2, 2], [0, 0, 0, 1, 2, 1])
+    0.186
+
+    Partial agreement:
+
+    >>> adjusted_rand_score([0, 0, 1, 1, 2, 2], [0, 0, 0, 0, 2, 1])
+    0.2
+
+    See also
+    --------
+    v_measure_score
+    rand_score
+    homogeneity_completeness_v_measure
+    homogeneity_score
+    completeness_score
+    fowlkes_mallows_score
+    mutual_info_score
+    adjusted_mutual_info_score
+    silhouette_score
+
+    Notes
+    -----
+    This function does not return 1.0 for perfectly-matching labelings
+    that have different numbers of clusters, i.e. it doesn't treat
+    clusterings with the same labels but different numbers of clusters as
+    identical, and so the same input labelings may get different ARI
+    scores.  This may change in a future release.
+
+    The expected RI is computed using the following formula from
+    [Hubert1985]_:
+
+        .. math::
+            Expected_{RI} = [\\frac{n_Cn_D}{n_{AB}}
+                             + \\frac{(n_A + n_B)}{2}]/\\Index{binom}{n_A, 2}
+
+    .. [Hubert1985]  L. Hubert and P. Arabie, Comparing Partitions,
+                     Journal of Classification 2, pp. 193-218, 1985.
+
+    References
+    ----------
+    .. [random] Wikipedia entry on the Rand index
+           http://en.wikipedia.org/wiki/Rand_index
+    """
+    a, b = np.unique(labels_true, return_inverse=True)
+    _, b = np.unique(b, return_inverse=True)
+    c, d = np.unique(labels_pred, return_inverse=True)
+    _, d = np.unique(d, return_inverse=True)
+
+    n = len(labels_true)
+
+    # Compute the observed RI (adjusted-for-chance RI)
+    tbl = np.zeros((len(a), len(c)), dtype=np.int32)
+    tbl[b, d] += 1
+    a_sz, c_sz = tbl.sum(axis=1), tbl.sum(axis=0)
+    nij = tbl.sum()
+    n00 = (a_sz.dot(a_sz.T) - nij) / 2.
+    n01 = (a_sz.dot(c_sz.T) - nij) / 2.
+    n10 = (c_sz.dot(a_sz.T) - nij) / 2.
+    n11 = (c_sz.dot(c_sz.T) - nij) / 2.
+    p0 = (a_sz * (a_sz - 1) / 2.).sum()
+    p1 = (c_sz * (c_sz - 1) / 2.).sum()
+
+    expected_index = (n00 * n11 + n01 * n10) / (p0 * p1)
+    max_index = 0.5 * (p0 + p1) - (n00 * n11 + n01 * n10) / p0 / p1
+    index = nij - expected_index
+    index = index / (max_index - expected_index)
+    return index
+
+
+def rand_score(labels_true, labels_pred):
+    """Rand index.
+
+    The Rand Index computes a similarity measure between two clusterings
+    by considering all pairs of samples and counting pairs that are
+    assigned in the same or different clusters in the predicted and true
+    clusterings.
+
+    This score may be interpreted as 1 - (the probability of agreement
+    by chance) which may be 1 - (the expected RI) which can be written
+    in terms of binomial coefficients (see References). As the expected
+    RI is a probability, the RI is normalized such that a RI of 1 means
+    a perfect match (and 0 means completely randomized labeling).
+
+    As with all metrics that compare clusterings, this is only
+    defined when the elements of ``labels_true`` and ``labels_pred`` are
+    mutually unique. Notably, this means that for metrics based on the
+    Rand index that don't explicitly prohibit clustered multi-assignment
+    (such as v_measure_score, adjusted_mutual_info_score, and
+    fowlkes_mallows_score) the metrics will be a weighted sum over all
+    unique elements in the two arrays, which may lead to some head
+    scratching in the case of non-perfect matches.
+
+    The adjusted Rand index of Hubert & Arabie (1985) is an alternative
+    to the Rand index which is corrected for chance. As with all such
+    corrections, it can only take values between -1 and 1 (instead of
+    between 0 and 1). A drawback of the adjusted Rand index is that
+    negative values will result when labels_true and/or labels_pred have
+    many singleton clusters and few non-singleton clusters.
+
+    The expected corrected-for-chance Rand index (adjusted for chance)
+    between two random labelings (given by chance) of a set of n
+    elements into k1 and k2 clusters respectively is
+
+        .. math::
+            \\frac{\\left(\\frac{k_1k_2}{k_1+k_2}\\right)
+            \\left(\\frac{2k_1k_2}{n^2-n}\\right)}{
+            \\left[\\binom{n}{2}
+            -\\frac{k_1k_2}{k_1+k_2}\\right]}.
+
+    An equivalent form of the RI can be calculated using shared mutual
+    information ([2]_) (also known as variation of information). Let
+    :math:`\hat{a} = 2 - \text{RI}`. Then
+
+        .. math::
+           \hat{a} = \frac{I(X, K) + I(Y, K) - 2I(X, Y)}{n \log (n)}
+                   = \frac{MI(X, Y) - 2H(K|X)}{n \log (n)},
+
+    where :math:`X` is a discrete random variable, :math:`K` is the
+    random variable for a clustering based on :math:`X` and :math:`Y` is
+    a random variable representing a clustering based on shared
+    information. [2]_ defines :math:`MI(X, Y)` as mutual information and
+    :math:`H(K|X)` as conditional entropy. :math:`n` is the number of
+    samples. A higher value for :math:`\hat{a}` indicates a better
+    agreement. The normalized mutual information is defined as
+
+        .. math::
+            \hat{a} = 1 - \frac{MI(X, Y)}{H(X)},
+
+    and thus, the RI is normalized to be in the range [0, 1].
+
+    Read more in the :ref:`User Guide <rand_index>`.
+
+    Parameters
+    ----------
+    labels_true : int array, shape = [n_samples]
+        A clustering of the data into disjoint subsets.
+
+    labels_pred : array, shape = [n_samples]
+        A clustering of the data into disjoint subsets.
+
+    Returns
+    -------
+    score : float
+       Similarity score between -1.0 and 1.0. Random labelings have an
+       expected score of 0.0.
+
+    Examples
+    --------
+    Perfect labelings are both homogeneous and complete:
+
+    >>> from sklearn.metrics import rand_score
+    >>> rand_score([0, 0, 1, 1], [0, 0, 1, 1])
+    1.0
+    >>> rand_score([0, 0, 1, 1], [1, 1, 0, 0])
+    1.0
+
+    No agreement:
+
+    >>> rand_score([0, 0, 1, 1], [1, 0, 0, 1])
+    0.3333333333333333
+
+    Partial agreement:
+
+    >>> rand_score([0, 0, 1, 1, 2, 2], [0, 0, 0, 1, 2, 1])
+    0.56
+
+    Partial agreement:
+
+    >>> rand_score([0, 0, 1, 1, 2, 2], [0, 0, 0, 0, 2, 1])
+    0.425
+
+    See also
+    --------
+    v_measure_score
+    adjusted_rand_score
+    homogeneity_completeness_v_measure
+    homogeneity_score
+    completeness_score
+    fowlkes_mallows_score
+    mutual_info_score
+    adjusted_mutual_info_score
+    silhouette_score
+
+    References
+    ----------
+    .. [1] L. Hubert and P. Arabie, Comparing Partitions,
+           Journal of Classification 2, pp. 193-218, 1985.
+
+    .. [2] Van Rijsbergen, C.J. (1979). Information Retrieval, 2nd Edition.
+           London: Butterworth.
+
+    .. [3] Wikipedia entry for the Rand index
+           http://en.wikipedia.org/wiki/Rand_index
+    """
+    return _adjusted_rand_score_internal(labels_true, labels_pred) * 2.0
+
+
+def mutual_info_score(labels_true, labels_pred, contingency=None):
+    r"""Mutual Information between two clusterings.
+
+    The Mutual Information is a measure of the similarity between two
+    labels of the same data. Where :math:`|U_i|` is the number of the
+    samples in cluster :math:`U_i` and :math:`|V_j|` is the number of the
+    samples in cluster :math:`V_j`, the Mutual Information between clusterings
+    :math:`U` and :math:`V` is given as:
+
+    .. math::
+
+        MI(U, V)

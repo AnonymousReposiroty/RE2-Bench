@@ -1,0 +1,77 @@
+[THOUGHT]
+Let's trace through the code step by step.
+
+Input:
+- `X` is a Compressed Sparse Column (CSC) matrix with shape (4, 5) (4 rows, 5 columns)
+- `strategy = "mean"`
+- `missing_values = NaN`
+- `fill_value = 0`
+- `self.keep_empty_features = false` (from self dictionary)
+
+First, calculate `missing_mask = _get_mask(X, missing_values)`. This creates a boolean mask where True indicates missing values (NaN in this case).
+
+From the sparse matrix structure (shape (4,5)), we need to understand what the actual data looks like. The `statistics_` array in self shows final statistics: `[3., 2., 5., nan, 2.5]` for 5 columns.
+
+Since `self.keep_empty_features = false`, the loop on line 23-25 won't execute (that's for strategy='constant', but strategy is 'mean').
+
+The main loop starts at line 27: `for i in range(X.shape[1])`. `X.shape[1] = 5`, so `range(X.shape[1]) = range(0, 5)` which yields `[0, 1, 2, 3, 4]`.
+
+The loop variable `i` will take these 5 values sequentially: `0, 1, 2, 3, 4`.
+
+So:
+- `i = [0, 1, 2, 3, 4]`
+- `range(X.shape[1]) = [0, 1, 2, 3, 4]`
+
+The loop runs 5 times, once for each column.
+
+[/THOUGHT]
+
+[ANSWER]
+1 from typing import Callable
+2 import numpy as np
+3 from sklearn.utils._mask import _get_mask
+4 from sklearn.utils._param_validation import MissingValues, StrOptions
+5 from sklearn.utils.sparsefuncs import _get_median
+6 
+7 class SimpleImputer(_BaseImputer):
+8 
+9     def __init__(self, *, missing_values=np.nan, strategy='mean', fill_value=None, copy=True, add_indicator=False, keep_empty_features=False):
+10         super().__init__(missing_values=missing_values, add_indicator=add_indicator, keep_empty_features=keep_empty_features)
+11         self.strategy = strategy
+12         self.fill_value = fill_value
+13         self.copy = copy
+14 
+15     def _sparse_fit(self, X, strategy, missing_values, fill_value):
+16         missing_mask = _get_mask(X, missing_values)
+17         mask_data = missing_mask.data
+18         n_implicit_zeros = X.shape[0] - np.diff(X.indptr)
+19         statistics = np.empty(X.shape[1])
+20         if strategy == 'constant':
+21             statistics.fill(fill_value)
+22             if not self.keep_empty_features:
+23                 for i in range(missing_mask.shape[1]):
+24                     if all(missing_mask[:, i].data):
+25                         statistics[i] = np.nan
+26         else:
+27             for i in range(X.shape[1]): ## [STATE]i=[0,1,2,3,4][/STATE] [STATE]range(X.shape[1])=[0,1,2,3,4][/STATE]
+28                 column = X.data[X.indptr[i]:X.indptr[i + 1]]
+29                 mask_column = mask_data[X.indptr[i]:X.indptr[i + 1]]
+30                 column = column[~mask_column]
+31                 mask_zeros = _get_mask(column, 0)
+32                 column = column[~mask_zeros]
+33                 n_explicit_zeros = mask_zeros.sum()
+34                 n_zeros = n_implicit_zeros[i] + n_explicit_zeros
+35                 if len(column) == 0 and self.keep_empty_features:
+36                     statistics[i] = 0
+37                 elif strategy == 'mean':
+38                     s = column.size + n_zeros
+39                     statistics[i] = np.nan if s == 0 else column.sum() / s
+40                 elif strategy == 'median':
+41                     statistics[i] = _get_median(column, n_zeros)
+42                 elif strategy == 'most_frequent':
+43                     statistics[i] = _most_frequent(column, 0, n_zeros)
+44                 elif isinstance(strategy, Callable):
+45                     statistics[i] = self.strategy(column)
+46         super()._fit_indicator(missing_mask)
+47         return statistics
+[/ANSWER]

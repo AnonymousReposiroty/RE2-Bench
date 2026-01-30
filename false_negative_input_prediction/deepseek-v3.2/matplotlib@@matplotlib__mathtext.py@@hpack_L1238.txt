@@ -1,0 +1,259 @@
+<<FUNCTION_NAME>>
+
+hpack
+
+<<CODE>>
+
+import itertools
+import typing as T
+import numpy as np
+
+class Hlist(List):
+    """A horizontal list of boxes."""
+
+    def __init__(self, elements: T.Sequence[Node], w: float=0.0, m: T.Literal['additional', 'exactly']='additional', do_kern: bool=True):
+        super().__init__(elements)
+        if do_kern:
+            self.kern()
+        self.hpack(w=w, m=m)
+
+    def kern(self) -> None:
+        """
+        Insert `Kern` nodes between `Char` nodes to set kerning.
+
+        The `Char` nodes themselves determine the amount of kerning they need
+        (in `~Char.get_kerning`), and this function just creates the correct
+        linked list.
+        """
+        new_children = []
+        for elem0, elem1 in itertools.zip_longest(self.children, self.children[1:]):
+            new_children.append(elem0)
+            kerning_distance = elem0.get_kerning(elem1)
+            if kerning_distance != 0.0:
+                kern = Kern(kerning_distance)
+                new_children.append(kern)
+        self.children = new_children
+
+    def hpack(self, w: float=0.0, m: T.Literal['additional', 'exactly']='additional') -> None:
+        """
+        Compute the dimensions of the resulting boxes, and adjust the glue if
+        one of those dimensions is pre-specified.  The computed sizes normally
+        enclose all of the material inside the new box; but some items may
+        stick out if negative glue is used, if the box is overfull, or if a
+        ``\\vbox`` includes other boxes that have been shifted left.
+
+        Parameters
+        ----------
+        w : float, default: 0
+            A width.
+        m : {'exactly', 'additional'}, default: 'additional'
+            Whether to produce a box whose width is 'exactly' *w*; or a box
+            with the natural width of the contents, plus *w* ('additional').
+
+        Notes
+        -----
+        The defaults produce a box with the natural width of the contents.
+        """
+        h = 0.0
+        d = 0.0
+        x = 0.0
+        total_stretch = [0.0] * 4
+        total_shrink = [0.0] * 4
+        for p in self.children:
+            if isinstance(p, Char):
+                x += p.width
+                h = max(h, p.height)
+                d = max(d, p.depth)
+            elif isinstance(p, Box):
+                x += p.width
+                if not np.isinf(p.height) and (not np.isinf(p.depth)):
+                    s = getattr(p, 'shift_amount', 0.0)
+                    h = max(h, p.height - s)
+                    d = max(d, p.depth + s)
+            elif isinstance(p, Glue):
+                glue_spec = p.glue_spec
+                x += glue_spec.width
+                total_stretch[glue_spec.stretch_order] += glue_spec.stretch
+                total_shrink[glue_spec.shrink_order] += glue_spec.shrink
+            elif isinstance(p, Kern):
+                x += p.width
+        self.height = h
+        self.depth = d
+        if m == 'additional':
+            w += x
+        self.width = w
+        x = w - x
+        if x == 0.0:
+            self.glue_sign = 0
+            self.glue_order = 0
+            self.glue_ratio = 0.0
+            return
+        if x > 0.0:
+            self._set_glue(x, 1, total_stretch, 'Overful')
+        else:
+            self._set_glue(x, -1, total_shrink, 'Underful')
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'size': 0, 'width': 0.0, 'height': 0.0, 'depth': 0.0, 'shift_amount': 0.0, 'children': ['Hlist<w=10.58 h=13.00 d=0.00 s=0.00>[\n  `0`,\n]', 'Hlist<w=8.08 h=9.10 d=0.00 s=-7.00>[\n  k0.17,\n  Hlist<w=7.40 h=9.10 d=0.00 s=0.00>[\n    `0`,\n    k1.54,\n  ],\n]'], 'glue_set': 0.0, 'glue_sign': 0, 'glue_order': 0}, 'args': {'w': 0.0, 'm': 'additional'}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+None
+
+<<LLM_RESPONSE>>
+
+Let’s reason step-by-step.
+
+---
+
+**1. Understanding `hpack` behavior and output**  
+
+The given output is `{"output": null}`. In `hpack`, there’s no explicit return value — the method sets attributes (`width`, `height`, `depth`, `glue_sign`, `glue_order`, `glue_set`) on `self`.  
+So `{"output": null}` likely means we’re looking at a placeholder for “the method finished without error and returns nothing.”
+
+This means we need to reconstruct a `self` and arguments (`w`, `m`) such that `hpack` runs without errors and ends with certain values.
+
+---
+
+**2. Key logic of `hpack`**  
+
+The method loops through `self.children`, which are instances of `Char`, `Box`, `Glue`, or `Kern`. It accumulates:
+
+- `x` = total natural width of items.
+- `h`, `d` = max height and depth.
+- `total_stretch` / `total_shrink` per order (0..3).
+
+After the loop:
+
+- If `m == 'additional'`, final `self.width = w + x`.
+- If `m == 'exactly'`, final `self.width = w`.
+- `x = w - x` is the difference between target width and natural width.
+
+---
+
+If `x == 0`, then:
+
+- `self.glue_sign = 0`
+- `self.glue_order = 0`
+- `self.glue_set = 0.0`
+
+No warning is logged (`_set_glue` not called).
+
+If `x != 0`, `_set_glue` is called with `totals` = total_stretch if `x > 0`, else total_shrink.
+
+---
+
+**3. Simpler case to produce `{"output": null}`**  
+
+We can choose inputs so that `x == 0` exactly.  
+That means `w` (target width) equals natural width `x_natural`.  
+
+Also, we must avoid triggering `Overful` or `Underful` warnings — those happen if `x != 0` and `o == 0` (finite stretch/shrink order 0 glue insufficient).  
+
+So simplest is `m == 'additional'` and `w = 0`? Wait, then:
+
+- If `m == 'additional'`, `self.width = w + x_natural`.
+- If we want `x = self.width - x_natural = 0`, that means `w = 0` ⇒ `self.width = x_natural`. That works fine.  
+So `w = 0` with `m = 'additional'` ⇒ `self.width = x_natural`, then `x = self.width - x_natural = 0`.
+
+---
+
+**4. Choosing `self.children`**  
+
+We need `self.children` such that `hpack` can compute `x_natural` and set `height`, `depth`.  
+Let’s pick an empty list — but empty `children` means `x_natural = 0`, `h = d = 0`. That’s fine.  
+
+If `children = []`, `total_stretch = [0,0,0,0]`, `total_shrink = [0,0,0,0]`. Loop does nothing.  
+
+Then `self.width = w + x_natural = w + 0`.  
+If we want `x = 0`, `w` must be `0`. Works.
+
+With `m='exactly'` and `w=0`, `self.width = w = 0`, `x = 0 - 0 = 0`, also fine.
+
+---
+
+**5. Initial attributes of `self`**  
+
+The `self` object is an instance of `Hlist`, which inherits from `List`. We don’t know `List` details, but in `hpack`, it expects `self.children` list.
+
+Other attributes like `size`, `shift_amount` aren’t used in `hpack`. They could be `null`/`NaN`/`0`.  
+
+We just need `self.children` defined.
+
+The output doesn’t show any logged warnings, so `x == 0` case is safe.  
+
+---
+
+**6. Constructing input**  
+
+Given structure:
+
+```
+{
+    "self": {
+        "size": XXX,
+        "width": XXX,
+        "height": XXX,
+        "depth": XXX,
+        "shift_amount": XXX,
+        "children": XXX,
+        "glue_set": XXX,
+        "glue_sign": XXX,
+        "glue_order": XXX
+    },
+    "args": {
+        "w": XXX,
+        "m": XXX
+    },
+    "kwargs": {}
+}
+```
+
+`self.size`, `shift_amount` unused ⇒ `null` or `0.0`.  
+`width`, `height`, `depth`, `glue_set`, `glue_sign`, `glue_order` will be overwritten by `hpack`. Initial values don’t matter, but they should be numeric placeholders.
+
+Pick `children = []` to keep math simple.  
+Pick `w = 0.0`, `m = 'additional'`.
+
+Initial `self.width` irrelevant — but in `Hlist.__init__`, `hpack` is called after `kern`, so at input time to `hpack`, `self.width` might be uninitialized. We can set `width` to `0.0`.
+
+---
+
+**7. Final guess**  
+
+We need to satisfy:  
+`m = 'additional'`, `w = 0.0`, children empty ⇒ natural width = 0 ⇒ `self.width = 0 + 0 = 0`, `x = 0`.  
+Then `glue_sign = 0`, `glue_order = 0`, `glue_set = 0.0`.
+
+All good, no warnings.
+
+---
+
+[THOUGHT]
+The output `{"output": null}` means `hpack` completed without error. The simplest case is `children = []`, `w = 0`, `m = 'additional'`. Then `x = 0`, `glue_sign = 0`, `glue_order = 0`, `glue_set = 0.0`, and no warnings. Other self attributes not used can be null or 0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "size": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "depth": 0.0,
+        "shift_amount": 0.0,
+        "children": [],
+        "glue_set": 0.0,
+        "glue_sign": 0,
+        "glue_order": 0
+    },
+    "args": {
+        "w": 0.0,
+        "m": "additional"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

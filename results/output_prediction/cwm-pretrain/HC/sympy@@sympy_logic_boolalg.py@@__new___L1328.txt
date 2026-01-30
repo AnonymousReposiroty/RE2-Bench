@@ -1,0 +1,523 @@
+<think>
+
+Let me walk through the execution step by step:
+
+1. The `__new__` method of `Equivalent` class is called with the arguments:
+   - cls = "Equivalent"
+   - evaluate = null
+   - args = ["Q.even(X) | Q.even(Z)", "Q.even(X*Z)"]
+
+2. First, the function checks if evaluate is None (which it is), so it uses the global parameter's evaluate value.
+
+3. Since evaluate is False, the function would normally return an instance of the class with evaluate set to False, but in our case, evaluate is null, so this path is not taken.
+
+4. The function then converts all arguments to SymPy objects using _sympify.
+
+5. The function creates a set of arguments to process.
+
+6. The code checks if any arguments are Relational objects and adds their canonical and negated canonical forms to the 'rel' list. However, in this case, neither of the given arguments are Relational objects.
+
+7. The function creates 'remove' list, which is used to store pairs of contradictory arguments that cancel each other out.
+
+8. The function checks if the argument set has 0 or 1 elements, which would simplify to True or False respectively. In this case, the argument set has 2 elements, so this path is not taken.
+
+9. The function checks if True is in the argument set. It's not, so this path is not taken.
+
+10. The function checks if False is in the argument set. It's not, so this path is not taken.
+
+11. Finally, the function returns the super().__new__ of the ordered argument set.
+
+Since the input arguments are "Q.even(X) | Q.even(Z)" and "Q.even(X*Z)", and these expressions don't evaluate to simple Boolean values or contradictions, the output will be an And object containing these two arguments in their original form.
+
+</think>
+
+[OUTPUT]
+```
+{
+    "output": {
+        "__class__": "And",
+        "args": [
+            "Q.even(X) | Q.even(Z)",
+            "Q.even(X*Z)"
+        ]
+    }
+}
+```
+[/OUTPUT]
+<s>
+[CONTRAINTS]
+You have the following constraints:
+- You have to predict the output based on the given function code and input, without actually executing the code. Be sure to consider all possible paths and edge cases.
+- You should use the provided reasoning process and format to predict the output.
+- Use the print function to output your prediction.
+- You can use any libraries or functions provided in the code.
+
+[/CONTRAINTS]
+</s>
+
+[FILEPATH] huajia25-IDE_agents-43f8290/python/calls_predict/llama_3_1/calls/predictCalls.py [/FILEPATH]
+import json
+import os
+import traceback
+import re
+from typing import Dict, Any, List
+from llama3_class import Llama3Caller
+import pandas as pd
+import re
+from bs4 import BeautifulSoup
+
+class Usage:
+    def __init__(self):
+        self.cost = 0.0
+
+    def add_cost(self, value: float):
+        self.cost += value
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "cost": self.cost
+        }
+
+def parse_llama_output(plain_text: str) -> Dict[str, Any]:
+    try:
+        # Match everything between [OUTPUT] and [/OUTPUT] including HTML tags
+        output_match = re.search(r'\[OUTPUT\](.*?)\[/OUTPUT\]', plain_text, re.DOTALL)
+        if not output_match:
+            return {"error": "No output found", "llama_text": plain_text}
+
+        content = output_match.group(1).strip()
+
+        if '<table>' in content:
+            # Extract just the table content and clean up extra tags
+            table_content = re.search(r'<table>(.*?)</table>', content, re.DOTALL)
+            if table_content:
+                table_html = f"<table>{table_content.group(1).strip()}</table>"
+                
+                # Parse the HTML table
+                soup = BeautifulSoup(table_html, 'html.parser')
+                rows = []
+                for tr in soup.find_all('tr'):
+                    row = []
+                    for td in tr.find_all('td'):
+                        cell_content = td.text.strip()
+                        # Clean up any remaining HTML content in the cell
+                        cell_content = re.sub(r'<.*?>', '', cell_content)
+                        row.append(cell_content)
+                    rows.append(row)
+                
+                # Convert to JSON format
+                json_data = {
+                    "table": rows
+                }
+                return {
+                    "success": True,
+                    "json": json_data,
+                    "llama_text": plain_text,
+                    "table_html": table_html
+                }
+
+        else:
+            # Try to parse non-table content as JSON
+            try:
+                # Remove any markdown code block delimiters and clean up content
+                content = content.replace("```", "").strip()
+                if content.startswith("json"):
+                    content = content[4:].strip()
+                
+                # Replace escaped newlines with actual newlines
+                content = content.replace('\\n', '\n')
+                
+                # Clean up any remaining HTML tags
+                content = re.sub(r'<.*?>', '', content)
+                
+                # Remove markdown formatting
+                content = re.sub(r'\*\*(.*?)\*\*', r'\1', content)
+                content = re.sub(r'\*(.*?)\*', r'\1', content)
+                content = re.sub(r'`([^`]+)`', r'\1', content)
+                
+                # Parse JSON
+                parsed_json = json.loads(content)
+                
+                return {
+                    "success": True,
+                    "json": parsed_json,
+                    "llama_text": plain_text
+                }
+            except json.JSONDecodeError as e:
+                return {
+                    "error": f"Invalid JSON format: {str(e)}",
+                    "raw_content": content,
+                    "llama_text": plain_text
+                }
+
+    except Exception as e:
+        return {
+            "error": f"Parsing error: {str(e)}",
+            "llama_text": plain_text,
+            "raw_content": content if 'content' in locals() else plain_text
+        }
+
+def main():
+    current_file_path = os.path.abspath(__file__)
+    current_directory = os.path.dirname(current_file_path)
+    root_directory = os.path.dirname(os.path.dirname(current_directory))
+    
+    output_directory = os.path.join(root_directory, "outputs", "llama_3_1")
+    os.makedirs(output_directory, exist_ok=True)
+
+    usage = Usage()
+    correct_predictions = 0
+    total_predictions = 0
+
+    llama3 = Llama3Caller(
+        model="llama-3.1-8b-instant",
+        base_url="https://api.fireworks.ai/inference/v1/completions",
+        api_key=os.getenv("FIREWORKS_API_KEY")
+    )
+
+    with open(os.path.join(root_directory, "data", "results.csv"), "r") as f:
+        all_results = [json.loads(line) for line in f if line.strip()]
+
+    with open(os.path.join(root_directory, "python", "calls_predict", "input.md"), "r") as f:
+        input_content = f.read()
+
+    # Process each file pair
+    for file_pair in all_results:
+        try:
+            file_path = file_pair["file_path"]
+            call_path = file_pair["call_path"]
+
+            file_name = os.path.basename(file_path)
+            call_name = os.path.basename(call_path)
+            
+            print(f"\nProcessing {file_name} -> {call_name}")
+            
+            # Read files
+            with open(file_path, "r") as f:
+                code_content = f.read()
+            with open(call_path, "r") as f:
+                calls_content = f.read()
+
+            if not code_content or not calls_content:
+                print(f"Skipping {file_name} -> {call_name}: Files are empty")
+                continue
+
+            # Create single input file content
+            input_data = {
+                "input.md": input_content,
+                "code.py": code_content,
+                "calls.json": calls_content
+            }
+
+            # Get prediction using Llama3Caller
+            prediction_result = llama3.predict(input_data)
+            
+            usage.add_cost(prediction_result.usage.cost)
+            
+            # Get actual calls from the calls.json file
+            actual_calls = json.loads(calls_content)
+            
+            # Parse LLaMA's output
+            parsed_result = parse_llama_output(prediction_result.output)
+            
+            # Generate detailed output
+            output = {
+                "file_pair": f"{file_name} -> {call_name}",
+                "llama_output": parsed_result["llama_text"],
+                "actual_calls": actual_calls,
+                "predicted_calls": parsed_result.get("json", {}),
+                "success": parsed_result.get("success", False),
+                "error": parsed_result.get("error", None),
+                "usage": prediction_result.usage.to_json()
+            }
+            
+            # Add table HTML if present
+            if "table_html" in parsed_result:
+                output["table_html"] = parsed_result["table_html"]
+
+            # Write detailed output to file
+            output_file_name = f"{file_name}_{call_name}.json"
+            output_file_path = os.path.join(output_directory, output_file_name)
+            
+            with open(output_file_path, "w") as f:
+                json.dump(output, f, indent=4)
+            
+            print(f"Predicted: {len(parsed_result.get('json', []))} calls")
+            print(f"Actual: {len(actual_calls)} calls")
+            
+            # Check if prediction matches actual calls
+            if isinstance(parsed_result.get("json"), list) and isinstance(actual_calls, list):
+                if set(parsed_result["json"]) == set(actual_calls):
+                    correct_predictions += 1
+                total_predictions += 1
+
+        except Exception as e:
+            print(f"Error processing {file_name} -> {call_name}: {str(e)}")
+            print(traceback.format_exc())
+
+    # Calculate and print accuracy
+    if total_predictions > 0:
+        accuracy = (correct_predictions / total_predictions) * 100
+        print(f"\nAccuracy: {accuracy:.2f}%")
+        print(f"Correct predictions: {correct_predictions}")
+        print(f"Total predictions: {total_predictions}")
+    else:
+        print("\nNo predictions were made")
+
+    # Print total usage
+    print("\nTotal usage:")
+    print(json.dumps(usage.to_json(), indent=4))
+
+if __name__ == "__main__":
+    main()
+
+[FILEPATH] huajia25-IDE_agents-43f8290/python/calls_predict/gemini_1_5/calls/predictCalls.py [/FILEPATH]
+import json
+import os
+import traceback
+from typing import Dict, Any, List
+from GeminiCaller import GeminiCaller
+from google.api_core.exceptions import GoogleAPIError, NotFound
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import pandas as pd
+import re
+import difflib
+from urllib.error import HTTPError
+
+class Usage:
+    def __init__(self):
+        self.cost = 0.0
+
+    def add_cost(self, value: float):
+        self.cost += value
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "cost": self.cost
+        }
+
+def parse_gemini_output(output: str) -> Dict[str, Any]:
+    """Safely parse Gemini output containing code blocks and function lists."""
+    try:
+        # Remove code block markers and leading/trailing whitespace
+        cleaned_output = output.replace("```", "").strip()
+        
+        # If the output starts with "json" but isn't in a code block, remove it
+        if cleaned_output.startswith("json"):
+            cleaned_output = cleaned_output[4:].strip()
+        
+        # Convert JSON-like string to a Python list
+        parsed_json = json.loads(cleaned_output)
+        
+        # If it's a dictionary instead of a list, extract the calls value
+        if isinstance(parsed_json, dict):
+            if "calls" in parsed_json:
+                parsed_json = parsed_json["calls"]
+            elif "calls_list" in parsed_json:
+                parsed_json = parsed_json["calls_list"]
+            elif "predictions" in parsed_json:
+                parsed_json = parsed_json["predictions"]
+        
+        # Ensure we have a list
+        if not isinstance(parsed_json, list):
+            if isinstance(parsed_json, dict):
+                parsed_json = list(parsed_json.values())
+            else:
+                parsed_json = [parsed_json]
+        
+        # Clean up the list items if needed
+        cleaned_list = []
+        for item in parsed_json:
+            if isinstance(item, str):
+                # Remove any trailing comments or additional text after the function name
+                item = item.split("(", 1)[0]
+                cleaned_list.append(item.strip())
+            elif isinstance(item, dict):
+                # If it's a dictionary, extract the function name or entire structure
+                if "function" in item:
+                    cleaned_list.append(item["function"])
+                else:
+                    cleaned_list.append(item)
+            else:
+                cleaned_list.append(item)
+        
+        return {
+            "success": True,
+            "calls": cleaned_list,
+            "raw_output": output
+        }
+        
+    except json.JSONDecodeError as e:
+        return {
+            "error": f"Invalid JSON format: {str(e)}",
+            "raw_output": output
+        }
+    except Exception as e:
+        return {
+            "error": f"Parsing error: {str(e)}",
+            "raw_output": output
+        }
+
+def calculate_similarity(actual_calls: List[str], predicted_calls: List[str]) -> Dict[str, float]:
+    """Calculate similarity metrics between actual and predicted calls."""
+    if not actual_calls or not predicted_calls:
+        return {
+            "total_similarity": 0.0,
+            "individual_similarities": {}
+        }
+    
+    total_similarity = 0.0
+    individual_similarities = {}
+    
+    # Convert lists to sets for comparison
+    actual_set = set(actual_calls)
+    predicted_set = set(predicted_calls)
+    
+    # Calculate total similarity score
+    matches = actual_set.intersection(predicted_set)
+    total_similarity = (2 * len(matches)) / (len(actual_set) + len(predicted_set))
+    
+    # Calculate similarity for each actual call
+    for actual_call in actual_set:
+        # Calculate similarity score for this call
+        if actual_call in predicted_set:
+            individual_similarities[actual_call] = 1.0
+        else:
+            # Find best matching predicted call
+            best_match = max(
+                difflib.SequenceMatcher(None, actual_call, predicted_call).ratio()
+                for predicted_call in predicted_set
+            )
+            individual_similarities[actual_call] = best_match
+    
+    return {
+        "total_similarity": total_similarity,
+        "individual_similarities": individual_similarities
+    }
+
+def main():
+    current_file_path = os.path.abspath(__file__)
+    current_directory = os.path.dirname(current_file_path)
+    root_directory = os.path.dirname(os.path.dirname(current_directory))
+    
+    output_directory = os.path.join(root_directory, "outputs", "gemini_1_5")
+    os.makedirs(output_directory, exist_ok=True)
+
+    usage = Usage()
+    correct_predictions = 0
+    total_predictions = 0
+
+    # Initialize GeminiCaller
+    gemini_caller = GeminiCaller()
+
+    with open(os.path.join(root_directory, "data", "results.csv"), "r") as f:
+        all_results = [json.loads(line) for line in f if line.strip()]
+
+    with open(os.path.join(root_directory, "python", "calls_predict", "input.md"), "r") as f:
+        input_content = f.read()
+
+    # Process each file pair
+    for file_pair in all_results:
+        try:
+            file_path = file_pair["file_path"]
+            call_path = file_pair["call_path"]
+
+            file_name = os.path.basename(file_path)
+            call_name = os.path.basename(call_path)
+            
+            print(f"\nProcessing {file_name} -> {call_name}")
+            
+            # Read files
+            with open(file_path, "r") as f:
+                code_content = f.read()
+            with open(call_path, "r") as f:
+                calls_content = f.read()
+
+            if not code_content or not calls_content:
+                print(f"Skipping {file_name} -> {call_name}: Files are empty")
+                continue
+
+            # Create single input file content
+            input_data = {
+                "input.md": input_content,
+                "code.py": code_content,
+                "calls.json": calls_content
+            }
+
+            # Get prediction using GeminiCaller
+            prediction_result = gemini_caller.predict(input_data)
+            
+            # Update usage
+            usage.add_cost(prediction_result.usage.cost)
+            
+            # Get actual calls from the calls.json file
+            actual_calls = json.loads(calls_content)
+            
+            # Parse Gemini's output
+            parsed_result = parse_gemini_output(prediction_result.output)
+            
+            # Calculate similarity metrics
+            similarity_metrics = calculate_similarity(actual_calls, parsed_result.get("calls", []))
+            
+            # Generate detailed output
+            output = {
+                "file_pair": f"{file_name} -> {call_name}",
+                "gemini_output": prediction_result.output,
+                "actual_calls": actual_calls,
+                "predicted_calls": parsed_result.get("calls", []),
+                "success": parsed_result.get("success", False),
+                "error": parsed_result.get("error", None),
+                "similarity_metrics": similarity_metrics,
+                "usage": prediction_result.usage.to_json()
+            }
+            
+            # Write detailed output to file
+            output_file_name = f"{file_name}_{call_name}.json"
+            output_file_path = os.path.join(output_directory, output_file_name)
+            
+            with open(output_file_path, "w") as f:
+                json.dump(output, f, indent=4)
+            
+            print(f"Predicted: {len(parsed_result.get('calls', []))} calls")
+            print(f"Actual: {len(actual_calls)} calls")
+            
+            # Update prediction statistics
+            if isinstance(parsed_result.get("calls"), list) and isinstance(actual_calls, list):
+                if set(parsed_result["calls"]) == set(actual_calls):
+                    correct_predictions += 1
+                total_predictions += 1
+
+        except Exception as e:
+            print(f"Error processing {file_name} -> {call_name}: {str(e)}")
+            print(traceback.format_exc())
+
+    # Calculate and print accuracy
+    if total_predictions > 0:
+        accuracy = (correct_predictions / total_predictions) * 100
+        print(f"\nAccuracy: {accuracy:.2f}%")
+        print(f"Correct predictions: {correct_predictions}")
+        print(f"Total predictions: {total_predictions}")
+    else:
+        print("\nNo predictions were made")
+
+    # Print total usage
+    print("\nTotal usage:")
+    print(json.dumps(usage.to_json(), indent=4))
+
+if __name__ == "__main__":
+    main()
+
+[FILEPATH] huajia25-IDE_agents-43f8290/python/calls_predict/callmap_analysis.py [/FILEPATH]
+import json
+import os
+from typing import Dict, List, Any, Set, Tuple
+import networkx as nx
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
+class CallMapAnalyzer:
+    def __init__(self, data_dir: str):
+        self.data_dir = data_dir
+        self.loaded_callmaps = {}
+        self.method_counts = defaultdict(int)
+        self

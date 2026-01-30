@@ -1,0 +1,139 @@
+The method `factor_terms` contains an inner function `do` which is called with `expr = sympify("sin(0.0644444444444444*pi)**2")`.
+This expression is `Pow(sin(Mul(Float('0.0644444444444444'), Pi)), Integer(2))`.
+
+[THOUGHT]
+Tracing `do(expr)` recursively:
+
+1.  **Call 0**: `do(Pow(sin(0.0644...*pi), 2))`
+    *   Condition `expr.is_Pow` is True (Line 40).
+    *   Line 42: `args` = `(sin(0.0644...*pi), 2)`.
+    *   Line 43: Loop `for i in args`.
+        *   **Iteration 0**: `i` = `sin(0.0644...*pi)`.
+            *   Recursive **Call 1**: `do(sin(0.0644...*pi))`
+                *   Condition `expr.is_Function` is True (Line 40).
+                *   Line 42: `args` = `(0.0644...*pi,)` (Singleton tuple).
+                *   Line 43: Loop `for i in args`.
+                    *   **Iteration 0**: `i` = `0.0644...*pi` (Mul).
+                        *   Recursive **Call 2**: `do(Mul(0.0644..., pi))`
+                            *   Line 40 condition False for Mul (has `args_cnc`).
+                            *   Line 53: `p` = `Mul(0.0644..., pi)`.
+                            *   Line 74: `elif p.args:` is True. `p.args` = `(0.0644..., pi)`.
+                            *   Line 76: Loop `for a in p.args`.
+                                *   **Iteration 0**: `a` = `0.0644...` (Float).
+                                    *   `do(Float)` returns Float.
+                                *   **Iteration 1**: `a` = `pi` (Symbol).
+                                    *   `do(pi)` returns pi.
+                                *   **Line 76 States**:
+                                    *   `a`: `[0.0644444444444444, pi]`
+                                    *   `p.args`: `[(0.0644444444444444, pi), (0.0644444444444444, pi)]`
+                            *   Returns `Mul(...)`.
+                    *   **Line 43 Loop (Call 1) State Update**:
+                        *   `i` (from this call): `0.0644444444444444*pi`
+                        *   `args` (from this call): `(0.0644444444444444*pi,)`
+                *   Returns `sin(...)`.
+        *   **Iteration 1**: `i` = `2` (Integer).
+            *   `do(2)` returns `2`.
+    *   **Line 43 Loop (Call 0) State Updates**:
+        *   Iteration 0: `i` = `sin(...)`, `args` = `(sin(...) , 2)`.
+        *   (Inner Call 1 happens here).
+        *   Iteration 1: `i` = `2`, `args` = `(sin(...) , 2)`.
+
+**Aggregated States for Line 43**:
+The variable `i` takes values in this order across all calls on the stack:
+1.  `sin(0.0644444444444444*pi)` (Outer loop, first item)
+2.  `0.0644444444444444*pi` (Inner loop inside first item, first item)
+3.  `2` (Outer loop, second item)
+
+The variable `args` corresponds to the iterable being enumerated in the `do` function scope where `i` is processed:
+1.  `(sin(0.0644444444444444*pi), 2)`
+2.  `(0.0644444444444444*pi,)`
+3.  `(sin(0.0644444444444444*pi), 2)`
+
+**Aggregated States for Line 76**:
+Reached once in Call 2.
+`a` values: `0.0644444444444444`, `pi`.
+`p.args` value: `(0.0644444444444444, pi)` (repeated twice).
+[/THOUGHT]
+
+[ANSWER]
+1 from __future__ import print_function, division
+2 from sympy.core.add import Add
+3 from sympy.core.compatibility import iterable, is_sequence, SYMPY_INTS, range
+4 from sympy.core.mul import Mul, _keep_coeff
+5 from sympy.core.power import Pow
+6 from sympy.core.basic import Basic, preorder_traversal
+7 from sympy.core.expr import Expr
+8 from sympy.core.sympify import sympify
+9 from sympy.core.numbers import Rational, Integer, Number, I
+10 from sympy.core.singleton import S
+11 from sympy.core.symbol import Dummy
+12 from sympy.core.coreerrors import NonCommutativeExpression
+13 from sympy.core.containers import Tuple, Dict
+14 from sympy.utilities import default_sort_key
+15 from sympy.utilities.iterables import (common_prefix, common_suffix,
+16         variations, ordered)
+17 from collections import defaultdict
+18 from sympy.simplify.simplify import powsimp
+19 from sympy.polys import gcd, factor
+20 from sympy.concrete.summations import Sum
+21 from sympy.integrals.integrals import Integral
+22 from sympy import Dummy
+23 from sympy.polys.polytools import real_roots
+24 from sympy.polys.polyroots import roots
+25 from sympy.polys.polyerrors import PolynomialError
+26 
+27 _eps = Dummy(positive=True)
+28 
+29 def factor_terms(expr, radical=False, clear=False, fraction=False, sign=True):
+30     def do(expr):
+31         from sympy.concrete.summations import Sum
+32         from sympy.integrals.integrals import Integral
+33         is_iterable = iterable(expr)
+34 
+35         if not isinstance(expr, Basic) or expr.is_Atom:
+36             if is_iterable:
+37                 return type(expr)([do(i) for i in expr])
+38             return expr
+39 
+40         if expr.is_Pow or expr.is_Function or \
+41                 is_iterable or not hasattr(expr, 'args_cnc'):
+42             args = expr.args
+43             newargs = tuple([do(i) for i in args]) ## [STATE]i=[sin(0.0644444444444444*pi), 0.0644444444444444*pi, 2][/STATE] [STATE]args=[(sin(0.0644444444444444*pi), 2), (0.0644444444444444*pi,), (sin(0.0644444444444444*pi), 2)][/STATE]
+44             if newargs == args:
+45                 return expr
+46             return expr.func(*newargs)
+47 
+48         if isinstance(expr, (Sum, Integral)):
+49             return _factor_sum_int(expr,
+50                 radical=radical, clear=clear,
+51                 fraction=fraction, sign=sign)
+52 
+53         cont, p = expr.as_content_primitive(radical=radical, clear=clear)
+54         if p.is_Add:
+55             list_args = [do(a) for a in Add.make_args(p)]
+56 
+57             if all(a.as_coeff_Mul()[0].extract_multiplicatively(-1) is not None
+58                    for a in list_args):
+59                 cont = -cont
+60                 list_args = [-a for a in list_args]
+61 
+62             special = {}
+63             for i, a in enumerate(list_args):
+64                 b, e = a.as_base_exp()
+65                 if e.is_Mul and e != Mul(*e.args):
+66                     list_args[i] = Dummy()
+67                     special[list_args[i]] = a
+68 
+69             p = Add._from_args(list_args)
+70             p = gcd_terms(p,
+71                 isprimitive=True,
+72                 clear=clear,
+73                 fraction=fraction).xreplace(special)
+74         elif p.args:
+75             p = p.func(
+76                 *[do(a) for a in p.args]) ## [STATE]a=[0.0644444444444444, pi][/STATE] [STATE]p.args=[(0.0644444444444444, pi), (0.0644444444444444, pi)][/STATE]
+77         rv = _keep_coeff(cont, p, clear=clear, sign=sign)
+78         return rv
+79     expr = sympify(expr)
+80     return do(expr)
+[/ANSWER]

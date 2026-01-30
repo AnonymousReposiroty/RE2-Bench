@@ -1,0 +1,178 @@
+<<FUNCTION_NAME>>
+
+_route_params
+
+<<CODE>>
+
+from warnings import warn
+from sklearn.exceptions import UnsetMetadataPassedError
+from sklearn.utils._bunch import Bunch
+
+class MethodMetadataRequest:
+    """Container for metadata requests associated with a single method.
+
+    Instances of this class get used within a :class:`MetadataRequest` - one per each
+    public method (`fit`, `transform`, ...) that its owning consumer has.
+
+    .. versionadded:: 1.3
+
+    Parameters
+    ----------
+    owner : object
+        The object owning these requests.
+
+    method : str
+        The name of the method to which these requests belong.
+
+    requests : dict of {str: bool, None or str}, default=None
+        The initial requests for this method.
+    """
+
+    def __init__(self, owner, method, requests=None):
+        self._requests = requests or dict()
+        self.owner = owner
+        self.method = method
+
+    def _check_warnings(self, *, params):
+        """Check whether metadata is passed which is marked as WARN.
+
+        If any metadata is passed which is marked as WARN, a warning is raised.
+
+        Parameters
+        ----------
+        params : dict
+            The metadata passed to a method.
+        """
+        params = {} if params is None else params
+        warn_params = {prop for prop, alias in self._requests.items() if alias == WARN and prop in params}
+        for param in warn_params:
+            warn(f'Support for {param} has recently been added to {self.owner} class. To maintain backward compatibility, it is ignored now. Using `set_{self.method}_request({param}={{True, False}})` on this method of the class, you can set the request value to False to silence this warning, or to True to consume and use the metadata.')
+
+    def _route_params(self, params, parent, caller):
+        """Prepare the given metadata to be passed to the method.
+
+        The output of this method can be used directly as the input to the
+        corresponding method as **kwargs.
+
+        Parameters
+        ----------
+        params : dict
+            A dictionary of provided metadata.
+
+        parent : object
+            Parent class object, that routes the metadata.
+
+        caller : str
+            Method from the parent class object, where the metadata is routed from.
+
+        Returns
+        -------
+        params : Bunch
+            A :class:`~sklearn.utils.Bunch` of {metadata: value} which can be
+            passed to the corresponding method.
+        """
+        self._check_warnings(params=params)
+        unrequested = dict()
+        args = {arg: value for arg, value in params.items() if value is not None}
+        res = Bunch()
+        for prop, alias in self._requests.items():
+            if alias is False or alias == WARN:
+                continue
+            elif alias is True and prop in args:
+                res[prop] = args[prop]
+            elif alias is None and prop in args:
+                unrequested[prop] = args[prop]
+            elif alias in args:
+                res[prop] = args[alias]
+        if unrequested:
+            if self.method in COMPOSITE_METHODS:
+                callee_methods = COMPOSITE_METHODS[self.method]
+            else:
+                callee_methods = [self.method]
+            set_requests_on = ''.join([f'.set_{method}_request({{metadata}}=True/False)' for method in callee_methods])
+            message = f"[{', '.join([key for key in unrequested])}] are passed but are not explicitly set as requested or not requested for {_routing_repr(self.owner)}.{self.method}, which is used within {_routing_repr(parent)}.{caller}. Call `{_routing_repr(self.owner)}" + set_requests_on + '` for each metadata you want to request/ignore. See the Metadata Routing User guide <https://scikit-learn.org/stable/metadata_routing.html> for more information.'
+            raise UnsetMetadataPassedError(message=message, unrequested_params=unrequested, routed_params=res)
+        return res
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'_requests': {'sample_weight': True, 'metadata': True}, 'owner': 'ConsumingTransformer(registry=[])', 'method': 'fit_transform'}, 'args': {'params': {'sample_weight': [1], 'metadata': 'a'}, 'parent': "ColumnTransformer(transformers=[('trans', ConsumingTransformer(registry=[]),\n                                 [0])])", 'caller': 'fit_transform'}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+{'sample_weight': [1], 'metadata': 'a'}
+
+<<LLM_RESPONSE>>
+
+[THOUGHT]
+The function `_route_params` filters and maps parameters from `params` into a `Bunch` (dictionary-like object) based on the configuration in `self._requests`.
+
+The output is:
+```json
+{
+    "sample_weight": [1],
+    "metadata": "a"
+}
+```
+
+This means the returned `Bunch` has keys `sample_weight` and `metadata` with values `[1]` and `"a"`.
+
+Looking at the logic inside `_route_params`:
+```python
+        for prop, alias in self._requests.items():
+            # ...
+            elif alias is True and prop in args:
+                res[prop] = args[prop]
+            # ...
+            elif alias in args:
+                res[prop] = args[alias]
+```
+
+To achieve the output, the easiest path is to assume that the `_requests` dictionary maps the required properties to `True` (meaning "requested with the same name").
+
+1.  **Setting up `self._requests`**: We need `sample_weight` and `metadata` to be processed and added to `res`. If we set `_requests["sample_weight"] = True` and `_requests["metadata"] = True`, the code will check if these keys exist in `args` (which comes from `params`).
+
+2.  **Setting up `params`**: For the values to be `[1]` and `"a"`, `params` must contain `sample_weight` with value `[1]` and `metadata` with value `"a"`.
+
+3.  **Other arguments**: `owner`, `method`, `parent`, and `caller` are used for error messages or warnings. Since we are predicting a successful execution that produces output (and not an error), we can fill them with arbitrary string identifiers typically found in this context (e.g., estimator names).
+
+**Step-by-step execution simulation:**
+*   `self._requests` is `{'sample_weight': True, 'metadata': True}`.
+*   `params` is `{'sample_weight': [1], 'metadata': 'a'}`.
+*   `_check_warnings` runs. Aliases are `True` (not `WARN`), so no warnings.
+*   `args` becomes `{'sample_weight': [1], 'metadata': 'a'}` (filtering out None, assuming none are None).
+*   Loop starts:
+    *   `prop`="sample_weight", `alias`=True. `alias is True` holds. `prop` is in `args`. `res["sample_weight"]` set to `args["sample_weight"]` (`[1]`).
+    *   `prop`="metadata", `alias`=True. `alias is True` holds. `prop` is in `args`. `res["metadata"]` set to `args["metadata"]` (`"a"`).
+*   `unrequested` is empty.
+*   `res` is returned.
+
+This matches the observed output.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_requests": {
+            "sample_weight": true,
+            "metadata": true
+        },
+        "owner": "MyEstimator",
+        "method": "fit"
+    },
+    "args": {
+        "params": {
+            "sample_weight": [
+                1
+            ],
+            "metadata": "a"
+        },
+        "parent": "MetaEstimator",
+        "caller": "fit"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

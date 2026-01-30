@@ -1,0 +1,492 @@
+[/EXAMPLE]
+[PYTHON]
+from __future__ import print_function, division
+from sympy.core.add import Add
+from sympy.core.compatibility import iterable, is_sequence, SYMPY_INTS, range
+from sympy.core.mul import Mul, _keep_coeff
+from sympy.core.power import Pow
+from sympy.core.basic import Basic, preorder_traversal
+from sympy.core.expr import Expr
+from sympy.core.sympify import sympify
+from sympy.core.numbers import Rational, Integer, Number, I
+from sympy.core.singleton import S
+from sympy.core.symbol import Dummy
+from sympy.core.coreerrors import NonCommutativeExpression
+from sympy.core.containers import Tuple, Dict
+from sympy.utilities import default_sort_key
+from sympy.utilities.iterables import common_prefix, common_suffix, variations, ordered
+from collections import defaultdict
+from sympy.simplify.simplify import powsimp
+from sympy.polys import gcd, factor
+from sympy.concrete.summations import Sum
+from sympy.integrals.integrals import Integral
+from sympy import Dummy
+from sympy.polys.polytools import real_roots
+from sympy.polys.polyroots import roots
+from sympy.polys.polyerrors import PolynomialError
+_eps = Dummy(positive=True)
+
+def factor_terms(expr, radical=False, clear=False, fraction=False, sign=True):
+
+    def do(expr):
+        from sympy.concrete.summations import Sum
+        from sympy.integrals.integrals import Integral
+        is_iterable = iterable(expr)
+        if not isinstance(expr, Basic) or expr.is_Atom:
+            if is_iterable:
+                return type(expr)([do(i) for i in expr])
+            return expr
+        if expr.is_Pow or expr.is_Function or is_iterable or (not hasattr(expr, 'args_cnc')):
+            args = expr.args
+            newargs = tuple([do(i) for i in args])
+            if newargs == args:
+                return expr
+            return expr.func(*newargs)
+        if isinstance(expr, (Sum, Integral)):
+            return _factor_sum_int(expr, radical=radical, clear=clear, fraction=fraction, sign=sign)
+        cont, p = expr.as_content_primitive(radical=radical, clear=clear)
+        if p.is_Add:
+            list_args = [do(a) for a in Add.make_args(p)]
+            if all((a.as_coeff_Mul()[0].extract_multiplicatively(-1) is not None for a in list_args)):
+                cont = -cont
+                list_args = [-a for a in list_args]
+            special = {}
+            for i, a in enumerate(list_args):
+                b, e = a.as_base_exp()
+                if e.is_Mul and e != Mul(*e.args):
+                    list_args[i] = Dummy()
+                    special[list_args[i]] = a
+            p = Add._from_args(list_args)
+            p = gcd_terms(p, isprimitive=True, clear=clear, fraction=fraction).xreplace(special)
+        elif p.args:
+            p = p.func(*[do(a) for a in p.args])
+        rv = _keep_coeff(cont, p, clear=clear, sign=sign)
+        return rv
+    expr = sympify(expr)
+    return do(expr)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.sympy.core.sympify.sympify
+
+def sympify(a, locals=None, convert_xor=True, strict=False, rational=False, evaluate=None):
+    if evaluate is None:
+        if global_evaluate[0] is False:
+            evaluate = global_evaluate[0]
+        else:
+            evaluate = True
+    try:
+        if a in sympy_classes:
+            return a
+    except TypeError:
+        pass
+    cls = getattr(a, '__class__', None)
+    if cls is None:
+        cls = type(a)
+    if cls in sympy_classes:
+        return a
+    if cls is type(None):
+        if strict:
+            raise SympifyError(a)
+        else:
+            return a
+    if type(a).__module__ == 'numpy':
+        import numpy as np
+        if np.isscalar(a):
+            return _convert_numpy_types(a, locals=locals, convert_xor=convert_xor, strict=strict, rational=rational, evaluate=evaluate)
+    try:
+        return converter[cls](a)
+    except KeyError:
+        for superclass in getmro(cls):
+            try:
+                return converter[superclass](a)
+            except KeyError:
+                continue
+    if isinstance(a, CantSympify):
+        raise SympifyError(a)
+    _sympy_ = getattr(a, '_sympy_', None)
+    if _sympy_ is not None:
+        try:
+            return a._sympy_()
+        except AttributeError:
+            pass
+    if not strict:
+        flat = getattr(a, 'flat', None)
+        if flat is not None:
+            shape = getattr(a, 'shape', None)
+            if shape is not None:
+                from ..tensor.array import Array
+                return Array(a.flat, a.shape)
+    if not isinstance(a, string_types):
+        for coerce in (float, int):
+            try:
+                coerced = coerce(a)
+            except (TypeError, ValueError):
+                continue
+            except AttributeError:
+                continue
+            try:
+                return sympify(coerced)
+            except SympifyError:
+                continue
+    if strict:
+        raise SympifyError(a)
+    if iterable(a):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor, rational=rational) for x in a])
+        except TypeError:
+            pass
+    if isinstance(a, dict):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor, rational=rational) for x in a.items()])
+        except TypeError:
+            pass
+    try:
+        from .compatibility import unicode
+        a = unicode(a)
+    except Exception as exc:
+        raise SympifyError(a, exc)
+    from sympy.parsing.sympy_parser import parse_expr, TokenError, standard_transformations
+    from sympy.parsing.sympy_parser import convert_xor as t_convert_xor
+    from sympy.parsing.sympy_parser import rationalize as t_rationalize
+    transformations = standard_transformations
+    if rational:
+        transformations += (t_rationalize,)
+    if convert_xor:
+        transformations += (t_convert_xor,)
+    try:
+        a = a.replace('\n', '')
+        expr = parse_expr(a, local_dict=locals, transformations=transformations, evaluate=evaluate)
+    except (TokenError, SyntaxError) as exc:
+        raise SympifyError('could not parse %r' % a, exc)
+    return expr
+
+.sympy.core.basic.Basic.__hash__
+
+def __hash__(self):
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+.sympy.core.basic.Basic._hashable_content
+
+def _hashable_content(self):
+    return self._args
+
+.sympy.core.numbers.Integer.__hash__
+
+def __hash__(self):
+    return hash(self.p)
+
+.sympy.core.numbers.Rational.__hash__
+
+def __hash__(self):
+    return super(Rational, self).__hash__()
+
+.sympy.core.numbers.Number.__hash__
+
+def __hash__(self):
+    return super(Number, self).__hash__()
+
+
+[/PYTHON]
+What will be the input of `factor_terms`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "2*x/(a**2*(x**2 - y**2))"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {},
+    "args": {
+        "expr": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+<think>
+
+ Always use the tags [INPUT] and [/INPUT] to enclose the predicted input in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+[/EXAMPLE]
+[PYTHON]
+from __future__ import print_function, division
+from sympy.core.add import Add
+from sympy.core.compatibility import iterable, is_sequence, SYMPY_INTS, range
+from sympy.core.mul import Mul, _keep_coeff
+from sympy.core.power import Pow
+from sympy.core.basic import Basic, preorder_traversal
+from sympy.core.expr import Expr
+from sympy.core.sympify import sympify
+from sympy.core.numbers import Rational, Integer, Number, I
+from sympy.core.singleton import S
+from sympy.core.symbol import Dummy
+from sympy.core.coreerrors import NonCommutativeExpression
+from sympy.core.containers import Tuple, Dict
+from sympy.utilities import default_sort_key
+from sympy.utilities.iterables import common_prefix, common_suffix, variations, ordered
+from collections import defaultdict
+from sympy.simplify.simplify import powsimp
+from sympy.polys import gcd, factor
+from sympy.concrete.summations import Sum
+from sympy.integrals.integrals import Integral
+from sympy import Dummy
+from sympy.polys.polytools import real_roots
+from sympy.polys.polyroots import roots
+from sympy.polys.polyerrors import PolynomialError
+_eps = Dummy(positive=True)
+
+def factor_terms(expr, radical=False, clear=False, fraction=False, sign=True):
+
+    def do(expr):
+        from sympy.concrete.summations import Sum
+        from sympy.integrals.integrals import Integral
+        is_iterable = iterable(expr)
+        if not isinstance(expr, Basic) or expr.is_Atom:
+            if is_iterable:
+                return type(expr)([do(i) for i in expr])
+            return expr
+        if expr.is_Pow or expr.is_Function or is_iterable or (not hasattr(expr, 'args_cnc')):
+            args = expr.args
+            newargs = tuple([do(i) for i in args])
+            if newargs == args:
+                return expr
+            return expr.func(*newargs)
+        if isinstance(expr, (Sum, Integral)):
+            return _factor_sum_int(expr, radical=radical, clear=clear, fraction=fraction, sign=sign)
+        cont, p = expr.as_content_primitive(radical=radical, clear=clear)
+        if p.is_Add:
+            list_args = [do(a) for a in Add.make_args(p)]
+            if all((a.as_coeff_Mul()[0].extract_multiplicatively(-1) is not None for a in list_args)):
+                cont = -cont
+                list_args = [-a for a in list_args]
+            special = {}
+            for i, a in enumerate(list_args):
+                b, e = a.as_base_exp()
+                if e.is_Mul and e != Mul(*e.args):
+                    list_args[i] = Dummy()
+                    special[list_args[i]] = a
+            p = Add._from_args(list_args)
+            p = gcd_terms(p, isprimitive=True, clear=clear, fraction=fraction).xreplace(special)
+        elif p.args:
+            p = p.func(*[do(a) for a in p.args])
+        rv = _keep_coeff(cont, p, clear=clear, sign=sign)
+        return rv
+    expr = sympify(expr)
+    return do(expr)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.sympy.core.sympify.sympify
+
+def sympify(a, locals=None, convert_xor=True, strict=False, rational=False, evaluate=None):
+    if evaluate is None:
+        if global_evaluate[0] is False:
+            evaluate = global_evaluate[0]
+        else:
+            evaluate = True
+    try:
+        if a in sympy_classes:
+            return a
+    except TypeError:
+        pass
+    cls = getattr(a, '__class__', None)
+    if cls is None:
+        cls = type(a)
+    if cls in sympy_classes:
+        return a
+    if cls is type(None):
+        if strict:
+            raise SympifyError(a)
+        else:
+            return a
+    if type(a).__module__ == 'numpy':
+        import numpy as np
+        if np.isscalar(a):
+            return _convert_numpy_types(a, locals=locals, convert_xor=convert_xor, strict=strict, rational=rational, evaluate=evaluate)
+    try:
+        return converter[cls](a)
+    except KeyError:
+        for superclass in getmro(cls):
+            try:
+                return converter[superclass](a)
+            except KeyError:
+                continue
+    if isinstance(a, CantSympify):
+        raise SympifyError(a)
+    _sympy_ = getattr(a, '_sympy_', None)
+    if _sympy_ is not None:
+        try:
+            return a._sympy_()
+        except AttributeError:
+            pass
+    if not strict:
+        flat = getattr(a, 'flat', None)
+        if flat is not None:
+            shape = getattr(a, 'shape', None)
+            if shape is not None:
+                from ..tensor.array import Array
+                return Array(a.flat, a.shape)
+    if not isinstance(a, string_types):
+        for coerce in (float, int):
+            try:
+                coerced = coerce(a)
+            except (TypeError, ValueError):
+                continue
+            except AttributeError:
+                continue
+            try:
+                return sympify(coerced)
+            except SympifyError:
+                continue
+    if strict:
+        raise SympifyError(a)
+    if iterable(a):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor, rational=rational) for x in a])
+        except TypeError:
+            pass
+    if isinstance(a, dict):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor, rational=rational) for x in a.items()])
+        except TypeError:
+            pass
+    try:
+        from .compatibility import unicode
+        a = unicode(a)
+    except Exception as exc:
+        raise SympifyError(a, exc)
+    from sympy.parsing.sympy_parser import parse_expr, TokenError, standard_transformations
+    from sympy.parsing.sympy_parser import convert_xor as t_convert_xor
+    from sympy.parsing.sympy_parser import rationalize as t_rationalize
+    transformations = standard_transformations
+    if rational:
+        transformations += (t_rationalize,)
+    if convert_xor:
+        transformations += (t_convert_xor,)
+    try:
+        a = a.replace('\n', '')
+        expr = parse_expr(a, local_dict=locals, transformations=transformations, evaluate=evaluate)
+    except (TokenError, SyntaxError) as exc:
+        raise SympifyError('could not parse %r' % a, exc)
+    return expr
+
+.sympy.core.basic.Basic.__hash__
+
+def __hash__(self):
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+.sympy.core.basic.Basic._hashable_content
+
+def _hashable_content(self):
+    return self._args
+
+.sympy.core.numbers.Integer.__hash__
+
+def __hash__(self):
+    return hash(self.p)
+
+.sympy.core.numbers.Rational.__hash__
+
+def __hash__(self):
+    return super(Rational, self).__hash__()
+
+.sympy.core.numbers.Number.__hash__
+
+def __hash__(self):
+    return super(Number, self).__hash__()
+
+
+[/PYTHON]
+What will be the input of `factor_terms`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "2*x/(a**2*(x**2 - y**2))"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {},
+    "args": {
+        "expr": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+<think>
+1. The output is a string, but the function expects an expression object.
+2. `sympify` is used to convert the input string into a symbolic expression.
+3. Since the output is already simplified, I expect the input to be a string representation of a symbolic expression.
+4. The input must produce the same expression after simplification.
+5. The original expression must have factors of 2, x, and (x^2 - y^2).
+6. `factor_terms` with default parameters should factor 2 and x, and handle (x^2 - y^2) as a difference of squares.
+7. The input string "x/(a**2*(x**2 - y**2))" would produce "x/(a**2*(x**2 - y**2))", which does not match the output "2*x/(a**2*(x**2 - y**2))".
+8. To produce the expected output, the input must include the coefficient "2".
+9. The input string "2*x/(a**2*(x**2 - y**2))" would produce the expected output.
+10. I will use "2*x/(a**2*(x**2 - y**2))" as the input expression.
+</think>
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "expr": "2*x/(a**2*(x**2 - y**2))"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+<|end_of_turn|>
+
+<|assistant|>
+
+[FILEPATH] strategytrackerAI-code_fixed_size_react_symbols_ce-21e99a0/case6/multi_try_1.py [/FILEPATH]
+<|system|>
+You are given a Python function (between [PYTHON] and [/PYTHON]) that uses PyPI's `Requests` library and the `ConversationalSymbolicExecutionEngine` to interact with an API. Your task is to predict the input (`greeting`, `num_rules`, `custom_rules_str`) that would lead to the given output (between [OUTPUT] and [/OUTPUT]). Remember, you have access to the `ConversationalSymbolicExecutionEngine` which allows you to execute functions symbolically and inspect the intermediate results. You'll need to simulate the execution step by step, inspect the trace, and make the necessary adjustments to the inputs to match the expected output. When ready, wrap the correct input in the [INPUT] and [/INPUT] tags. For example, if the input were `2` and `3`, the result would be `[INPUT] 2, 3 [/INPUT]`.
+
+Use the following format for your response:
+
+<think>
+your internal reasoning
+</think>
+your final response with the predicted input.
+
+Always use the tags [INPUT] and [/INPUT] to enclose the predicted input in your external response. DO NOT generate any code or irrelevant text after your response.
+
+The provided code and output are as follows:
+[PYTHON]
+def cap_first_letter(text):
+    if isinstance(text, str):
+        return text.capitalize()
+    return text
+
+def greet(name):
+    name = cap_first_letter(name)
+    if name == "":
+        return "Hello guest!"
+    return "Hello {}!".format(name)
+
+def make_cse_engine():
+    c

@@ -1,0 +1,137 @@
+<<FUNCTION_NAME>>
+
+should_bypass_proxies
+
+<<CODE>>
+
+import os
+import socket
+from .compat import (
+    proxy_bypass,
+    proxy_bypass_environment,
+    quote,
+    str,
+    unquote,
+    urlparse,
+    urlunparse,
+)
+
+def should_bypass_proxies(url, no_proxy):
+    """
+    Returns whether we should bypass proxies or not.
+
+    :rtype: bool
+    """
+
+    # Prioritize lowercase environment variables over uppercase
+    # to keep a consistent behaviour with other http projects (curl, wget).
+    def get_proxy(key):
+        return os.environ.get(key) or os.environ.get(key.upper())
+
+    # First check whether no_proxy is defined. If it is, check that the URL
+    # we're getting isn't in the no_proxy list.
+    no_proxy_arg = no_proxy
+    if no_proxy is None:
+        no_proxy = get_proxy("no_proxy")
+    parsed = urlparse(url)
+
+    if parsed.hostname is None:
+        # URLs don't always have hostnames, e.g. file:/// urls.
+        return True
+
+    if no_proxy:
+        # We need to check whether we match here. We need to see if we match
+        # the end of the hostname, both with and without the port.
+        no_proxy = (host for host in no_proxy.replace(" ", "").split(",") if host)
+
+        if is_ipv4_address(parsed.hostname):
+            for proxy_ip in no_proxy:
+                if is_valid_cidr(proxy_ip):
+                    if address_in_network(parsed.hostname, proxy_ip):
+                        return True
+                elif parsed.hostname == proxy_ip:
+                    # If no_proxy ip was defined in plain IP notation instead of cidr notation &
+                    # matches the IP of the index
+                    return True
+        else:
+            host_with_port = parsed.hostname
+            if parsed.port:
+                host_with_port += f":{parsed.port}"
+
+            for host in no_proxy:
+                if parsed.hostname.endswith(host) or host_with_port.endswith(host):
+                    # The URL does match something in no_proxy, so we don't want
+                    # to apply the proxies on this URL.
+                    return True
+
+    with set_environ("no_proxy", no_proxy_arg):
+        # parsed.hostname can be `None` in cases such as a file URI.
+        try:
+            bypass = proxy_bypass(parsed.hostname)
+        except (TypeError, socket.gaierror):
+            bypass = False
+
+    if bypass:
+        return True
+
+    return False
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {}, 'args': {'url': 'http://localhost:48329/', 'no_proxy': None}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+False
+
+<<LLM_RESPONSE>>
+
+[THOUGHT]
+Let me trace through the function `should_bypass_proxies` to understand what inputs would result in `False` output.
+
+The function returns `True` in these cases:
+1. If `parsed.hostname is None` - returns True
+2. If no_proxy is set and the hostname matches certain conditions (CIDR, exact IP match, or domain suffix match)
+3. If `proxy_bypass(parsed.hostname)` returns True
+
+For the output to be `False`, we need:
+1. `parsed.hostname` is NOT None (so we don't return True early)
+2. Either `no_proxy` is None/empty OR the hostname doesn't match any no_proxy rules
+3. `proxy_bypass(parsed.hostname)` returns False
+
+Let me construct a simple case:
+- `url` = "http://example.com" (a normal URL with hostname)
+- `no_proxy` = None (or empty)
+
+Let's trace through:
+1. `get_proxy('no_proxy')` would return None (assuming no environment variable is set)
+2. `parsed = urlparse("http://example.com")` gives us hostname = "example.com"
+3. `parsed.hostname` is not None, so we continue
+4. `no_proxy` is None, so we skip the no_proxy matching block
+5. We call `proxy_bypass("example.com")` - in a normal case, this would return False
+6. `bypass` is False, so we don't return True
+7. We return False at the end
+
+This matches the expected output.
+
+Alternatively, we could use:
+- `url` = "http://192.168.1.1"
+- `no_proxy` = None or some value that doesn't match
+
+The simplest case would be a regular HTTP URL with no_proxy set to None.
+
+</THOUGHT>
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "url": "http://example.com",
+        "no_proxy": null
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

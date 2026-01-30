@@ -1,0 +1,109 @@
+[THOUGHT]
+We need to trace build_lut with self.patterns = [
+ "4:(... .1. .0.)->0",
+ "4:(... .1. ..0)->0"
+].
+
+1) _pattern_permute: For each basic pattern, options = '4', so the '4' branch executes:
+   - The loop "for i in range(4):" iterates i = 0,1,2,3 (4 iterations).
+   - range(4) therefore is [0, 1, 2, 3].
+
+2) In build_lut:
+   - The outer loop "for p in self.patterns:" iterates twice. So p takes the two pattern strings in order:
+     p = "4:(... .1. .0.)->0" in iteration 1, and p = "4:(... .1. ..0)->0" in iteration 2.
+     self.patterns stays the same across iterations (the same list), so when repeated per iteration it appears twice.
+
+3) For each basic pattern the _pattern_permute('basic_pattern', '4', result) returns 5 tuples:
+   - the original (basic_pattern, result) plus four successive rotations. We don't have the actual ROTATION_MATRIX to compute exact rotated strings, so denote them symbolically.
+   - For the first basic pattern inside-parens becomes '....1..0.' (after removing spaces).
+   - For the second basic pattern inside-parens becomes '....1...0'.
+   - Therefore after processing both patterns, patterns (local variable in build_lut) will contain 10 tuples in this order:
+     [
+       ('....1..0.', 0),
+       ('rot1_first', 0),
+       ('rot2_first', 0),
+       ('rot3_first', 0),
+       ('rot4_first', 0),
+       ('....1...0', 0),
+       ('rot1_second', 0),
+       ('rot2_second', 0),
+       ('rot3_second', 0),
+       ('rot4_second', 0)
+     ]
+   - The loop "for pattern in patterns:" therefore yields pattern equal to each of those 10 tuples in turn. The variable patterns itself remains the full 10-tuple list across iterations; repeating that list for each of the 10 iterations follows the requested repetition convention.
+
+4) compiled_patterns is built by iterating over the above patterns list and appending (re.compile(p), r) for each tuple. Since all results are 0 (the 'N' option is not present), r is 0 for every compiled pattern. So compiled_patterns is a list of 10 tuples (compiled_regex_i, 0). In the nested loop "for pattern, r in compiled_patterns:" the loop iterates over those 10 compiled tuples; pattern will be each compiled regex object (denoted here as re.compile(p0) ... re.compile(p9)) and r = 0 each time. compiled_patterns itself is that fixed list (we show it as a list of the 10 tuples).
+
+Note: Where rotation results are unknown (depend on ROTATION_MATRIX), I represent them symbolically as 'rotX_first' / 'rotX_second'. The important parts are iteration counts and how values repeat across iterations.
+[/THOUGHT]
+
+[ANSWER]
+1 import re
+2 
+3 class LutBuilder:
+4 
+5     def __init__(self, patterns: list[str] | None=None, op_name: str | None=None) -> None:
+6         if patterns is not None:
+7             self.patterns = patterns
+8         else:
+9             self.patterns = []
+10         self.lut: bytearray | None = None
+11         if op_name is not None:
+12             known_patterns = {'corner': ['1:(... ... ...)->0', '4:(00. 01. ...)->1'], 'dilation4': ['4:(... .0. .1.)->1'], 'dilation8': ['4:(... .0. .1.)->1', '4:(... .0. ..1)->1'], 'erosion4': ['4:(... .1. .0.)->0'], 'erosion8': ['4:(... .1. .0.)->0', '4:(... .1. ..0)->0'], 'edge': ['1:(... ... ...)->0', '4:(.0. .1. ...)->1', '4:(01. .1. ...)->1']}
+13             if op_name not in known_patterns:
+14                 msg = 'Unknown pattern ' + op_name + '!'
+15                 raise Exception(msg)
+16             self.patterns = known_patterns[op_name]
+17 
+18     def build_default_lut(self) -> None:
+19         symbols = [0, 1]
+20         m = 1 << 4
+21         self.lut = bytearray((symbols[i & m > 0] for i in range(LUT_SIZE)))
+22 
+23     def _string_permute(self, pattern: str, permutation: list[int]) -> str:
+24         assert len(permutation) == 9
+25         return ''.join((pattern[p] for p in permutation))
+26 
+27     def _pattern_permute(self, basic_pattern: str, options: str, basic_result: int) -> list[tuple[str, int]]:
+28         patterns = [(basic_pattern, basic_result)]
+29         if '4' in options:
+30             res = patterns[-1][1]
+31             for i in range(4): ## [STATE]i=[0, 1, 2, 3][/STATE] [STATE]range(4)=[0, 1, 2, 3][/STATE]
+32                 patterns.append((self._string_permute(patterns[-1][0], ROTATION_MATRIX), res))
+33         if 'M' in options:
+34             n = len(patterns)
+35             for pattern, res in patterns[:n]:
+36                 patterns.append((self._string_permute(pattern, MIRROR_MATRIX), res))
+37         if 'N' in options:
+38             n = len(patterns)
+39             for pattern, res in patterns[:n]:
+40                 pattern = pattern.replace('0', 'Z').replace('1', '0').replace('Z', '1')
+41                 res = 1 - int(res)
+42                 patterns.append((pattern, res))
+43         return patterns
+44 
+45     def build_lut(self) -> bytearray:
+46         self.build_default_lut()
+47         assert self.lut is not None
+48         patterns = []
+49         for p in self.patterns:## [STATE]p=['4:(... .1. .0.)->0', '4:(... .1. ..0)->0'][/STATE] [STATE]self.patterns=[['4:(... .1. .0.)->0', '4:(... .1. ..0)->0'], ['4:(... .1. .0.)->0', '4:(... .1. ..0)->0']][/STATE]
+50             m = re.search('(\\w*):?\\s*\\((.+?)\\)\\s*->\\s*(\\d)', p.replace('\n', ''))
+51             if not m:
+52                 msg = 'Syntax error in pattern "' + p + '"'
+53                 raise Exception(msg)
+54             options = m.group(1)
+55             pattern = m.group(2)
+56             result = int(m.group(3))
+57             pattern = pattern.replace(' ', '').replace('\n', '')
+58             patterns += self._pattern_permute(pattern, options, result)
+59         compiled_patterns = []
+60         for pattern in patterns:## [STATE]pattern=[('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)][/STATE] [STATE]patterns=[[('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)], [('....1..0.', 0), ('rot1_first', 0), ('rot2_first', 0), ('rot3_first', 0), ('rot4_first', 0), ('....1...0', 0), ('rot1_second', 0), ('rot2_second', 0), ('rot3_second', 0), ('rot4_second', 0)]][/STATE]
+61             p = pattern[0].replace('.', 'X').replace('X', '[01]')
+62             compiled_patterns.append((re.compile(p), pattern[1]))
+63         for i in range(LUT_SIZE):
+64             bitpattern = bin(i)[2:]
+65             bitpattern = ('0' * (9 - len(bitpattern)) + bitpattern)[::-1]
+66             for pattern, r in compiled_patterns:## [STATE]pattern=[re.compile('[01][01][01][01]1[01][01]0[01]'), re.compile('rot1_pattern_regex'), re.compile('rot2_pattern_regex'), re.compile('rot3_pattern_regex'), re.compile('rot4_pattern_regex'), re.compile('[01][01][01][01]1[01][01][01]0'), re.compile('rot1_pattern_regex_2'), re.compile('rot2_pattern_regex_2'), re.compile('rot3_pattern_regex_2'), re.compile('rot4_pattern_regex_2')][/STATE] [STATE]r=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0][/STATE] [STATE]compiled_patterns=[(re.compile('[01][01][01][01]1[01][01]0[01]'), 0), (re.compile('rot1_pattern_regex'), 0), (re.compile('rot2_pattern_regex'), 0), (re.compile('rot3_pattern_regex'), 0), (re.compile('rot4_pattern_regex'), 0), (re.compile('[01][01][01][01]1[01][01][01]0'), 0), (re.compile('rot1_pattern_regex_2'), 0), (re.compile('rot2_pattern_regex_2'), 0), (re.compile('rot3_pattern_regex_2'), 0), (re.compile('rot4_pattern_regex_2'), 0)][/STATE]
+67                 if pattern.match(bitpattern):
+68                     self.lut[i] = [0, 1][r]
+69         return self.lut

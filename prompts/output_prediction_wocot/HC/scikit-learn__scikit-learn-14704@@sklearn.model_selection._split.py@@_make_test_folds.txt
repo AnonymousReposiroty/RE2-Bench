@@ -1,0 +1,293 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from collections.abc import Iterable
+import warnings
+from itertools import chain, combinations
+from math import ceil, floor
+import numbers
+from abc import ABCMeta, abstractmethod
+from inspect import signature
+import numpy as np
+from ..utils import indexable, check_random_state, safe_indexing
+from ..utils import _approximate_mode
+from ..utils.validation import _num_samples, column_or_1d
+from ..utils.validation import check_array
+from ..utils.multiclass import type_of_target
+from ..utils.fixes import comb
+from ..base import _pprint
+__all__ = ['BaseCrossValidator', 'KFold', 'GroupKFold', 'LeaveOneGroupOut', 'LeaveOneOut', 'LeavePGroupsOut', 'LeavePOut', 'RepeatedStratifiedKFold', 'RepeatedKFold', 'ShuffleSplit', 'GroupShuffleSplit', 'StratifiedKFold', 'StratifiedShuffleSplit', 'PredefinedSplit', 'train_test_split', 'check_cv']
+train_test_split.__test__ = False
+
+class StratifiedKFold(_BaseKFold):
+
+    def __init__(self, n_splits=5, shuffle=False, random_state=None):
+        super().__init__(n_splits, shuffle, random_state)
+
+    def _make_test_folds(self, X, y=None):
+        rng = check_random_state(self.random_state)
+        y = np.asarray(y)
+        type_of_target_y = type_of_target(y)
+        allowed_target_types = ('binary', 'multiclass')
+        if type_of_target_y not in allowed_target_types:
+            raise ValueError('Supported target types are: {}. Got {!r} instead.'.format(allowed_target_types, type_of_target_y))
+        y = column_or_1d(y)
+        _, y_idx, y_inv = np.unique(y, return_index=True, return_inverse=True)
+        _, class_perm = np.unique(y_idx, return_inverse=True)
+        y_encoded = class_perm[y_inv]
+        n_classes = len(y_idx)
+        y_counts = np.bincount(y_encoded)
+        min_groups = np.min(y_counts)
+        if np.all(self.n_splits > y_counts):
+            raise ValueError('n_splits=%d cannot be greater than the number of members in each class.' % self.n_splits)
+        if self.n_splits > min_groups:
+            warnings.warn('The least populated class in y has only %d members, which is less than n_splits=%d.' % (min_groups, self.n_splits), UserWarning)
+        y_order = np.sort(y_encoded)
+        allocation = np.asarray([np.bincount(y_order[i::self.n_splits], minlength=n_classes) for i in range(self.n_splits)])
+        test_folds = np.empty(len(y), dtype='i')
+        for k in range(n_classes):
+            folds_for_class = np.arange(self.n_splits).repeat(allocation[:, k])
+            if self.shuffle:
+                rng.shuffle(folds_for_class)
+            test_folds[y_encoded == k] = folds_for_class
+        return test_folds
+
+    def _iter_test_masks(self, X, y=None, groups=None):
+        test_folds = self._make_test_folds(X, y)
+        for i in range(self.n_splits):
+            yield (test_folds == i)
+
+    def split(self, X, y, groups=None):
+        y = check_array(y, ensure_2d=False, dtype=None)
+        return super().split(X, y, groups)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.sklearn.utils.validation.check_random_state
+
+def check_random_state(seed):
+    if seed is None or seed is np.random:
+        return np.random.mtrand._rand
+    if isinstance(seed, numbers.Integral):
+        return np.random.RandomState(seed)
+    if isinstance(seed, np.random.RandomState):
+        return seed
+    raise ValueError('%r cannot be used to seed a numpy.random.RandomState instance' % seed)
+
+.sklearn.utils.multiclass.type_of_target
+
+def type_of_target(y):
+    valid = (isinstance(y, (Sequence, spmatrix)) or hasattr(y, '__array__')) and (not isinstance(y, str))
+    if not valid:
+        raise ValueError('Expected array-like (array or non-string sequence), got %r' % y)
+    sparse_pandas = y.__class__.__name__ in ['SparseSeries', 'SparseArray']
+    if sparse_pandas:
+        raise ValueError("y cannot be class 'SparseSeries' or 'SparseArray'")
+    if is_multilabel(y):
+        return 'multilabel-indicator'
+    try:
+        y = np.asarray(y)
+    except ValueError:
+        return 'unknown'
+    try:
+        if not hasattr(y[0], '__array__') and isinstance(y[0], Sequence) and (not isinstance(y[0], str)):
+            raise ValueError('You appear to be using a legacy multi-label data representation. Sequence of sequences are no longer supported; use a binary array or sparse matrix instead - the MultiLabelBinarizer transformer can convert to this format.')
+    except IndexError:
+        pass
+    if y.ndim > 2 or (y.dtype == object and len(y) and (not isinstance(y.flat[0], str))):
+        return 'unknown'
+    if y.ndim == 2 and y.shape[1] == 0:
+        return 'unknown'
+    if y.ndim == 2 and y.shape[1] > 1:
+        suffix = '-multioutput'
+    else:
+        suffix = ''
+    if y.dtype.kind == 'f' and np.any(y != y.astype(int)):
+        _assert_all_finite(y)
+        return 'continuous' + suffix
+    if len(np.unique(y)) > 2 or (y.ndim >= 2 and len(y[0]) > 1):
+        return 'multiclass' + suffix
+    else:
+        return 'binary'
+
+.sklearn.utils.multiclass.is_multilabel
+
+def is_multilabel(y):
+    if hasattr(y, '__array__'):
+        y = np.asarray(y)
+    if not (hasattr(y, 'shape') and y.ndim == 2 and (y.shape[1] > 1)):
+        return False
+    if issparse(y):
+        if isinstance(y, (dok_matrix, lil_matrix)):
+            y = y.tocsr()
+        return len(y.data) == 0 or (np.unique(y.data).size == 1 and (y.dtype.kind in 'biu' or _is_integral_float(np.unique(y.data))))
+    else:
+        labels = np.unique(y)
+        return len(labels) < 3 and (y.dtype.kind in 'biu' or _is_integral_float(labels))
+
+.sklearn.utils.validation.column_or_1d
+
+def column_or_1d(y, warn=False):
+    shape = np.shape(y)
+    if len(shape) == 1:
+        return np.ravel(y)
+    if len(shape) == 2 and shape[1] == 1:
+        if warn:
+            warnings.warn('A column-vector y was passed when a 1d array was expected. Please change the shape of y to (n_samples, ), for example using ravel().', DataConversionWarning, stacklevel=2)
+        return np.ravel(y)
+    raise ValueError('bad input shape {0}'.format(shape))
+
+
+[/PYTHON]
+What will be the output of `_make_test_folds`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "n_splits": 5,
+        "shuffle": false,
+        "random_state": null
+    },
+    "args": {
+        "X": {
+            "array": "[[5.1 3.5 1.4 0.2]\n [4.9 3.  1.4 0.2]\n [4.7 3.2 1.3 0.2]\n [4.6 3.1 1.5 0.2]\n [5.  3.6 1.4 0.2]\n [5.4 3.9 1.7 0.4]\n [4.6 3.4 1.4 0.3]\n [5.  3.4 1.5 0.2]\n [4.4 2.9 1.4 0.2]\n [4.9 3.1 1.5 0.1]\n [5.4 3.7 1.5 0.2]\n [4.8 3.4 1.6 0.2]\n [4.8 3.  1.4 0.1]\n [4.3 3.  1.1 0.1]\n [5.8 4.  1.2 0.2]\n [5.7 4.4 1.5 0.4]\n [5.4 3.9 1.3 0.4]\n [5.1 3.5 1.4 0.3]\n [5.7 3.8 1.7 0.3]\n [5.1 3.8 1.5 0.3]\n [5.4 3.4 1.7 0.2]\n [5.1 3.7 1.5 0.4]\n [4.6 3.6 1.  0.2]\n [5.1 3.3 1.7 0.5]\n [4.8 3.4 1.9 0.2]\n [5.  3.  1.6 0.2]\n [5.  3.4 1.6 0.4]\n [5.2 3.5 1.5 0.2]\n [5.2 3.4 1.4 0.2]\n [4.7 3.2 1.6 0.2]\n [4.8 3.1 1.6 0.2]\n [5.4 3.4 1.5 0.4]\n [5.2 4.1 1.5 0.1]\n [5.5 4.2 1.4 0.2]\n [4.9 3.1 1.5 0.2]\n [5.  3.2 1.2 0.2]\n [5.5 3.5 1.3 0.2]\n [4.9 3.6 1.4 0.1]\n [4.4 3.  1.3 0.2]\n [5.1 3.4 1.5 0.2]\n [5.  3.5 1.3 0.3]\n [4.5 2.3 1.3 0.3]\n [4.4 3.2 1.3 0.2]\n [5.  3.5 1.6 0.6]\n [5.1 3.8 1.9 0.4]\n [4.8 3.  1.4 0.3]\n [5.1 3.8 1.6 0.2]\n [4.6 3.2 1.4 0.2]\n [5.3 3.7 1.5 0.2]\n [5.  3.3 1.4 0.2]\n [7.  3.2 4.7 1.4]\n [6.4 3.2 4.5 1.5]\n [6.9 3.1 4.9 1.5]\n [5.5 2.3 4.  1.3]\n [6.5 2.8 4.6 1.5]\n [5.7 2.8 4.5 1.3]\n [6.3 3.3 4.7 1.6]\n [4.9 2.4 3.3 1. ]\n [6.6 2.9 4.6 1.3]\n [5.2 2.7 3.9 1.4]\n [5.  2.  3.5 1. ]\n [5.9 3.  4.2 1.5]\n [6.  2.2 4.  1. ]\n [6.1 2.9 4.7 1.4]\n [5.6 2.9 3.6 1.3]\n [6.7 3.1 4.4 1.4]\n [5.6 3.  4.5 1.5]\n [5.8 2.7 4.1 1. ]\n [6.2 2.2 4.5 1.5]\n [5.6 2.5 3.9 1.1]\n [5.9 3.2 4.8 1.8]\n [6.1 2.8 4.  1.3]\n [6.3 2.5 4.9 1.5]\n [6.1 2.8 4.7 1.2]\n [6.4 2.9 4.3 1.3]\n [6.6 3.  4.4 1.4]\n [6.8 2.8 4.8 1.4]\n [6.7 3.  5.  1.7]\n [6.  2.9 4.5 1.5]\n [5.7 2.6 3.5 1. ]\n [5.5 2.4 3.8 1.1]\n [5.5 2.4 3.7 1. ]\n [5.8 2.7 3.9 1.2]\n [6.  2.7 5.1 1.6]\n [5.4 3.  4.5 1.5]\n [6.  3.4 4.5 1.6]\n [6.7 3.1 4.7 1.5]\n [6.3 2.3 4.4 1.3]\n [5.6 3.  4.1 1.3]\n [5.5 2.5 4.  1.3]\n [5.5 2.6 4.4 1.2]\n [6.1 3.  4.6 1.4]\n [5.8 2.6 4.  1.2]\n [5.  2.3 3.3 1. ]\n [5.6 2.7 4.2 1.3]\n [5.7 3.  4.2 1.2]\n [5.7 2.9 4.2 1.3]\n [6.2 2.9 4.3 1.3]\n [5.1 2.5 3.  1.1]\n [5.7 2.8 4.1 1.3]\n [6.3 3.3 6.  2.5]\n [5.8 2.7 5.1 1.9]\n [7.1 3.  5.9 2.1]\n [6.3 2.9 5.6 1.8]\n [6.5 3.  5.8 2.2]\n [7.6 3.  6.6 2.1]\n [4.9 2.5 4.5 1.7]\n [7.3 2.9 6.3 1.8]\n [6.7 2.5 5.8 1.8]\n [7.2 3.6 6.1 2.5]\n [6.5 3.2 5.1 2. ]\n [6.4 2.7 5.3 1.9]\n [6.8 3.  5.5 2.1]\n [5.7 2.5 5.  2. ]\n [5.8 2.8 5.1 2.4]\n [6.4 3.2 5.3 2.3]\n [6.5 3.  5.5 1.8]\n [7.7 3.8 6.7 2.2]\n [7.7 2.6 6.9 2.3]\n [6.  2.2 5.  1.5]\n [6.9 3.2 5.7 2.3]\n [5.6 2.8 4.9 2. ]\n [7.7 2.8 6.7 2. ]\n [6.3 2.7 4.9 1.8]\n [6.7 3.3 5.7 2.1]\n [7.2 3.2 6.  1.8]\n [6.2 2.8 4.8 1.8]\n [6.1 3.  4.9 1.8]\n [6.4 2.8 5.6 2.1]\n [7.2 3.  5.8 1.6]\n [7.4 2.8 6.1 1.9]\n [7.9 3.8 6.4 2. ]\n [6.4 2.8 5.6 2.2]\n [6.3 2.8 5.1 1.5]\n [6.1 2.6 5.6 1.4]\n [7.7 3.  6.1 2.3]\n [6.3 3.4 5.6 2.4]\n [6.4 3.1 5.5 1.8]\n [6.  3.  4.8 1.8]\n [6.9 3.1 5.4 2.1]\n [6.7 3.1 5.6 2.4]\n [6.9 3.1 5.1 2.3]\n [5.8 2.7 5.1 1.9]\n [6.8 3.2 5.9 2.3]\n [6.7 3.3 5.7 2.5]\n [6.7 3.  5.2 2.3]\n [6.3 2.5 5.  1.9]\n [6.5 3.  5.2 2. ]\n [6.2 3.4 5.4 2.3]\n [5.9 3.  5.1 1.8]]",
+            "values": "[[5.1 3.5 1.4 0.2]\n [4.9 3.  1.4 0.2]\n [4.7 3.2 1.3 0.2]\n [4.6 3.1 1.5 0.2]\n [5.  3.6 1.4 0.2]\n [5.4 3.9 1.7 0.4]\n [4.6 3.4 1.4 0.3]\n [5.  3.4 1.5 0.2]\n [4.4 2.9 1.4 0.2]\n [4.9 3.1 1.5 0.1]\n [5.4 3.7 1.5 0.2]\n [4.8 3.4 1.6 0.2]\n [4.8 3.  1.4 0.1]\n [4.3 3.  1.1 0.1]\n [5.8 4.  1.2 0.2]\n [5.7 4.4 1.5 0.4]\n [5.4 3.9 1.3 0.4]\n [5.1 3.5 1.4 0.3]\n [5.7 3.8 1.7 0.3]\n [5.1 3.8 1.5 0.3]\n [5.4 3.4 1.7 0.2]\n [5.1 3.7 1.5 0.4]\n [4.6 3.6 1.  0.2]\n [5.1 3.3 1.7 0.5]\n [4.8 3.4 1.9 0.2]\n [5.  3.  1.6 0.2]\n [5.  3.4 1.6 0.4]\n [5.2 3.5 1.5 0.2]\n [5.2 3.4 1.4 0.2]\n [4.7 3.2 1.6 0.2]\n [4.8 3.1 1.6 0.2]\n [5.4 3.4 1.5 0.4]\n [5.2 4.1 1.5 0.1]\n [5.5 4.2 1.4 0.2]\n [4.9 3.1 1.5 0.2]\n [5.  3.2 1.2 0.2]\n [5.5 3.5 1.3 0.2]\n [4.9 3.6 1.4 0.1]\n [4.4 3.  1.3 0.2]\n [5.1 3.4 1.5 0.2]\n [5.  3.5 1.3 0.3]\n [4.5 2.3 1.3 0.3]\n [4.4 3.2 1.3 0.2]\n [5.  3.5 1.6 0.6]\n [5.1 3.8 1.9 0.4]\n [4.8 3.  1.4 0.3]\n [5.1 3.8 1.6 0.2]\n [4.6 3.2 1.4 0.2]\n [5.3 3.7 1.5 0.2]\n [5.  3.3 1.4 0.2]\n [7.  3.2 4.7 1.4]\n [6.4 3.2 4.5 1.5]\n [6.9 3.1 4.9 1.5]\n [5.5 2.3 4.  1.3]\n [6.5 2.8 4.6 1.5]\n [5.7 2.8 4.5 1.3]\n [6.3 3.3 4.7 1.6]\n [4.9 2.4 3.3 1. ]\n [6.6 2.9 4.6 1.3]\n [5.2 2.7 3.9 1.4]\n [5.  2.  3.5 1. ]\n [5.9 3.  4.2 1.5]\n [6.  2.2 4.  1. ]\n [6.1 2.9 4.7 1.4]\n [5.6 2.9 3.6 1.3]\n [6.7 3.1 4.4 1.4]\n [5.6 3.  4.5 1.5]\n [5.8 2.7 4.1 1. ]\n [6.2 2.2 4.5 1.5]\n [5.6 2.5 3.9 1.1]\n [5.9 3.2 4.8 1.8]\n [6.1 2.8 4.  1.3]\n [6.3 2.5 4.9 1.5]\n [6.1 2.8 4.7 1.2]\n [6.4 2.9 4.3 1.3]\n [6.6 3.  4.4 1.4]\n [6.8 2.8 4.8 1.4]\n [6.7 3.  5.  1.7]\n [6.  2.9 4.5 1.5]\n [5.7 2.6 3.5 1. ]\n [5.5 2.4 3.8 1.1]\n [5.5 2.4 3.7 1. ]\n [5.8 2.7 3.9 1.2]\n [6.  2.7 5.1 1.6]\n [5.4 3.  4.5 1.5]\n [6.  3.4 4.5 1.6]\n [6.7 3.1 4.7 1.5]\n [6.3 2.3 4.4 1.3]\n [5.6 3.  4.1 1.3]\n [5.5 2.5 4.  1.3]\n [5.5 2.6 4.4 1.2]\n [6.1 3.  4.6 1.4]\n [5.8 2.6 4.  1.2]\n [5.  2.3 3.3 1. ]\n [5.6 2.7 4.2 1.3]\n [5.7 3.  4.2 1.2]\n [5.7 2.9 4.2 1.3]\n [6.2 2.9 4.3 1.3]\n [5.1 2.5 3.  1.1]\n [5.7 2.8 4.1 1.3]\n [6.3 3.3 6.  2.5]\n [5.8 2.7 5.1 1.9]\n [7.1 3.  5.9 2.1]\n [6.3 2.9 5.6 1.8]\n [6.5 3.  5.8 2.2]\n [7.6 3.  6.6 2.1]\n [4.9 2.5 4.5 1.7]\n [7.3 2.9 6.3 1.8]\n [6.7 2.5 5.8 1.8]\n [7.2 3.6 6.1 2.5]\n [6.5 3.2 5.1 2. ]\n [6.4 2.7 5.3 1.9]\n [6.8 3.  5.5 2.1]\n [5.7 2.5 5.  2. ]\n [5.8 2.8 5.1 2.4]\n [6.4 3.2 5.3 2.3]\n [6.5 3.  5.5 1.8]\n [7.7 3.8 6.7 2.2]\n [7.7 2.6 6.9 2.3]\n [6.  2.2 5.  1.5]\n [6.9 3.2 5.7 2.3]\n [5.6 2.8 4.9 2. ]\n [7.7 2.8 6.7 2. ]\n [6.3 2.7 4.9 1.8]\n [6.7 3.3 5.7 2.1]\n [7.2 3.2 6.  1.8]\n [6.2 2.8 4.8 1.8]\n [6.1 3.  4.9 1.8]\n [6.4 2.8 5.6 2.1]\n [7.2 3.  5.8 1.6]\n [7.4 2.8 6.1 1.9]\n [7.9 3.8 6.4 2. ]\n [6.4 2.8 5.6 2.2]\n [6.3 2.8 5.1 1.5]\n [6.1 2.6 5.6 1.4]\n [7.7 3.  6.1 2.3]\n [6.3 3.4 5.6 2.4]\n [6.4 3.1 5.5 1.8]\n [6.  3.  4.8 1.8]\n [6.9 3.1 5.4 2.1]\n [6.7 3.1 5.6 2.4]\n [6.9 3.1 5.1 2.3]\n [5.8 2.7 5.1 1.9]\n [6.8 3.2 5.9 2.3]\n [6.7 3.3 5.7 2.5]\n [6.7 3.  5.2 2.3]\n [6.3 2.5 5.  1.9]\n [6.5 3.  5.2 2. ]\n [6.2 3.4 5.4 2.3]\n [5.9 3.  5.1 1.8]]",
+            "shape": [
+                150,
+                4
+            ],
+            "ndim": 2,
+            "iloc": {
+                "array": "[[5.1 3.5 1.4 0.2]\n [4.9 3.  1.4 0.2]\n [4.7 3.2 1.3 0.2]\n [4.6 3.1 1.5 0.2]\n [5.  3.6 1.4 0.2]\n [5.4 3.9 1.7 0.4]\n [4.6 3.4 1.4 0.3]\n [5.  3.4 1.5 0.2]\n [4.4 2.9 1.4 0.2]\n [4.9 3.1 1.5 0.1]\n [5.4 3.7 1.5 0.2]\n [4.8 3.4 1.6 0.2]\n [4.8 3.  1.4 0.1]\n [4.3 3.  1.1 0.1]\n [5.8 4.  1.2 0.2]\n [5.7 4.4 1.5 0.4]\n [5.4 3.9 1.3 0.4]\n [5.1 3.5 1.4 0.3]\n [5.7 3.8 1.7 0.3]\n [5.1 3.8 1.5 0.3]\n [5.4 3.4 1.7 0.2]\n [5.1 3.7 1.5 0.4]\n [4.6 3.6 1.  0.2]\n [5.1 3.3 1.7 0.5]\n [4.8 3.4 1.9 0.2]\n [5.  3.  1.6 0.2]\n [5.  3.4 1.6 0.4]\n [5.2 3.5 1.5 0.2]\n [5.2 3.4 1.4 0.2]\n [4.7 3.2 1.6 0.2]\n [4.8 3.1 1.6 0.2]\n [5.4 3.4 1.5 0.4]\n [5.2 4.1 1.5 0.1]\n [5.5 4.2 1.4 0.2]\n [4.9 3.1 1.5 0.2]\n [5.  3.2 1.2 0.2]\n [5.5 3.5 1.3 0.2]\n [4.9 3.6 1.4 0.1]\n [4.4 3.  1.3 0.2]\n [5.1 3.4 1.5 0.2]\n [5.  3.5 1.3 0.3]\n [4.5 2.3 1.3 0.3]\n [4.4 3.2 1.3 0.2]\n [5.  3.5 1.6 0.6]\n [5.1 3.8 1.9 0.4]\n [4.8 3.  1.4 0.3]\n [5.1 3.8 1.6 0.2]\n [4.6 3.2 1.4 0.2]\n [5.3 3.7 1.5 0.2]\n [5.  3.3 1.4 0.2]\n [7.  3.2 4.7 1.4]\n [6.4 3.2 4.5 1.5]\n [6.9 3.1 4.9 1.5]\n [5.5 2.3 4.  1.3]\n [6.5 2.8 4.6 1.5]\n [5.7 2.8 4.5 1.3]\n [6.3 3.3 4.7 1.6]\n [4.9 2.4 3.3 1. ]\n [6.6 2.9 4.6 1.3]\n [5.2 2.7 3.9 1.4]\n [5.  2.  3.5 1. ]\n [5.9 3.  4.2 1.5]\n [6.  2.2 4.  1. ]\n [6.1 2.9 4.7 1.4]\n [5.6 2.9 3.6 1.3]\n [6.7 3.1 4.4 1.4]\n [5.6 3.  4.5 1.5]\n [5.8 2.7 4.1 1. ]\n [6.2 2.2 4.5 1.5]\n [5.6 2.5 3.9 1.1]\n [5.9 3.2 4.8 1.8]\n [6.1 2.8 4.  1.3]\n [6.3 2.5 4.9 1.5]\n [6.1 2.8 4.7 1.2]\n [6.4 2.9 4.3 1.3]\n [6.6 3.  4.4 1.4]\n [6.8 2.8 4.8 1.4]\n [6.7 3.  5.  1.7]\n [6.  2.9 4.5 1.5]\n [5.7 2.6 3.5 1. ]\n [5.5 2.4 3.8 1.1]\n [5.5 2.4 3.7 1. ]\n [5.8 2.7 3.9 1.2]\n [6.  2.7 5.1 1.6]\n [5.4 3.  4.5 1.5]\n [6.  3.4 4.5 1.6]\n [6.7 3.1 4.7 1.5]\n [6.3 2.3 4.4 1.3]\n [5.6 3.  4.1 1.3]\n [5.5 2.5 4.  1.3]\n [5.5 2.6 4.4 1.2]\n [6.1 3.  4.6 1.4]\n [5.8 2.6 4.  1.2]\n [5.  2.3 3.3 1. ]\n [5.6 2.7 4.2 1.3]\n [5.7 3.  4.2 1.2]\n [5.7 2.9 4.2 1.3]\n [6.2 2.9 4.3 1.3]\n [5.1 2.5 3.  1.1]\n [5.7 2.8 4.1 1.3]\n [6.3 3.3 6.  2.5]\n [5.8 2.7 5.1 1.9]\n [7.1 3.  5.9 2.1]\n [6.3 2.9 5.6 1.8]\n [6.5 3.  5.8 2.2]\n [7.6 3.  6.6 2.1]\n [4.9 2.5 4.5 1.7]\n [7.3 2.9 6.3 1.8]\n [6.7 2.5 5.8 1.8]\n [7.2 3.6 6.1 2.5]\n [6.5 3.2 5.1 2. ]\n [6.4 2.7 5.3 1.9]\n [6.8 3.  5.5 2.1]\n [5.7 2.5 5.  2. ]\n [5.8 2.8 5.1 2.4]\n [6.4 3.2 5.3 2.3]\n [6.5 3.  5.5 1.8]\n [7.7 3.8 6.7 2.2]\n [7.7 2.6 6.9 2.3]\n [6.  2.2 5.  1.5]\n [6.9 3.2 5.7 2.3]\n [5.6 2.8 4.9 2. ]\n [7.7 2.8 6.7 2. ]\n [6.3 2.7 4.9 1.8]\n [6.7 3.3 5.7 2.1]\n [7.2 3.2 6.  1.8]\n [6.2 2.8 4.8 1.8]\n [6.1 3.  4.9 1.8]\n [6.4 2.8 5.6 2.1]\n [7.2 3.  5.8 1.6]\n [7.4 2.8 6.1 1.9]\n [7.9 3.8 6.4 2. ]\n [6.4 2.8 5.6 2.2]\n [6.3 2.8 5.1 1.5]\n [6.1 2.6 5.6 1.4]\n [7.7 3.  6.1 2.3]\n [6.3 3.4 5.6 2.4]\n [6.4 3.1 5.5 1.8]\n [6.  3.  4.8 1.8]\n [6.9 3.1 5.4 2.1]\n [6.7 3.1 5.6 2.4]\n [6.9 3.1 5.1 2.3]\n [5.8 2.7 5.1 1.9]\n [6.8 3.2 5.9 2.3]\n [6.7 3.3 5.7 2.5]\n [6.7 3.  5.2 2.3]\n [6.3 2.5 5.  1.9]\n [6.5 3.  5.2 2. ]\n [6.2 3.4 5.4 2.3]\n [5.9 3.  5.1 1.8]]"
+            }
+        },
+        "y": "[0 0 2 2 0 2 1 1 0 1 2 2 2 1 2 1 2 1 2 1 1 0 2 0 2 0 1 2 1 0 0 0 2 1 1 1 0\n 1 1 0 2 2 1 2 2 2 0 0 2 2 0 1 1 0 2 1 2 0 2 0 2 1 0 0 2 2 1 1 0 2 2 1 2 2\n 2 0 1 0 0 2 2 1 2 0 1 1 1 1 1 2 1 1 2 1 1 0 0 1 0 2 0 2 1 1 0 0 2 2 1 1 0\n 0 1 2 2 0 0 0 0 0 1 0 2 1 0 0 0 1 2 2 0 0 0 2 2 0 0 2 2 1 1 1 0 1 2 0 1 0\n 1 1]"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]

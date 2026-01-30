@@ -1,0 +1,572 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from sympy.core import S, Integer, Basic, Mul, Add
+from sympy.core.expr import Expr, ExprBuilder
+from sympy.core.logic import FuzzyBool
+from sympy.core.symbol import Str, Dummy, symbols, Symbol
+from sympy.core.sympify import SympifyError, _sympify
+from sympy.external.gmpy import SYMPY_INTS
+from sympy.matrices.kind import MatrixKind
+from sympy.utilities.misc import filldedent
+from sympy.matrices.expressions.slice import MatrixSlice
+from sympy.matrices.expressions.slice import MatrixSlice
+
+class MatrixExpr(Expr):
+    __slots__: tuple[str, ...] = ()
+    _iterable = False
+    _op_priority = 11.0
+    is_Matrix: bool = True
+    is_MatrixExpr: bool = True
+    is_Identity: FuzzyBool = None
+    is_Inverse = False
+    is_Transpose = False
+    is_ZeroMatrix = False
+    is_MatAdd = False
+    is_MatMul = False
+    is_commutative = False
+    is_number = False
+    is_symbol = False
+    is_scalar = False
+    kind: MatrixKind = MatrixKind()
+
+    @property
+    def shape(self) -> tuple[Expr | int, Expr | int]:
+        raise NotImplementedError
+
+    @property
+    def rows(self):
+        return self.shape[0]
+
+    @property
+    def cols(self):
+        return self.shape[1]
+
+    def _entry(self, i, j, **kwargs):
+        raise NotImplementedError('Indexing not implemented for %s' % self.__class__.__name__)
+
+    def valid_index(self, i, j):
+
+        def is_valid(idx):
+            return isinstance(idx, (int, Integer, Symbol, Expr))
+        return is_valid(i) and is_valid(j) and (self.rows is None or ((i >= -self.rows) != False and (i < self.rows) != False)) and ((j >= -self.cols) != False) and ((j < self.cols) != False)
+
+    def __getitem__(self, key):
+        if not isinstance(key, tuple) and isinstance(key, slice):
+            from sympy.matrices.expressions.slice import MatrixSlice
+            return MatrixSlice(self, key, (0, None, 1))
+        if isinstance(key, tuple) and len(key) == 2:
+            i, j = key
+            if isinstance(i, slice) or isinstance(j, slice):
+                from sympy.matrices.expressions.slice import MatrixSlice
+                return MatrixSlice(self, i, j)
+            i, j = (_sympify(i), _sympify(j))
+            if self.valid_index(i, j) != False:
+                return self._entry(i, j)
+            else:
+                raise IndexError('Invalid indices (%s, %s)' % (i, j))
+        elif isinstance(key, (SYMPY_INTS, Integer)):
+            rows, cols = self.shape
+            if not isinstance(cols, Integer):
+                raise IndexError(filldedent('\n                    Single indexing is only supported when the number\n                    of columns is known.'))
+            key = _sympify(key)
+            i = key // cols
+            j = key % cols
+            if self.valid_index(i, j) != False:
+                return self._entry(i, j)
+            else:
+                raise IndexError('Invalid index %s' % key)
+        elif isinstance(key, (Symbol, Expr)):
+            raise IndexError(filldedent('\n                Only integers may be used when addressing the matrix\n                with a single index.'))
+        raise IndexError('Invalid index, wanted %s[i,j]' % self)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core._print_helpers.__str__
+
+def __str__(self):
+    from sympy.printing.str import sstr
+    return sstr(self, order=None)
+
+sympy.sympy.core.decorators.__sympifyit_wrapper
+
+@wraps(func)
+def __sympifyit_wrapper(a, b):
+    try:
+        # If an external class has _op_priority, it knows how to deal
+        # with SymPy objects. Otherwise, it must be converted.
+        if not hasattr(b, '_op_priority'):
+            b = sympify(b, strict=True)
+        return func(a, b)
+    except SympifyError:
+        return retval
+
+sympy.sympy.core.numbers.__mod__
+
+def __mod__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p % other)
+        elif isinstance(other, Integer):
+            return Integer(self.p % other.p)
+        return Rational.__mod__(self, other)
+    return Rational.__mod__(self, other)
+
+sympy.sympy.core.sympify._sympify
+
+def _sympify(a):
+    """
+    Short version of :func:`~.sympify` for internal usage for ``__add__`` and
+    ``__eq__`` methods where it is ok to allow some things (like Python
+    integers and floats) in the expression. This excludes things (like strings)
+    that are unwise to allow into such an expression.
+
+    >>> from sympy import Integer
+    >>> Integer(1) == 1
+    True
+
+    >>> Integer(1) == '1'
+    False
+
+    >>> from sympy.abc import x
+    >>> x + 1
+    x + 1
+
+    >>> x + '1'
+    Traceback (most recent call last):
+    ...
+    TypeError: unsupported operand type(s) for +: 'Symbol' and 'str'
+
+    see: sympify
+
+    """
+    return sympify(a, strict=True)
+
+sympy.sympy.matrices.expressions.adjoint._entry
+
+def _entry(self, i, j, **kwargs):
+    return conjugate(self.arg._entry(j, i, **kwargs))
+
+sympy.sympy.matrices.expressions.applyfunc._entry
+
+def _entry(self, i, j, **kwargs):
+    return self.function(self.expr._entry(i, j, **kwargs))
+
+sympy.sympy.matrices.expressions.blockmatrix._entry
+
+def _entry(self, i, j, **kwargs):
+    # Find row entry
+    orig_i, orig_j = i, j
+    for row_block, numrows in enumerate(self.rowblocksizes):
+        cmp = i < numrows
+        if cmp == True:
+            break
+        elif cmp == False:
+            i -= numrows
+        elif row_block < self.blockshape[0] - 1:
+            # Can't tell which block and it's not the last one, return unevaluated
+            return MatrixElement(self, orig_i, orig_j)
+    for col_block, numcols in enumerate(self.colblocksizes):
+        cmp = j < numcols
+        if cmp == True:
+            break
+        elif cmp == False:
+            j -= numcols
+        elif col_block < self.blockshape[1] - 1:
+            return MatrixElement(self, orig_i, orig_j)
+    return self.blocks[row_block, col_block][i, j]
+
+sympy.sympy.matrices.expressions.companion._entry
+
+def _entry(self, i, j):
+    if j == self.cols - 1:
+        return -self.args[0].all_coeffs()[-1 - i]
+    elif i == j + 1:
+        return S.One
+    return S.Zero
+
+sympy.sympy.matrices.expressions.diagonal.shape
+
+@property
+def shape(self):
+    r, c = self.arg.shape
+    if r.is_Integer and c.is_Integer:
+        m = min(r, c)
+    elif r.is_Integer and not c.is_Integer:
+        m = r
+    elif c.is_Integer and not r.is_Integer:
+        m = c
+    elif r == c:
+        m = r
+    else:
+        try:
+            m = min(r, c)
+        except TypeError:
+            m = None
+    return m, S.One
+
+sympy.sympy.matrices.expressions.diagonal._entry
+
+def _entry(self, i, j, **kwargs):
+    if self.diagonal_length is not None:
+        if Ge(i, self.diagonal_length) is S.true:
+            return S.Zero
+        elif Ge(j, self.diagonal_length) is S.true:
+            return S.Zero
+    eq = Eq(i, j)
+    if eq is S.true:
+        return self.arg[i, i]
+    elif eq is S.false:
+        return S.Zero
+    return self.arg[i, j]*KroneckerDelta(i, j)
+
+sympy.sympy.matrices.expressions.diagonal.<lambda>
+
+shape = property(lambda self: self.arg.shape)  # type:ignore
+
+
+
+sympy.sympy.matrices.expressions.fourier._entry
+
+def _entry(self, i, j, **kwargs):
+    w = exp(-2*S.Pi*I/self.n)
+    return w**(i*j) / sqrt(self.n)
+
+sympy.sympy.matrices.expressions.funcmatrix._entry
+
+def _entry(self, i, j, **kwargs):
+    return self.lamda(i, j)
+
+sympy.sympy.matrices.expressions.hadamard._entry
+
+def _entry(self, i, j, **kwargs):
+    return Mul(*[arg._entry(i, j, **kwargs) for arg in self.args])
+
+sympy.sympy.matrices.expressions.kronecker._entry
+
+def _entry(self, i, j, **kwargs):
+    result = 1
+    for mat in reversed(self.args):
+        i, m = divmod(i, mat.rows)
+        j, n = divmod(j, mat.cols)
+        result *= mat[m, n]
+    return result
+
+sympy.sympy.matrices.expressions.matadd._entry
+
+def _entry(self, i, j, **kwargs):
+    return Add(*[arg._entry(i, j, **kwargs) for arg in self.args])
+
+sympy.sympy.matrices.expressions.matexpr.valid_index
+
+def valid_index(self, i, j):
+    def is_valid(idx):
+        return isinstance(idx, (int, Integer, Symbol, Expr))
+    return (is_valid(i) and is_valid(j) and
+            (self.rows is None or
+            (i >= -self.rows) != False and (i < self.rows) != False) and
+            (j >= -self.cols) != False and (j < self.cols) != False)
+
+sympy.sympy.matrices.expressions.matexpr.shape
+
+@property
+def shape(self):
+    return self.args[1], self.args[2]
+
+sympy.sympy.matrices.expressions.matexpr._entry
+
+def _entry(self, i, j, **kwargs):
+    return MatrixElement(self, i, j)
+
+sympy.sympy.matrices.expressions.matmul.shape
+
+@property
+def shape(self):
+    matrices = [arg for arg in self.args if arg.is_Matrix]
+    return (matrices[0].rows, matrices[-1].cols)
+
+sympy.sympy.matrices.expressions.matmul._entry
+
+def _entry(self, i, j, expand=True, **kwargs):
+    # Avoid cyclic imports
+    from sympy.concrete.summations import Sum
+    from sympy.matrices.immutable import ImmutableMatrix
+
+    coeff, matrices = self.as_coeff_matrices()
+
+    if len(matrices) == 1:  # situation like 2*X, matmul is just X
+        return coeff * matrices[0][i, j]
+
+    indices = [None]*(len(matrices) + 1)
+    ind_ranges = [None]*(len(matrices) - 1)
+    indices[0] = i
+    indices[-1] = j
+
+    def f():
+        counter = 1
+        while True:
+            yield Dummy("i_%i" % counter)
+            counter += 1
+
+    dummy_generator = kwargs.get("dummy_generator", f())
+
+    for i in range(1, len(matrices)):
+        indices[i] = next(dummy_generator)
+
+    for i, arg in enumerate(matrices[:-1]):
+        ind_ranges[i] = arg.shape[1] - 1
+    matrices = [arg._entry(indices[i], indices[i+1], dummy_generator=dummy_generator) for i, arg in enumerate(matrices)]
+    expr_in_sum = Mul.fromiter(matrices)
+    if any(v.has(ImmutableMatrix) for v in matrices):
+        expand = True
+    result = coeff*Sum(
+            expr_in_sum,
+            *zip(indices[1:-1], [0]*len(ind_ranges), ind_ranges)
+        )
+
+    # Don't waste time in result.doit() if the sum bounds are symbolic
+    if not any(isinstance(v, (Integer, int)) for v in ind_ranges):
+        expand = False
+    return result.doit() if expand else result
+
+sympy.sympy.matrices.expressions.matmul.f
+
+def f():
+    counter = 1
+    while True:
+        yield Dummy("i_%i" % counter)
+        counter += 1
+
+sympy.sympy.matrices.expressions.matpow._entry
+
+def _entry(self, i, j, **kwargs):
+    from sympy.matrices.expressions import MatMul
+    A = self.doit()
+    if isinstance(A, MatPow):
+        # We still have a MatPow, make an explicit MatMul out of it.
+        if A.exp.is_Integer and A.exp.is_positive:
+            A = MatMul(*[A.base for k in range(A.exp)])
+        elif not self._is_shape_symbolic():
+            return A._get_explicit_matrix()[i, j]
+        else:
+            # Leave the expression unevaluated:
+            from sympy.matrices.expressions.matexpr import MatrixElement
+            return MatrixElement(self, i, j)
+    return A[i, j]
+
+sympy.sympy.matrices.expressions.permutation._entry
+
+def _entry(self, i, j, **kwargs):
+    perm = self.args[0]
+    return KroneckerDelta(perm.apply(i), j)
+
+sympy.sympy.matrices.expressions.slice.__new__
+
+def __new__(cls, parent, rowslice, colslice):
+    rowslice = normalize(rowslice, parent.shape[0])
+    colslice = normalize(colslice, parent.shape[1])
+    if not (len(rowslice) == len(colslice) == 3):
+        raise IndexError()
+    if ((0 > rowslice[0]) == True or
+        (parent.shape[0] < rowslice[1]) == True or
+        (0 > colslice[0]) == True or
+        (parent.shape[1] < colslice[1]) == True):
+        raise IndexError()
+    if isinstance(parent, MatrixSlice):
+        return mat_slice_of_slice(parent, rowslice, colslice)
+    return Basic.__new__(cls, parent, Tuple(*rowslice), Tuple(*colslice))
+
+sympy.sympy.matrices.expressions.slice.shape
+
+@property
+def shape(self):
+    rows = self.rowslice[1] - self.rowslice[0]
+    rows = rows if self.rowslice[2] == 1 else floor(rows/self.rowslice[2])
+    cols = self.colslice[1] - self.colslice[0]
+    cols = cols if self.colslice[2] == 1 else floor(cols/self.colslice[2])
+    return rows, cols
+
+sympy.sympy.matrices.expressions.slice._entry
+
+def _entry(self, i, j, **kwargs):
+    return self.parent._entry(i*self.rowslice[2] + self.rowslice[0],
+                              j*self.colslice[2] + self.colslice[0],
+                              **kwargs)
+
+sympy.sympy.matrices.expressions.special._entry
+
+def _entry(self, i, j, **kwargs):
+    return S.Zero
+
+sympy.sympy.matrices.expressions.special.shape
+
+@property
+def shape(self):
+    return (self.args[0], self.args[1])
+
+sympy.sympy.matrices.expressions.transpose._entry
+
+def _entry(self, i, j, expand=False, **kwargs):
+    return self.arg._entry(j, i, expand=expand, **kwargs)
+
+sympy.sympy.utilities.misc.filldedent
+
+def filldedent(s, w=70, **kwargs):
+    """
+    Strips leading and trailing empty lines from a copy of ``s``, then dedents,
+    fills and returns it.
+
+    Empty line stripping serves to deal with docstrings like this one that
+    start with a newline after the initial triple quote, inserting an empty
+    line at the beginning of the string.
+
+    Additional keyword arguments will be passed to ``textwrap.fill()``.
+
+    See Also
+    ========
+    strlines, rawlines
+
+    """
+    return '\n' + fill(dedent(str(s)).strip('\n'), width=w, **kwargs)
+
+
+[/PYTHON]
+What will be the output of `__getitem__`, given the following input:
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "key": [
+            1,
+            2
+        ]
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]

@@ -1,0 +1,444 @@
+<think>
+The function `add` takes two integer arguments `x` and `y` and returns their sum. The inputs provided are `x = 852` and `y = 371`. The sum of these two numbers is `852 + 371 = 1223`.
+</think>
+[OUTPUT]
+{
+    "output": 1223
+}
+[/OUTPUT]
+
+[FILEPATH] SKYIRLLC-SKYEAI-17172e1/functional_models/langchain/predict.py [/FILEPATH]
+import os
+import sys
+import json
+import time
+from prompt import Prompt, FilePrompt
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
+from langchain_anthropic import ChatAnthropic
+import cohere
+
+
+mode = "groq"
+llm = None
+
+
+def create_llm_prompt(context, inputs, output_template=None, example=None):
+    if not example:
+        example_prompt = FilePrompt(os.path.join(os.path.dirname(__file__), "prompt.md"))
+    else:
+        example_prompt = example
+
+    if output_template:
+        output_template_str = output_template.model_dump_json()
+        prompt = Prompt(example_prompt.text.format(
+            context=context,
+            example_input=example_prompt.input_data if example_prompt.input_data else json.dumps(inputs),
+            example_output_structure=example_prompt.output_structure if example_prompt.output_structure else output_template_str,
+            example_output=example_prompt.output if example_prompt.output else json.dumps(example_prompt.output_data if example_prompt.output_data else {"output": "MISSING OUTPUT VALUE"}),
+            input=json.dumps(inputs),
+            output_structure=output_template_str,
+        ), example_prompt.examples)
+    else:
+        prompt = Prompt(example_prompt.text.format(
+            context=context,
+            example_input=example_prompt.input_data if example_prompt.input_data else json.dumps(inputs),
+            example_output_structure=example_prompt.output_structure if example_prompt.output_structure else json.dumps(inputs),
+            example_output=example_prompt.output if example_prompt.output else json.dumps(example_prompt.output_data if example_prompt.output_data else {"output": "MISSING OUTPUT VALUE"}),
+            input=json.dumps(inputs),
+            output_structure=json.dumps(inputs),
+        ), example_prompt.examples)
+    return prompt
+
+
+def predict_function_calls(prompt: str, messages: list[str] = None):
+    if messages is None:
+        messages = [
+            HumanMessage(content=prompt)
+        ]
+
+    messages.append(SystemMessage(content="Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted function calls in your external response. DO NOT generate any code or irrelevant text after your response."))
+    prediction = llm.predict_messages(messages)
+    # print(f"{prompt}\n-----\n{prediction}\n\n")
+    function_calls = list(prediction.generations[0][0].dict()["message"]["tool_calls"])
+    return function_calls
+
+
+def predict_functions_completion(prompt: str):
+    messages = [
+        HumanMessage(content=prompt)
+    ]
+    messages.append(SystemMessage(content="Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted function calls in your external response. DO NOT generate any code or irrelevant text after your response."))
+    return llm.predict_messages(messages)
+
+
+def predict(prompt: Prompt):
+    messages = prompt.messages
+    messages.append(SystemMessage(content="Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response."))
+    prediction = llm.predict_messages(messages)
+    # print(f"{prompt.text}\n-----\n{prediction}\n\n")
+    # print(prediction.generations[0][0].dict())
+    output = prediction.generations[0][0].dict()["message"].content
+    return output
+
+
+def predict_with_retry(prompt: Prompt):
+    num_tries = 0
+    while True:
+        num_tries += 1
+        try:
+            return predict(prompt)
+        except Exception as e:
+            if num_tries > 10:
+                raise Exception(e)
+            time.sleep(5)
+
+
+if mode == "chatgpt":
+    llm = ChatOpenAI(temperature=0, max_tokens=4096, model="gpt-4-turbo")
+elif mode == "groq":
+    os.environ["GROQ_API_KEY"] = "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"
+    llm = ChatGroq(temperature=0.1, model="llama3-70b-8192")
+elif mode == "anthropic":
+    llm = ChatAnthropic(temperature=0.1)
+elif mode == "cohere":
+    co = cohere.Client('NDHH2GjhKfwol4WTO1fWwzfNlPC5mbhmvfAvXT38')
+    llm = co.generate
+
+
+if __name__ == "__main__":
+    # prompt = FilePrompt(os.path.join(os.path.dirname(__file__), "prompt3.md"), inputs={"x": 1, "y": 2})
+    # predict(prompt)
+
+    if len(sys.argv) > 1:
+        with open(sys.argv[1]) as f:
+            input_data = json.load(f)
+
+            if input_data["inputs"]["self"]:
+                print(f"ERROR: 'self' is not yet supported")
+                exit(1)
+
+            new_prompt = create_llm_prompt(
+                context=input_data["func_call"],
+                inputs=input_data["inputs"]["args"],
+                output_template=input_data["output_template"],
+            )
+            print(new_prompt.text)
+            print("---\n\n")
+
+            prediction = predict(new_prompt)
+            print(prediction)
+
+[FILEPATH] SKYIRLLC-SKYEAI-17172e1/functional_models/langchain/generate_test_data.py [/FILEPATH]
+import os
+import sys
+import json
+from random import randint, uniform, choice, random, randrange
+from typing import List, Dict, Any, Tuple, Union
+import sqlite3
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dataclasses import dataclass
+import re
+
+from prompt import FilePrompt
+from tests.generate_json import JSONGen
+from predict import create_llm_prompt, predict
+
+
+@dataclass
+class JSONType:
+    type: str
+    properties: Dict[str, 'JSONType'] = None
+    items: 'JSONType' = None
+    minItems: int = None
+    maxItems: int = None
+    items: List = None
+    enum: List = None
+
+    def get_enum(self) -> List[str]:
+        return self.enum
+
+    def get_type(self) -> str:
+        return self.type
+
+    def get_minItems(self) -> int:
+        return self.minItems
+
+    def get_maxItems(self) -> int:
+        return self.maxItems
+
+    def get_items(self) -> List[JSONType]:
+        return self.items
+
+    def get_properties(self) -> Dict[str, JSONType]:
+        return self.properties
+
+    def get_all_types(self) -> List[str]:
+        types = []
+        if self.type == "object" and self.properties:
+            for property_type in self.properties.values():
+                types.extend(property_type.get_all_types())
+        elif self.type == "array" and self.items:
+            types.extend(self.items.get_all_types())
+        elif self.type != "object" and self.type != "array":
+            types.append(self.type)
+        return types
+
+    def to_str(self) -> str:
+        if self.type == "object" and self.properties:
+            result = {}
+            for k, v in self.properties.items():
+                result[k] = v.to_str()
+            return result
+        elif self.type == "array" and self.items:
+            return [self.items.to_str() for _ in range(self.minItems or 1, self.maxItems or 10)]
+        elif self.enum:
+            return choice(self.enum)
+        elif self.type == "integer":
+            return randint(-100, 100)
+        elif self.type == "number":
+            return uniform(-100, 100)
+        elif self.type == "boolean":
+            return choice([True, False])
+        elif self.type == "string":
+            return "test string"
+        elif self.type == "null":
+            return None
+        else:
+            return "UNKNOWN TYPE"
+
+    @staticmethod
+    def from_json_schema(schema: Dict[str, Any], _type: str = None) -> 'JSONType':
+        _type = schema.get("type")
+        properties = {k: JSONType.from_json_schema(v) for k, v in schema.get("properties", {}).items()}
+        items = JSONType.from_json_schema(schema.get("items", {})) if schema.get("items") else None
+        minItems = schema.get("minItems")
+        maxItems = schema.get("maxItems")
+        enum = schema.get("enum")
+        return JSONType(type=_type, properties=properties, items=items, minItems=minItems, maxItems=maxItems, enum=enum)
+
+    def is_int(self) -> bool:
+        return self.type == "integer"
+
+    def is_string(self) -> bool:
+        return self.type == "string"
+
+    def is_float(self) -> bool:
+        return self.type == "number"
+
+    def is_bool(self) -> bool:
+        return self.type == "boolean"
+
+    def is_null(self) -> bool:
+        return self.type == "null"
+
+
+def process_prompt(start_key: str, val: JSONType) -> dict:
+    # (object_type, prompt), (array_type, length_prompt), (string_type, length_prompt)
+    result = {}
+    if start_key != 'root':
+        result["key"] = start_key
+    if val.type == "object" and val.properties:
+        object_type = " ".join(val.get_all_types())
+        if len(val.get_all_types()) == 1:
+            object_type = val.get_all_types()[0]
+        result["prompt"] = f"Consider the following nested JSON object with a type of {object_type}. "
+    elif val.type == "array" and val.items:
+        result["length_prompt"] = f"The array should have {randrange(val.minItems or 0, val.maxItems or 10)} elements."
+        result["prompt"] = process_prompt("root", val.items)["prompt"]
+    elif val.type == "string":
+        result["prompt"] = "Consider the following string."
+    elif val.type == "integer":
+        result["prompt"] = "Consider the following integer."
+    elif val.type == "number":
+        result["prompt"] = "Consider the following float."
+    elif val.type == "boolean":
+        result["prompt"] = "Consider the following boolean."
+    elif val.type == "null":
+        result["prompt"] = "Consider the following null."
+    else:
+        result["prompt"] = "Consider the following JSON object."
+    return result
+
+
+def generate_prompt(val: JSONType, start_key: str = "root", type_: str = None) -> Tuple[str, str]:
+    result = process_prompt(start_key, val)
+    result["str"] = val.to_str()
+    result["type"] = type_ if type_ else val.type
+    return result["prompt"], result
+
+
+def generate_json_from_prompt(val: JSONType, start_key: str = "root", db: sqlite3.Connection = None) -> List[Tuple[str, str]]:
+    prompt, result = generate_prompt(val, start_key)
+    outputs = []
+    if result.get("length_prompt"):
+        outputs.append(("length_prompt", result["length_prompt"]))
+    if result.get("type"):
+        outputs.append(("type", result["type"]))
+    outputs.append(("output", str(result["str"])))
+
+    if db:
+        db.execute("INSERT INTO prompt (prompt, output) VALUES (?, ?)", (prompt, json.dumps(outputs)))
+    return outputs
+
+
+def sql_output_schema(json_data: Union[Dict[str, Any], List[Any]]) -> List[Tuple[str, str]]:
+    if isinstance(json_data, dict):
+        result = []
+        for k, v in json_data.items():
+            if k == "output":
+                result.append((k, str(v)))
+            else:
+                result.append((k, v))
+        return result
+    elif isinstance(json_data, list):
+        return sql_output_schema(json_data[0])
+    else:
+        return [("output", str(json_data))]
+
+
+def sql_to_json_out(schema: List[Tuple[str, str]]) -> Dict[str, Any]:
+    result = {}
+    for k, v in schema:
+        result[k] = v
+    return {"output": result}
+
+
+class PromptedDataGenerator(JSONGen):
+    def __init__(self, schema: Dict[str, Any], db: sqlite3.Connection = None, llm: str = None, inputs: Dict[str, Any] = None):
+        self.schema = schema
+        self.json_schema = schema["type"]
+        self.root = JSONType.from_json_schema(self.json_schema)
+        self.db = db
+        self.llm = llm
+        self.inputs = inputs
+
+    def generate_sql_table_for_prompt(self, val: JSONType, start_key: str = "root") -> List[str]:
+        sql_fields = []
+        if val.type == "object" and val.properties:
+            for k, v in val.properties.items():
+                sql_fields.extend(self.generate_sql_table_for_prompt(v, k))
+        elif val.type == "array" and val.items:
+            array_type = " TEXT" if val.items.type == "string" else " INT" if val.items.type == "integer" else " REAL" if val.items.type == "number" else " BOOLEAN" if val.items.type == "boolean" else " NULL"
+            sql_fields.append(f"{start_key} {array_type}")
+            return sql_fields
+        else:
+            sql_type = "TEXT" if val.type == "string" else "INT" if val.type == "integer" else "REAL" if val.type == "number" else "BOOLEAN" if val.type == "boolean" else "NULL"
+            sql_fields.append(f"{start_key} {sql_type}")
+            return sql_fields
+        return sql_fields
+
+    def generate_sql_table(self, table_name: str) -> str:
+        sql_fields = self.generate_sql_table_for_prompt(self.root, "output")
+        sql_table = f"CREATE TABLE {table_name} (id INTEGER PRIMARY KEY AUTOINCREMENT, {', '.join(sql_fields)});"
+        return sql_table
+
+    def get_outputs(self, num_outputs: int) -> List[Tuple[str, str]]:
+        outputs = []
+        while len(outputs) < num_outputs:
+            output = []
+            for schema_prompt in self.generate_sql_table_for_prompt(self.root, "output"):
+                if schema_prompt.startswith("output "):
+                    try:
+                        new_prompt = create_llm_prompt(
+                            context="Generate the following data according to the prompt.\nExample:\ninput: Consider the following string.\noutput: test string",
+                            inputs={"input": schema_prompt},
+                            output_template={"output": "test string"}
+                        )
+                        print(f"\n\nPrompt:\n{new_prompt.text}\n\n")
+                        output_data = json.loads(predict(new_prompt))
+                        print(f"\n\nOutput:\n{output_data}\n\n")
+                        output.append(sql_output_schema(output_data["output"]))
+                    except Exception as e:
+                        print(f"Failed to generate data for {schema_prompt}: {e}")
+                        continue
+            if output:
+                outputs.append(output[0])
+
+        return outputs
+
+    def generate_sql_insert(self, table_name: str, num_outputs: int = 10) -> List[str]:
+        sql_inserts = []
+        outputs = self.get_outputs(num_outputs)
+        for output in outputs:
+            sql_inserts.append(f"INSERT INTO {table_name} VALUES (NULL, {','.join([str(v) for v in output])});")
+        return sql_inserts
+
+    def generate_data(self, num_samples: int) -> List[Dict[str, Any]]:
+        outputs = self.get_outputs(num_samples)
+        return [sql_to_json_out(output) for output in outputs]
+
+
+class RandomJSONGen(JSONGen):
+    def __init__(self, schema: Dict[str, Any], db: sqlite3.Connection = None, llm: str = None, inputs: Dict[str, Any] = None):
+        self.schema = schema
+        self.root = JSONType.from_json_schema(schema["type"])
+        self.db = db
+        self.llm = llm
+        self.inputs = inputs
+
+    def generate_data(self, num_samples: int = 10) -> List[Dict[str, Any]]:
+        def generate_data_recursive(node: JSONType) -> Any:
+            if node.type == "object":
+                return {k: generate_data_recursive(v) for k, v in node.properties.items()}
+            elif node.type == "array":
+                if node.items.type == "string":
+                    return [node.items.to_str() for _ in range(randint(node.minItems or 0, node.maxItems or 10))]
+                else:
+                    return [generate_data_recursive(node.items) for _ in range(randint(node.minItems or 0, node.maxItems or 10))]
+            else:
+                return node.to_str()
+        return [generate_data_recursive(self.root) for _ in range(num_samples)]
+
+
+if __name__ == "__main__":
+    # "tests/example_schema.json"
+    schema_name = sys.argv[1]
+    num_samples = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+    # create sqlite3 database
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE prompt (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT, output TEXT);")
+    with open(schema_name) as f:
+        schema = json.load(f)
+
+    output_path = os.path.join(os.path.dirname(schema_name), "test_data.json")
+    if not os.path.exists(output_path):
+        if os.getenv("API_KEY", None):
+            generator = PromptedDataGenerator(schema, db)
+        else:
+            generator = RandomJSONGen(schema, db)
+        data = generator.generate_data(num_samples)
+        with open(output_path, "w") as f:
+            json.dump(data, f, indent=2)
+    else:
+        with open(output_path) as f:
+            data = json.load(f)
+
+    # data = generator.generate_data(num_samples)
+
+    # update all outputs from prediction generation
+    for d in data:
+        print(f"Generating output for {d}")
+        try:
+            new_prompt = create_llm_prompt(
+                context="Generate the following data according to the prompt.\nExample:\ninput: Consider the following string.\noutput: test string",
+                inputs={"input": "Consider the following string."},
+                output_template={"output": d},
+            )
+            print(f"\n\nPrompt:\n{new_prompt.text}\n\n")
+            output_data = json.loads(predict(new_prompt))
+            print(f"\n\nOutput:\n{output_data}\n\n")
+            db.execute("INSERT INTO prompt (prompt, output) VALUES (?, ?)", (new_prompt.text, json.dumps(output_data["output"])))
+            db.commit()
+        except Exception as e:
+            print(f"Failed to generate data for {d}: {e}")
+            continue
+
+    cursor = db.execute("SELECT prompt, output FROM prompt;")
+    with open(os.path.join(os.path.dirname(schema_name), "test_data_prompted.json"), "w") as f:
+        for row in cursor.fetchall():
+            json_data = row[1]
+            json_obj =

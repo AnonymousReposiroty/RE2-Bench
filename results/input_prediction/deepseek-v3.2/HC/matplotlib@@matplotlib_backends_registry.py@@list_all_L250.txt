@@ -1,0 +1,82 @@
+[THOUGHT]  
+We need to reconstruct the input state that would produce the given output when `list_all()` is called.
+
+The `list_all()` method does two things:
+1. `self._ensure_entry_points_loaded()` — loads external backends from entry points.
+2. Returns `[*self.list_builtin(), *self._backend_to_gui_framework]`.
+
+The output includes all built-in backends from `_BUILTIN_BACKEND_TO_GUI_FRAMEWORK`, plus one extra: `"module://matplotlib.backends.backend_agg"`.
+
+The built-in backends list from `list_builtin()` (without filter) should be:
+```
+[
+    "gtk3agg", "gtk3cairo", "gtk4agg", "gtk4cairo", "macosx", "nbagg",
+    "notebook", "qtagg", "qtcairo", "qt5agg", "qt5cairo", "tkagg",
+    "tkcairo", "webagg", "wx", "wxagg", "wxcairo", "agg", "cairo",
+    "pdf", "pgf", "ps", "svg", "template"
+]
+```
+That’s exactly the first 24 entries of the output list.  
+The last entry `"module://matplotlib.backends.backend_agg"` must have come from `self._backend_to_gui_framework`.
+
+The `_backend_to_gui_framework` dict is populated by `_validate_and_store_entry_points` during `_ensure_entry_points_loaded`.  
+It maps backend names to GUI framework categories.
+
+From the output, `_backend_to_gui_framework` must be `{"module://matplotlib.backends.backend_agg": "unknown"}` or similar? Wait — actually `_backend_to_gui_framework` is a dict from backend name (key) to GUI framework (value). The `list_all()` returns `[*self.list_builtin(), *self._backend_to_gui_framework]` — here `*self._backend_to_gui_framework` expands to just the **keys** of that dict. So if `_backend_to_gui_framework` is `{"module://matplotlib.backends.backend_agg": "unknown"}`, then `*self._backend_to_gui_framework` yields `["module://matplotlib.backends.backend_agg"]`.
+
+Now, how does `"module://matplotlib.backends.backend_agg"` get into `_backend_to_gui_framework`?  
+It would come from an entry point whose name is `"module://matplotlib.backends.backend_agg"`. But in `_validate_and_store_entry_points`, there’s a check: `if name.startswith('module://'): raise RuntimeError`. So no entry point with a name starting with `"module://"` can be stored there.  
+
+That suggests `"module://matplotlib.backends.backend_agg"` is not from entry points, but maybe from `_name_to_module`. But `_name_to_module` is not used in `list_all()`.  
+
+Wait — look at `_validate_and_store_entry_points`:  
+- It stores `self._name_to_module[name] = 'module://' + module`.  
+- It also stores `self._backend_to_gui_framework[name] = 'unknown'`.  
+
+But `"module://matplotlib.backends.backend_agg"` contains `'module://'` already in its name. Could an entry point have `name="module://matplotlib.backends.backend_agg"`? Possibly not because of the check.  
+
+Maybe `_backend_to_gui_framework` gets populated differently? Let’s check the code again: in `__init__`, `self._backend_to_gui_framework = {}`. Only `_validate_and_store_entry_points` updates it. So it must have been added via entry points with a name that doesn’t start with `"module://"` but whose value (module) after prepending `"module://"` results in `"module://matplotlib.backends.backend_agg"`.
+
+That means the entry point had `module = "matplotlib.backends.backend_agg"`. Then `self._name_to_module[name] = 'module://matplotlib.backends.backend_agg'`. That string is in `_name_to_module`, not `_backend_to_gui_framework`’s keys.  
+
+But `list_all()` doesn’t use `_name_to_module`. It uses `_backend_to_gui_framework`. So for `"module://matplotlib.backends.backend_agg"` to be in the output, `_backend_to_gui_framework` must have a key `"module://matplotlib.backends.backend_agg"`. That would violate the check `if name.startswith('module://'): raise RuntimeError`.  
+
+Unless the check passes because `name` (from entry point) is something like `"agg"` but `module = "matplotlib.backends.backend_agg"`? Then `self._backend_to_gui_framework["agg"] = 'unknown'`. That would give `"agg"` as a key — but `"agg"` is already a built-in backend, so it would raise `RuntimeError` (because `name in self._BUILTIN_BACKEND_TO_GUI_FRAMEWORK`).  
+
+So there’s a contradiction: `"module://matplotlib.backends.backend_agg"` cannot be in `_backend_to_gui_framework` via `_validate_and_store_entry_points`.  
+
+Maybe `_backend_to_gui_framework` was manually set before `_ensure_entry_points_loaded`? Possibly in `__init__`? No, it’s empty initially.  
+
+Given the output, the only way to get `"module://matplotlib.backends.backend_agg"` in `list_all()` is if `_backend_to_gui_framework = {"module://matplotlib.backends.backend_agg": "unknown"}` and `_loaded_entry_points = True` (so `_ensure_entry_points_loaded` doesn’t run).  
+
+Thus input state:  
+- `_loaded_entry_points = True` (already loaded)  
+- `_backend_to_gui_framework = {"module://matplotlib.backends.backend_agg": "unknown"}`  
+- `_name_to_module = {"notebook": "nbagg"}` (default from `__init__`).  
+
+But the `_name_to_module` dict in STRUCTURE has one placeholder for `"notebook"`. In `__init__` it’s `{'notebook': 'nbagg'}`. So that matches.
+
+So answer:  
+- `_loaded_entry_points = true`  
+- `_backend_to_gui_framework["module://matplotlib.backends.backend_agg"] = "unknown"`  
+- `_name_to_module["notebook"] = "nbagg"`  
+
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_loaded_entry_points": true,
+        "_backend_to_gui_framework": {
+            "module://matplotlib.backends.backend_agg": "unknown"
+        },
+        "_name_to_module": {
+            "notebook": "nbagg"
+        }
+    },
+    "args": {},
+    "kwargs": {}
+}
+```
+[/INPUT]

@@ -1,0 +1,2455 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from sympy.core import sympify
+from sympy.core.compatibility import ordered
+from sympy.core.evalf import pure_complex
+from sympy.polys.domains import ZZ, QQ, ZZ_I, QQ_I, EX
+from sympy.polys.domains.complexfield import ComplexField
+from sympy.polys.domains.realfield import RealField
+from sympy.polys.polyoptions import build_options
+from sympy.polys.polyutils import parallel_dict_from_basic
+from sympy.utilities import public
+from sympy.polys.numberfields import primitive_element
+
+def _construct_simple(coeffs, opt):
+    rationals = floats = complexes = algebraics = False
+    float_numbers = []
+    if opt.extension is True:
+        is_algebraic = lambda coeff: coeff.is_number and coeff.is_algebraic
+    else:
+        is_algebraic = lambda coeff: False
+    for coeff in coeffs:
+        if coeff.is_Rational:
+            if not coeff.is_Integer:
+                rationals = True
+        elif coeff.is_Float:
+            if algebraics:
+                return False
+            else:
+                floats = True
+                float_numbers.append(coeff)
+        else:
+            is_complex = pure_complex(coeff)
+            if is_complex:
+                complexes = True
+                x, y = is_complex
+                if x.is_Rational and y.is_Rational:
+                    if not (x.is_Integer and y.is_Integer):
+                        rationals = True
+                    continue
+                else:
+                    floats = True
+                    if x.is_Float:
+                        float_numbers.append(x)
+                    if y.is_Float:
+                        float_numbers.append(y)
+            elif is_algebraic(coeff):
+                if floats:
+                    return False
+                algebraics = True
+            else:
+                return None
+    max_prec = max((c._prec for c in float_numbers)) if float_numbers else 53
+    if algebraics:
+        domain, result = _construct_algebraic(coeffs, opt)
+    else:
+        if floats and complexes:
+            domain = ComplexField(prec=max_prec)
+        elif floats:
+            domain = RealField(prec=max_prec)
+        elif rationals or opt.field:
+            domain = QQ_I if complexes else QQ
+        else:
+            domain = ZZ_I if complexes else ZZ
+        result = [domain.from_sympy(coeff) for coeff in coeffs]
+    return (domain, result)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.sympy.polys.polyoptions.OptionType.getter
+
+def getter(self):
+    try:
+        return self[cls.option]
+    except KeyError:
+        return cls.default()
+
+.sympy.polys.domains.rationalfield.RationalField.from_sympy
+
+def from_sympy(self, a):
+    if a.is_Rational:
+        return MPQ(a.p, a.q)
+    elif a.is_Float:
+        from sympy.polys.domains import RR
+        return MPQ(*map(int, RR.to_rational(a)))
+    else:
+        raise CoercionFailed('expected `Rational` object, got %s' % a)
+
+.sympy.external.pythonmpq.PythonMPQ.__new__
+
+def __new__(cls, numerator, denominator=None):
+    if denominator is not None:
+        if isinstance(numerator, int) and isinstance(denominator, int):
+            divisor = gcd(numerator, denominator)
+            numerator //= divisor
+            denominator //= divisor
+            return cls._new_check(numerator, denominator)
+    else:
+        if isinstance(numerator, int):
+            return cls._new(numerator, 1)
+        elif isinstance(numerator, PythonMPQ):
+            return cls._new(numerator.numerator, numerator.denominator)
+        if isinstance(numerator, (Decimal, float, str)):
+            numerator = Fraction(numerator)
+        if isinstance(numerator, Fraction):
+            return cls._new(numerator.numerator, numerator.denominator)
+    raise TypeError('PythonMPQ() requires numeric or string argument')
+
+.sympy.external.pythonmpq.PythonMPQ._new_check
+
+def _new_check(cls, numerator, denominator):
+    if not denominator:
+        raise ZeroDivisionError(f'Zero divisor {numerator}/{denominator}')
+    elif denominator < 0:
+        numerator = -numerator
+        denominator = -denominator
+    return cls._new(numerator, denominator)
+
+.sympy.external.pythonmpq.PythonMPQ._new
+
+def _new(cls, numerator, denominator):
+    obj = super().__new__(cls)
+    obj.numerator = numerator
+    obj.denominator = denominator
+    return obj
+
+.sympy.core.evalf.pure_complex
+
+def pure_complex(v, or_real=False):
+    h, t = v.as_coeff_Add()
+    if not t:
+        if or_real:
+            return (h, t)
+        return
+    c, i = t.as_coeff_Mul()
+    if i is S.ImaginaryUnit:
+        return (h, c)
+
+.sympy.core.expr.Expr.as_coeff_Add
+
+def as_coeff_Add(self, rational=False):
+    return (S.Zero, self)
+
+.sympy.core.mul.Mul.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False):
+    coeff, args = (self.args[0], self.args[1:])
+    if coeff.is_Number:
+        if not rational or coeff.is_Rational:
+            if len(args) == 1:
+                return (coeff, args[0])
+            else:
+                return (coeff, self._new_rawargs(*args))
+        elif coeff.is_extended_negative:
+            return (S.NegativeOne, self._new_rawargs(*(-coeff,) + args))
+    return (S.One, self)
+
+.sympy.core.basic.Basic.args
+
+def args(self):
+    return self._args
+
+.sympy.polys.domains.gaussiandomains.GaussianDomain.from_sympy
+
+def from_sympy(self, a):
+    r, b = a.as_coeff_Add()
+    x = self.dom.from_sympy(r)
+    if not b:
+        return self.new(x, 0)
+    r, b = b.as_coeff_Mul()
+    y = self.dom.from_sympy(r)
+    if b is I:
+        return self.new(x, y)
+    else:
+        raise CoercionFailed('{} is not Gaussian'.format(a))
+
+.sympy.polys.domains.domain.Domain.new
+
+def new(self, *args):
+    return self.dtype(*args)
+
+.sympy.polys.domains.gaussiandomains.GaussianElement.__new__
+
+def __new__(cls, x, y=0):
+    conv = cls.base.convert
+    return cls.new(conv(x), conv(y))
+
+.sympy.polys.domains.domain.Domain.convert
+
+def convert(self, element, base=None):
+    if _not_a_coeff(element):
+        raise CoercionFailed('%s is not in any domain' % element)
+    if base is not None:
+        return self.convert_from(element, base)
+    if self.of_type(element):
+        return element
+    from sympy.polys.domains import ZZ, QQ, RealField, ComplexField
+    if ZZ.of_type(element):
+        return self.convert_from(element, ZZ)
+    if isinstance(element, int):
+        return self.convert_from(ZZ(element), ZZ)
+    if HAS_GMPY:
+        integers = ZZ
+        if isinstance(element, integers.tp):
+            return self.convert_from(element, integers)
+        rationals = QQ
+        if isinstance(element, rationals.tp):
+            return self.convert_from(element, rationals)
+    if isinstance(element, float):
+        parent = RealField(tol=False)
+        return self.convert_from(parent(element), parent)
+    if isinstance(element, complex):
+        parent = ComplexField(tol=False)
+        return self.convert_from(parent(element), parent)
+    if isinstance(element, DomainElement):
+        return self.convert_from(element, element.parent())
+    if self.is_Numerical and getattr(element, 'is_ground', False):
+        return self.convert(element.LC())
+    if isinstance(element, Basic):
+        try:
+            return self.from_sympy(element)
+        except (TypeError, ValueError):
+            pass
+    elif not is_sequence(element):
+        try:
+            element = sympify(element, strict=True)
+            if isinstance(element, Basic):
+                return self.from_sympy(element)
+        except (TypeError, ValueError):
+            pass
+    raise CoercionFailed("can't convert %s of type %s to %s" % (element, type(element), self))
+
+.sympy.polys.polyutils._not_a_coeff
+
+def _not_a_coeff(expr):
+    if type(expr) in illegal_types or expr in finf:
+        return True
+    if type(expr) is float and float(expr) != expr:
+        return True
+    return
+
+.sympy.external.pythonmpq.PythonMPQ.__eq__
+
+def __eq__(self, other):
+    if isinstance(other, PythonMPQ):
+        return self.numerator == other.numerator and self.denominator == other.denominator
+    elif isinstance(other, self._compatible_types):
+        return self.__eq__(PythonMPQ(other))
+    else:
+        return NotImplemented
+
+.sympy.polys.domains.domain.Domain.of_type
+
+def of_type(self, element):
+    return isinstance(element, self.tp)
+
+.sympy.polys.domains.gaussiandomains.GaussianElement.new
+
+def new(cls, x, y):
+    obj = super().__new__(cls)
+    obj.x = x
+    obj.y = y
+    return obj
+
+.sympy.polys.domains.realfield.RealField.__init__
+
+def __init__(self, prec=_default_precision, dps=None, tol=None):
+    context = MPContext(prec, dps, tol, True)
+    context._parent = self
+    self._context = context
+    self.dtype = context.mpf
+    self.zero = self.dtype(0)
+    self.one = self.dtype(1)
+
+.sympy.polys.domains.mpelements.MPContext.__init__
+
+def __init__(ctx, prec=53, dps=None, tol=None, real=False):
+    ctx._prec_rounding = [prec, round_nearest]
+    if dps is None:
+        ctx._set_prec(prec)
+    else:
+        ctx._set_dps(dps)
+    ctx.mpf = RealElement
+    ctx.mpc = ComplexElement
+    ctx.mpf._ctxdata = [ctx.mpf, new, ctx._prec_rounding]
+    ctx.mpc._ctxdata = [ctx.mpc, new, ctx._prec_rounding]
+    if real:
+        ctx.mpf.context = ctx
+    else:
+        ctx.mpc.context = ctx
+    ctx.constant = _constant
+    ctx.constant._ctxdata = [ctx.mpf, new, ctx._prec_rounding]
+    ctx.constant.context = ctx
+    ctx.types = [ctx.mpf, ctx.mpc, ctx.constant]
+    ctx.trap_complex = True
+    ctx.pretty = True
+    if tol is None:
+        ctx.tol = ctx._make_tol()
+    elif tol is False:
+        ctx.tol = fzero
+    else:
+        ctx.tol = ctx._convert_tol(tol)
+    ctx.tolerance = ctx.make_mpf(ctx.tol)
+    if not ctx.tolerance:
+        ctx.max_denom = 1000000
+    else:
+        ctx.max_denom = int(1 / ctx.tolerance)
+    ctx.zero = ctx.make_mpf(fzero)
+    ctx.one = ctx.make_mpf(fone)
+    ctx.j = ctx.make_mpc((fzero, fone))
+    ctx.inf = ctx.make_mpf(finf)
+    ctx.ninf = ctx.make_mpf(fninf)
+    ctx.nan = ctx.make_mpf(fnan)
+
+.sympy.polys.domains.mpelements.MPContext._make_tol
+
+def _make_tol(ctx):
+    hundred = (0, 25, 2, 5)
+    eps = (0, MPZ_ONE, 1 - ctx.prec, 1)
+    return mpf_mul(hundred, eps)
+
+.sympy.polys.domains.mpelements.RealElement._set_mpf
+
+def _set_mpf(self, val):
+    self.__mpf__ = val
+
+.sympy.polys.domains.mpelements.ComplexElement._set_mpc
+
+def _set_mpc(self, val):
+    self.__mpc__ = val
+
+.sympy.polys.domains.realfield.RealField.from_sympy
+
+def from_sympy(self, expr):
+    number = expr.evalf(n=self.dps)
+    if number.is_Number:
+        return self.dtype(number)
+    else:
+        raise CoercionFailed('expected real number, got %s' % expr)
+
+.sympy.polys.domains.realfield.RealField.dps
+
+def dps(self):
+    return self._context.dps
+
+.sympy.core.evalf.EvalfMixin.evalf
+
+def evalf(self, n=15, subs=None, maxn=100, chop=False, strict=False, quad=None, verbose=False):
+    from sympy import Float, Number
+    n = n if n is not None else 15
+    if subs and is_sequence(subs):
+        raise TypeError('subs must be given as a dictionary')
+    if n == 1 and isinstance(self, Number):
+        from sympy.core.expr import _mag
+        rv = self.evalf(2, subs, maxn, chop, strict, quad, verbose)
+        m = _mag(rv)
+        rv = rv.round(1 - m)
+        return rv
+    if not evalf_table:
+        _create_evalf_table()
+    prec = dps_to_prec(n)
+    options = {'maxprec': max(prec, int(maxn * LG10)), 'chop': chop, 'strict': strict, 'verbose': verbose}
+    if subs is not None:
+        options['subs'] = subs
+    if quad is not None:
+        options['quad'] = quad
+    try:
+        result = evalf(self, prec + 4, options)
+    except NotImplementedError:
+        if hasattr(self, 'subs') and subs is not None:
+            v = self.subs(subs)._eval_evalf(prec)
+        else:
+            v = self._eval_evalf(prec)
+        if v is None:
+            return self
+        elif not v.is_number:
+            return v
+        try:
+            result = evalf(v, prec, options)
+        except NotImplementedError:
+            return v
+    re, im, re_acc, im_acc = result
+    if re:
+        p = max(min(prec, re_acc), 1)
+        re = Float._new(re, p)
+    else:
+        re = S.Zero
+    if im:
+        p = max(min(prec, im_acc), 1)
+        im = Float._new(im, p)
+        return re + im * S.ImaginaryUnit
+    else:
+        return re
+
+.sympy.core.evalf.evalf
+
+def evalf(x, prec, options):
+    from sympy import re as re_, im as im_
+    try:
+        rf = evalf_table[x.func]
+        r = rf(x, prec, options)
+    except KeyError:
+        if 'subs' in options:
+            x = x.subs(evalf_subs(prec, options['subs']))
+        xe = x._eval_evalf(prec)
+        if xe is None:
+            raise NotImplementedError
+        as_real_imag = getattr(xe, 'as_real_imag', None)
+        if as_real_imag is None:
+            raise NotImplementedError
+        re, im = as_real_imag()
+        if re.has(re_) or im.has(im_):
+            raise NotImplementedError
+        if re == 0:
+            re = None
+            reprec = None
+        elif re.is_number:
+            re = re._to_mpmath(prec, allow_ints=False)._mpf_
+            reprec = prec
+        else:
+            raise NotImplementedError
+        if im == 0:
+            im = None
+            imprec = None
+        elif im.is_number:
+            im = im._to_mpmath(prec, allow_ints=False)._mpf_
+            imprec = prec
+        else:
+            raise NotImplementedError
+        r = (re, im, reprec, imprec)
+    if options.get('verbose'):
+        print('### input', x)
+        print('### output', to_str(r[0] or fzero, 50))
+        print('### raw', r)
+        print()
+    chop = options.get('chop', False)
+    if chop:
+        if chop is True:
+            chop_prec = prec
+        else:
+            chop_prec = int(round(-3.321 * math.log10(chop) + 2.5))
+            if chop_prec == 3:
+                chop_prec -= 1
+        r = chop_parts(r, chop_prec)
+    if options.get('strict'):
+        check_target(x, r, prec)
+    return r
+
+.sympy.core.basic.Basic.func
+
+def func(self):
+    return self.__class__
+
+.sympy.core.numbers.Integer._mpmath_
+
+def _mpmath_(self, prec, rnd):
+    return mpmath.make_mpf(self._as_mpf_val(prec))
+
+.sympy.core.numbers.Integer._as_mpf_val
+
+def _as_mpf_val(self, prec):
+    return mlib.from_int(self.p, prec, rnd)
+
+.sympy.core.numbers.Float._new
+
+def _new(cls, _mpf_, _prec, zero=True):
+    if zero and _mpf_ == fzero:
+        return S.Zero
+    elif _mpf_ == _mpf_nan:
+        return S.NaN
+    elif _mpf_ == _mpf_inf:
+        return S.Infinity
+    elif _mpf_ == _mpf_ninf:
+        return S.NegativeInfinity
+    obj = Expr.__new__(cls)
+    obj._mpf_ = mpf_norm(_mpf_, _prec)
+    obj._prec = _prec
+    return obj
+
+.sympy.core.basic.Basic.__new__
+
+def __new__(cls, *args):
+    obj = object.__new__(cls)
+    obj._assumptions = cls.default_assumptions
+    obj._mhash = None
+    obj._args = args
+    return obj
+
+.sympy.core.numbers.mpf_norm
+
+def mpf_norm(mpf, prec):
+    sign, man, expt, bc = mpf
+    if not man:
+        if not bc:
+            return fzero
+        else:
+            return mpf
+    from mpmath.libmp.backend import MPZ
+    rv = mpf_normalize(sign, MPZ(man), expt, bc, prec, rnd)
+    return rv
+
+.sympy.core.add.Add.as_coeff_Add
+
+def as_coeff_Add(self, rational=False, deps=None):
+    coeff, args = (self.args[0], self.args[1:])
+    if coeff.is_Number and (not rational) or coeff.is_Rational:
+        return (coeff, self._new_rawargs(*args))
+    return (S.Zero, self)
+
+.sympy.core.operations.AssocOp._new_rawargs
+
+def _new_rawargs(self, *args, reeval=True, **kwargs):
+    if reeval and self.is_commutative is False:
+        is_commutative = None
+    else:
+        is_commutative = self.is_commutative
+    return self._from_args(args, is_commutative)
+
+.sympy.core.operations.AssocOp._from_args
+
+def _from_args(cls, args, is_commutative=None):
+    if len(args) == 0:
+        return cls.identity
+    elif len(args) == 1:
+        return args[0]
+    obj = super().__new__(cls, *args)
+    if is_commutative is None:
+        is_commutative = fuzzy_and((a.is_commutative for a in args))
+    obj.is_commutative = is_commutative
+    return obj
+
+.sympy.polys.domains.complexfield.ComplexField.__init__
+
+def __init__(self, prec=_default_precision, dps=None, tol=None):
+    context = MPContext(prec, dps, tol, False)
+    context._parent = self
+    self._context = context
+    self.dtype = context.mpc
+    self.zero = self.dtype(0)
+    self.one = self.dtype(1)
+
+.sympy.polys.domains.complexfield.ComplexField.from_sympy
+
+def from_sympy(self, expr):
+    number = expr.evalf(n=self.dps)
+    real, imag = number.as_real_imag()
+    if real.is_Number and imag.is_Number:
+        return self.dtype(real, imag)
+    else:
+        raise CoercionFailed('expected complex number, got %s' % expr)
+
+.sympy.polys.domains.complexfield.ComplexField.dps
+
+def dps(self):
+    return self._context.dps
+
+.sympy.core.evalf.evalf_add
+
+def evalf_add(v, prec, options):
+    res = pure_complex(v)
+    if res:
+        h, c = res
+        re, _, re_acc, _ = evalf(h, prec, options)
+        im, _, im_acc, _ = evalf(c, prec, options)
+        return (re, im, re_acc, im_acc)
+    oldmaxprec = options.get('maxprec', DEFAULT_MAXPREC)
+    i = 0
+    target_prec = prec
+    while 1:
+        options['maxprec'] = min(oldmaxprec, 2 * prec)
+        terms = [evalf(arg, prec + 10, options) for arg in v.args]
+        re, re_acc = add_terms([a[0::2] for a in terms if a[0]], prec, target_prec)
+        im, im_acc = add_terms([a[1::2] for a in terms if a[1]], prec, target_prec)
+        acc = complex_accuracy((re, im, re_acc, im_acc))
+        if acc >= target_prec:
+            if options.get('verbose'):
+                print('ADD: wanted', target_prec, 'accurate bits, got', re_acc, im_acc)
+            break
+        else:
+            if prec - target_prec > options['maxprec']:
+                break
+            prec = prec + max(10 + 2 ** i, target_prec - acc)
+            i += 1
+            if options.get('verbose'):
+                print('ADD: restarting with prec', prec)
+    options['maxprec'] = oldmaxprec
+    if iszero(re, scaled=True):
+        re = scaled_zero(re)
+    if iszero(im, scaled=True):
+        im = scaled_zero(im)
+    return (re, im, re_acc, im_acc)
+
+.sympy.core.decorators.__sympifyit_wrapper
+
+def __sympifyit_wrapper(a, b):
+    try:
+        if not hasattr(b, '_op_priority'):
+            b = sympify(b, strict=True)
+        return func(a, b)
+    except SympifyError:
+        return retval
+
+.sympy.core.numbers.Float.__mul__
+
+def __mul__(self, other):
+    if isinstance(other, Number) and global_parameters.evaluate:
+        rhs, prec = other._as_mpf_op(self._prec)
+        return Float._new(mlib.mpf_mul(self._mpf_, rhs, prec, rnd), prec)
+    return Number.__mul__(self, other)
+
+.sympy.core.numbers.Number.__mul__
+
+def __mul__(self, other):
+    if isinstance(other, Number) and global_parameters.evaluate:
+        if other is S.NaN:
+            return S.NaN
+        elif other is S.Infinity:
+            if self.is_zero:
+                return S.NaN
+            elif self.is_positive:
+                return S.Infinity
+            else:
+                return S.NegativeInfinity
+        elif other is S.NegativeInfinity:
+            if self.is_zero:
+                return S.NaN
+            elif self.is_positive:
+                return S.NegativeInfinity
+            else:
+                return S.Infinity
+    elif isinstance(other, Tuple):
+        return NotImplemented
+    return AtomicExpr.__mul__(self, other)
+
+.sympy.core.decorators._SympifyWrapper._func
+
+def _func(self, other):
+    if not hasattr(other, '_op_priority'):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return retval
+    if not isinstance(other, expectedcls):
+        return retval
+    return func(self, other)
+
+.sympy.core.decorators.binary_op_wrapper
+
+def binary_op_wrapper(self, other):
+    if hasattr(other, '_op_priority'):
+        if other._op_priority > self._op_priority:
+            f = getattr(other, method_name, None)
+            if f is not None:
+                return f(self)
+    return func(self, other)
+
+.sympy.core.expr.Expr.__mul__
+
+def __mul__(self, other):
+    return Mul(self, other)
+
+.sympy.core.operations.AssocOp.__new__
+
+def __new__(cls, *args, evaluate=None, _sympify=True):
+    from sympy import Order
+    if _sympify:
+        args = list(map(_sympify_, args))
+    typ = cls._args_type
+    if typ is not None:
+        from sympy.core.relational import Relational
+        if any((isinstance(arg, Relational) for arg in args)):
+            raise TypeError('Relational can not be used in %s' % cls.__name__)
+        if not all((isinstance(arg, typ) for arg in args)):
+            SymPyDeprecationWarning(feature='Add/Mul with non-Expr args', useinstead='Expr args', issue=19445, deprecated_since_version='1.7').warn()
+    if evaluate is None:
+        evaluate = global_parameters.evaluate
+    if not evaluate:
+        obj = cls._from_args(args)
+        obj = cls._exec_constructor_postprocessors(obj)
+        return obj
+    args = [a for a in args if a is not cls.identity]
+    if len(args) == 0:
+        return cls.identity
+    if len(args) == 1:
+        return args[0]
+    c_part, nc_part, order_symbols = cls.flatten(args)
+    is_commutative = not nc_part
+    obj = cls._from_args(c_part + nc_part, is_commutative)
+    obj = cls._exec_constructor_postprocessors(obj)
+    if order_symbols is not None:
+        return Order(obj, *order_symbols)
+    return obj
+
+.sympy.core.sympify._sympify
+
+def _sympify(a):
+    return sympify(a, strict=True)
+
+.sympy.core.sympify.sympify
+
+def sympify(a, locals=None, convert_xor=True, strict=False, rational=False, evaluate=None):
+    is_sympy = getattr(a, '__sympy__', None)
+    if is_sympy is True:
+        return a
+    elif is_sympy is not None:
+        if not strict:
+            return a
+        else:
+            raise SympifyError(a)
+    if isinstance(a, CantSympify):
+        raise SympifyError(a)
+    cls = getattr(a, '__class__', None)
+    if cls is None:
+        cls = type(a)
+    conv = converter.get(cls, None)
+    if conv is not None:
+        return conv(a)
+    for superclass in getmro(cls):
+        try:
+            return converter[superclass](a)
+        except KeyError:
+            continue
+    if cls is type(None):
+        if strict:
+            raise SympifyError(a)
+        else:
+            return a
+    if evaluate is None:
+        evaluate = global_parameters.evaluate
+    if _is_numpy_instance(a):
+        import numpy as np
+        if np.isscalar(a):
+            return _convert_numpy_types(a, locals=locals, convert_xor=convert_xor, strict=strict, rational=rational, evaluate=evaluate)
+    _sympy_ = getattr(a, '_sympy_', None)
+    if _sympy_ is not None:
+        try:
+            return a._sympy_()
+        except AttributeError:
+            pass
+    if not strict:
+        flat = getattr(a, 'flat', None)
+        if flat is not None:
+            shape = getattr(a, 'shape', None)
+            if shape is not None:
+                from ..tensor.array import Array
+                return Array(a.flat, a.shape)
+    if not isinstance(a, str):
+        if _is_numpy_instance(a):
+            import numpy as np
+            assert not isinstance(a, np.number)
+            if isinstance(a, np.ndarray):
+                if a.ndim == 0:
+                    try:
+                        return sympify(a.item(), locals=locals, convert_xor=convert_xor, strict=strict, rational=rational, evaluate=evaluate)
+                    except SympifyError:
+                        pass
+        else:
+            for coerce in (float, int):
+                try:
+                    return sympify(coerce(a))
+                except (TypeError, ValueError, AttributeError, SympifyError):
+                    continue
+    if strict:
+        raise SympifyError(a)
+    if iterable(a):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor, rational=rational) for x in a])
+        except TypeError:
+            pass
+    if isinstance(a, dict):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor, rational=rational) for x in a.items()])
+        except TypeError:
+            pass
+    if not isinstance(a, str):
+        try:
+            a = str(a)
+        except Exception as exc:
+            raise SympifyError(a, exc)
+        from sympy.utilities.exceptions import SymPyDeprecationWarning
+        SymPyDeprecationWarning(feature='String fallback in sympify', useinstead='sympify(str(obj)) or ' + 'sympy.core.sympify.converter or obj._sympy_', issue=18066, deprecated_since_version='1.6').warn()
+    from sympy.parsing.sympy_parser import parse_expr, TokenError, standard_transformations
+    from sympy.parsing.sympy_parser import convert_xor as t_convert_xor
+    from sympy.parsing.sympy_parser import rationalize as t_rationalize
+    transformations = standard_transformations
+    if rational:
+        transformations += (t_rationalize,)
+    if convert_xor:
+        transformations += (t_convert_xor,)
+    try:
+        a = a.replace('\n', '')
+        expr = parse_expr(a, local_dict=locals, transformations=transformations, evaluate=evaluate)
+    except (TokenError, SyntaxError) as exc:
+        raise SympifyError('could not parse %r' % a, exc)
+    return expr
+
+.sympy.core.mul.Mul.flatten
+
+def flatten(cls, seq):
+    from sympy.calculus.util import AccumBounds
+    from sympy.matrices.expressions import MatrixExpr
+    rv = None
+    if len(seq) == 2:
+        a, b = seq
+        if b.is_Rational:
+            a, b = (b, a)
+            seq = [a, b]
+        assert not a is S.One
+        if not a.is_zero and a.is_Rational:
+            r, b = b.as_coeff_Mul()
+            if b.is_Add:
+                if r is not S.One:
+                    ar = a * r
+                    if ar is S.One:
+                        arb = b
+                    else:
+                        arb = cls(a * r, b, evaluate=False)
+                    rv = ([arb], [], None)
+                elif global_parameters.distribute and b.is_commutative:
+                    r, b = b.as_coeff_Add()
+                    bargs = [_keep_coeff(a, bi) for bi in Add.make_args(b)]
+                    _addsort(bargs)
+                    ar = a * r
+                    if ar:
+                        bargs.insert(0, ar)
+                    bargs = [Add._from_args(bargs)]
+                    rv = (bargs, [], None)
+        if rv:
+            return rv
+    c_part = []
+    nc_part = []
+    nc_seq = []
+    coeff = S.One
+    c_powers = []
+    num_exp = []
+    neg1e = S.Zero
+    pnum_rat = {}
+    order_symbols = None
+    for o in seq:
+        if o.is_Order:
+            o, order_symbols = o.as_expr_variables(order_symbols)
+        if o.is_Mul:
+            if o.is_commutative:
+                seq.extend(o.args)
+            else:
+                for q in o.args:
+                    if q.is_commutative:
+                        seq.append(q)
+                    else:
+                        nc_seq.append(q)
+                seq.append(NC_Marker)
+            continue
+        elif o.is_Number:
+            if o is S.NaN or (coeff is S.ComplexInfinity and o.is_zero):
+                return ([S.NaN], [], None)
+            elif coeff.is_Number or isinstance(coeff, AccumBounds):
+                coeff *= o
+                if coeff is S.NaN:
+                    return ([S.NaN], [], None)
+            continue
+        elif isinstance(o, AccumBounds):
+            coeff = o.__mul__(coeff)
+            continue
+        elif o is S.ComplexInfinity:
+            if not coeff:
+                return ([S.NaN], [], None)
+            coeff = S.ComplexInfinity
+            continue
+        elif o is S.ImaginaryUnit:
+            neg1e += S.Half
+            continue
+        elif o.is_commutative:
+            b, e = o.as_base_exp()
+            if o.is_Pow:
+                if b.is_Number:
+                    if e.is_Rational:
+                        if e.is_Integer:
+                            coeff *= Pow(b, e)
+                            continue
+                        elif e.is_negative:
+                            seq.append(Pow(b, e))
+                            continue
+                        elif b.is_negative:
+                            neg1e += e
+                            b = -b
+                        if b is not S.One:
+                            pnum_rat.setdefault(b, []).append(e)
+                        continue
+                    elif b.is_positive or e.is_integer:
+                        num_exp.append((b, e))
+                        continue
+            c_powers.append((b, e))
+        else:
+            if o is not NC_Marker:
+                nc_seq.append(o)
+            while nc_seq:
+                o = nc_seq.pop(0)
+                if not nc_part:
+                    nc_part.append(o)
+                    continue
+                o1 = nc_part.pop()
+                b1, e1 = o1.as_base_exp()
+                b2, e2 = o.as_base_exp()
+                new_exp = e1 + e2
+                if b1 == b2 and (not new_exp.is_Add):
+                    o12 = b1 ** new_exp
+                    if o12.is_commutative:
+                        seq.append(o12)
+                        continue
+                    else:
+                        nc_seq.insert(0, o12)
+                else:
+                    nc_part.append(o1)
+                    nc_part.append(o)
+
+    def _gather(c_powers):
+        common_b = {}
+        for b, e in c_powers:
+            co = e.as_coeff_Mul()
+            common_b.setdefault(b, {}).setdefault(co[1], []).append(co[0])
+        for b, d in common_b.items():
+            for di, li in d.items():
+                d[di] = Add(*li)
+        new_c_powers = []
+        for b, e in common_b.items():
+            new_c_powers.extend([(b, c * t) for t, c in e.items()])
+        return new_c_powers
+    c_powers = _gather(c_powers)
+    num_exp = _gather(num_exp)
+    for i in range(2):
+        new_c_powers = []
+        changed = False
+        for b, e in c_powers:
+            if e.is_zero:
+                if (b.is_Add or b.is_Mul) and any((infty in b.args for infty in (S.ComplexInfinity, S.Infinity, S.NegativeInfinity))):
+                    return ([S.NaN], [], None)
+                continue
+            if e is S.One:
+                if b.is_Number:
+                    coeff *= b
+                    continue
+                p = b
+            if e is not S.One:
+                p = Pow(b, e)
+                if p.is_Pow and (not b.is_Pow):
+                    bi = b
+                    b, e = p.as_base_exp()
+                    if b != bi:
+                        changed = True
+            c_part.append(p)
+            new_c_powers.append((b, e))
+        if changed and len({b for b, e in new_c_powers}) != len(new_c_powers):
+            c_part = []
+            c_powers = _gather(new_c_powers)
+        else:
+            break
+    inv_exp_dict = {}
+    for b, e in num_exp:
+        inv_exp_dict.setdefault(e, []).append(b)
+    for e, b in inv_exp_dict.items():
+        inv_exp_dict[e] = cls(*b)
+    c_part.extend([Pow(b, e) for e, b in inv_exp_dict.items() if e])
+    comb_e = {}
+    for b, e in pnum_rat.items():
+        comb_e.setdefault(Add(*e), []).append(b)
+    del pnum_rat
+    num_rat = []
+    for e, b in comb_e.items():
+        b = cls(*b)
+        if e.q == 1:
+            coeff *= Pow(b, e)
+            continue
+        if e.p > e.q:
+            e_i, ep = divmod(e.p, e.q)
+            coeff *= Pow(b, e_i)
+            e = Rational(ep, e.q)
+        num_rat.append((b, e))
+    del comb_e
+    pnew = defaultdict(list)
+    i = 0
+    while i < len(num_rat):
+        bi, ei = num_rat[i]
+        grow = []
+        for j in range(i + 1, len(num_rat)):
+            bj, ej = num_rat[j]
+            g = bi.gcd(bj)
+            if g is not S.One:
+                e = ei + ej
+                if e.q == 1:
+                    coeff *= Pow(g, e)
+                else:
+                    if e.p > e.q:
+                        e_i, ep = divmod(e.p, e.q)
+                        coeff *= Pow(g, e_i)
+                        e = Rational(ep, e.q)
+                    grow.append((g, e))
+                num_rat[j] = (bj / g, ej)
+                bi = bi / g
+                if bi is S.One:
+                    break
+        if bi is not S.One:
+            obj = Pow(bi, ei)
+            if obj.is_Number:
+                coeff *= obj
+            else:
+                for obj in Mul.make_args(obj):
+                    if obj.is_Number:
+                        coeff *= obj
+                    else:
+                        assert obj.is_Pow
+                        bi, ei = obj.args
+                        pnew[ei].append(bi)
+        num_rat.extend(grow)
+        i += 1
+    for e, b in pnew.items():
+        pnew[e] = cls(*b)
+    if neg1e:
+        p, q = neg1e.as_numer_denom()
+        n, p = divmod(p, q)
+        if n % 2:
+            coeff = -coeff
+        if q == 2:
+            c_part.append(S.ImaginaryUnit)
+        elif p:
+            neg1e = Rational(p, q)
+            for e, b in pnew.items():
+                if e == neg1e and b.is_positive:
+                    pnew[e] = -b
+                    break
+            else:
+                c_part.append(Pow(S.NegativeOne, neg1e, evaluate=False))
+    c_part.extend([Pow(b, e) for e, b in pnew.items()])
+    if coeff is S.Infinity or coeff is S.NegativeInfinity:
+
+        def _handle_for_oo(c_part, coeff_sign):
+            new_c_part = []
+            for t in c_part:
+                if t.is_extended_positive:
+                    continue
+                if t.is_extended_negative:
+                    coeff_sign *= -1
+                    continue
+                new_c_part.append(t)
+            return (new_c_part, coeff_sign)
+        c_part, coeff_sign = _handle_for_oo(c_part, 1)
+        nc_part, coeff_sign = _handle_for_oo(nc_part, coeff_sign)
+        coeff *= coeff_sign
+    if coeff is S.ComplexInfinity:
+        c_part = [c for c in c_part if not (fuzzy_not(c.is_zero) and c.is_extended_real is not None)]
+        nc_part = [c for c in nc_part if not (fuzzy_not(c.is_zero) and c.is_extended_real is not None)]
+    elif coeff.is_zero:
+        if any((isinstance(c, MatrixExpr) for c in nc_part)):
+            return ([coeff], nc_part, order_symbols)
+        if any((c.is_finite == False for c in c_part)):
+            return ([S.NaN], [], order_symbols)
+        return ([coeff], [], order_symbols)
+    _new = []
+    for i in c_part:
+        if i.is_Number:
+            coeff *= i
+        else:
+            _new.append(i)
+    c_part = _new
+    _mulsort(c_part)
+    if coeff is not S.One:
+        c_part.insert(0, coeff)
+    if global_parameters.distribute and (not nc_part) and (len(c_part) == 2) and c_part[0].is_Number and c_part[0].is_finite and c_part[1].is_Add:
+        coeff = c_part[0]
+        c_part = [Add(*[coeff * f for f in c_part[1].args])]
+    return (c_part, nc_part, order_symbols)
+
+.sympy.core.assumptions.getit
+
+def getit(self):
+    try:
+        return self._assumptions[fact]
+    except KeyError:
+        if self._assumptions is self.default_assumptions:
+            self._assumptions = self.default_assumptions.copy()
+        return _ask(fact, self)
+
+.sympy.core.assumptions.StdFactKB.copy
+
+def copy(self):
+    return self.__class__(self)
+
+.sympy.core.assumptions.StdFactKB.__init__
+
+def __init__(self, facts=None):
+    super().__init__(_assume_rules)
+    if not facts:
+        self._generator = {}
+    elif not isinstance(facts, FactKB):
+        self._generator = facts.copy()
+    else:
+        self._generator = facts.generator
+    if facts:
+        self.deduce_all_facts(facts)
+
+.sympy.core.facts.FactKB.__init__
+
+def __init__(self, rules):
+    self.rules = rules
+
+.sympy.core.assumptions.StdFactKB.generator
+
+def generator(self):
+    return self._generator.copy()
+
+.sympy.core.facts.FactKB.deduce_all_facts
+
+def deduce_all_facts(self, facts):
+    full_implications = self.rules.full_implications
+    beta_triggers = self.rules.beta_triggers
+    beta_rules = self.rules.beta_rules
+    if isinstance(facts, dict):
+        facts = facts.items()
+    while facts:
+        beta_maytrigger = set()
+        for k, v in facts:
+            if not self._tell(k, v) or v is None:
+                continue
+            for key, value in full_implications[k, v]:
+                self._tell(key, value)
+            beta_maytrigger.update(beta_triggers[k, v])
+        facts = []
+        for bidx in beta_maytrigger:
+            bcond, bimpl = beta_rules[bidx]
+            if all((self.get(k) is v for k, v in bcond)):
+                facts.append(bimpl)
+
+.sympy.core.facts.FactKB._tell
+
+def _tell(self, k, v):
+    if k in self and self[k] is not None:
+        if self[k] == v:
+            return False
+        else:
+            raise InconsistentAssumptions(self, k, v)
+    else:
+        self[k] = v
+        return True
+
+.sympy.core.assumptions._ask
+
+def _ask(fact, obj):
+    assumptions = obj._assumptions
+    handler_map = obj._prop_handler
+    assumptions._tell(fact, None)
+    try:
+        evaluate = handler_map[fact]
+    except KeyError:
+        pass
+    else:
+        a = evaluate(obj)
+        if a is not None:
+            assumptions.deduce_all_facts(((fact, a),))
+            return a
+    prereq = list(_assume_rules.prereq[fact])
+    shuffle(prereq)
+    for pk in prereq:
+        if pk in assumptions:
+            continue
+        if pk in handler_map:
+            _ask(pk, obj)
+            ret_val = assumptions.get(fact)
+            if ret_val is not None:
+                return ret_val
+    return None
+
+.sympy.core.numbers.Float._eval_is_zero
+
+def _eval_is_zero(self):
+    return self._mpf_ == fzero
+
+.sympy.core.numbers.Integer.__mul__
+
+def __mul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p * other)
+        elif isinstance(other, Integer):
+            return Integer(self.p * other.p)
+        elif isinstance(other, Rational):
+            return Rational(self.p * other.p, other.q, igcd(self.p, other.q))
+        return Rational.__mul__(self, other)
+    return Rational.__mul__(self, other)
+
+.sympy.core.numbers.Rational.__mul__
+
+def __mul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, Integer):
+            return Rational(self.p * other.p, self.q, igcd(other.p, self.q))
+        elif isinstance(other, Rational):
+            return Rational(self.p * other.p, self.q * other.q, igcd(self.p, other.q) * igcd(self.q, other.p))
+        elif isinstance(other, Float):
+            return other * self
+        else:
+            return Number.__mul__(self, other)
+    return Number.__mul__(self, other)
+
+.sympy.core.numbers.Number._as_mpf_op
+
+def _as_mpf_op(self, prec):
+    prec = max(prec, self._prec)
+    return (self._as_mpf_val(prec), prec)
+
+.sympy.core.numbers.Integer.__add__
+
+def __add__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p + other)
+        elif isinstance(other, Integer):
+            return Integer(self.p + other.p)
+        elif isinstance(other, Rational):
+            return Rational(self.p * other.q + other.p, other.q, 1)
+        return Rational.__add__(self, other)
+    else:
+        return Add(self, other)
+
+.sympy.core.numbers.Rational.__new__
+
+def __new__(cls, p, q=None, gcd=None):
+    if q is None:
+        if isinstance(p, Rational):
+            return p
+        if isinstance(p, SYMPY_INTS):
+            pass
+        else:
+            if isinstance(p, (float, Float)):
+                return Rational(*_as_integer_ratio(p))
+            if not isinstance(p, str):
+                try:
+                    p = sympify(p)
+                except (SympifyError, SyntaxError):
+                    pass
+            else:
+                if p.count('/') > 1:
+                    raise TypeError('invalid input: %s' % p)
+                p = p.replace(' ', '')
+                pq = p.rsplit('/', 1)
+                if len(pq) == 2:
+                    p, q = pq
+                    fp = fractions.Fraction(p)
+                    fq = fractions.Fraction(q)
+                    p = fp / fq
+                try:
+                    p = fractions.Fraction(p)
+                except ValueError:
+                    pass
+                else:
+                    return Rational(p.numerator, p.denominator, 1)
+            if not isinstance(p, Rational):
+                raise TypeError('invalid input: %s' % p)
+        q = 1
+        gcd = 1
+    else:
+        p = Rational(p)
+        q = Rational(q)
+    if isinstance(q, Rational):
+        p *= q.q
+        q = q.p
+    if isinstance(p, Rational):
+        q *= p.q
+        p = p.p
+    if q == 0:
+        if p == 0:
+            if _errdict['divide']:
+                raise ValueError('Indeterminate 0/0')
+            else:
+                return S.NaN
+        return S.ComplexInfinity
+    if q < 0:
+        q = -q
+        p = -p
+    if not gcd:
+        gcd = igcd(abs(p), q)
+    if gcd > 1:
+        p //= gcd
+        q //= gcd
+    if q == 1:
+        return Integer(p)
+    if p == 1 and q == 2:
+        return S.Half
+    obj = Expr.__new__(cls)
+    obj.p = p
+    obj.q = q
+    return obj
+
+.sympy.core.numbers.Integer.__new__
+
+def __new__(cls, i):
+    if isinstance(i, str):
+        i = i.replace(' ', '')
+    try:
+        ival = int(i)
+    except TypeError:
+        raise TypeError('Argument of Integer should be of numeric type, got %s.' % i)
+    if ival == 1:
+        return S.One
+    if ival == -1:
+        return S.NegativeOne
+    if ival == 0:
+        return S.Zero
+    obj = Expr.__new__(cls)
+    obj.p = ival
+    return obj
+
+.sympy.core.mul.Mul._gather
+
+def _gather(c_powers):
+    common_b = {}
+    for b, e in c_powers:
+        co = e.as_coeff_Mul()
+        common_b.setdefault(b, {}).setdefault(co[1], []).append(co[0])
+    for b, d in common_b.items():
+        for di, li in d.items():
+            d[di] = Add(*li)
+    new_c_powers = []
+    for b, e in common_b.items():
+        new_c_powers.extend([(b, c * t) for t, c in e.items()])
+    return new_c_powers
+
+.sympy.core.numbers.Rational.as_numer_denom
+
+def as_numer_denom(self):
+    return (Integer(self.p), Integer(self.q))
+
+.sympy.core.numbers.Integer.__divmod__
+
+def __divmod__(self, other):
+    from .containers import Tuple
+    if isinstance(other, Integer) and global_parameters.evaluate:
+        return Tuple(*divmod(self.p, other.p))
+    else:
+        return Number.__divmod__(self, other)
+
+.sympy.core.containers.Tuple.__new__
+
+def __new__(cls, *args, **kwargs):
+    if kwargs.get('sympify', True):
+        args = (sympify(arg) for arg in args)
+    obj = Basic.__new__(cls, *args)
+    return obj
+
+.sympy.core.containers.Tuple.__iter__
+
+def __iter__(self):
+    return iter(self.args)
+
+.sympy.core.numbers.Integer.__mod__
+
+def __mod__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p % other)
+        elif isinstance(other, Integer):
+            return Integer(self.p % other.p)
+        return Rational.__mod__(self, other)
+    return Rational.__mod__(self, other)
+
+.sympy.core.numbers.Zero.__bool__
+
+def __bool__(self):
+    return False
+
+.sympy.core.numbers.Integer.__eq__
+
+def __eq__(self, other):
+    if isinstance(other, int):
+        return self.p == other
+    elif isinstance(other, Integer):
+        return self.p == other.p
+    return Rational.__eq__(self, other)
+
+.sympy.core.mul._mulsort
+
+def _mulsort(args):
+    args.sort(key=_args_sortkey)
+
+.sympy.core.basic.Basic._exec_constructor_postprocessors
+
+def _exec_constructor_postprocessors(cls, obj):
+    clsname = obj.__class__.__name__
+    postprocessors = defaultdict(list)
+    for i in obj.args:
+        try:
+            postprocessor_mappings = (Basic._constructor_postprocessor_mapping[cls].items() for cls in type(i).mro() if cls in Basic._constructor_postprocessor_mapping)
+            for k, v in chain.from_iterable(postprocessor_mappings):
+                postprocessors[k].extend([j for j in v if j not in postprocessors[k]])
+        except TypeError:
+            pass
+    for f in postprocessors.get(clsname, []):
+        obj = f(obj)
+    return obj
+
+.sympy.core.numbers.Float.__add__
+
+def __add__(self, other):
+    if isinstance(other, Number) and global_parameters.evaluate:
+        rhs, prec = other._as_mpf_op(self._prec)
+        return Float._new(mlib.mpf_add(self._mpf_, rhs, prec, rnd), prec)
+    return Number.__add__(self, other)
+
+.sympy.core.numbers.Number.__add__
+
+def __add__(self, other):
+    if isinstance(other, Number) and global_parameters.evaluate:
+        if other is S.NaN:
+            return S.NaN
+        elif other is S.Infinity:
+            return S.Infinity
+        elif other is S.NegativeInfinity:
+            return S.NegativeInfinity
+    return AtomicExpr.__add__(self, other)
+
+.sympy.core.expr.Expr.__add__
+
+def __add__(self, other):
+    return Add(self, other)
+
+.sympy.core.add.Add.flatten
+
+def flatten(cls, seq):
+    from sympy.calculus.util import AccumBounds
+    from sympy.matrices.expressions import MatrixExpr
+    from sympy.tensor.tensor import TensExpr
+    rv = None
+    if len(seq) == 2:
+        a, b = seq
+        if b.is_Rational:
+            a, b = (b, a)
+        if a.is_Rational:
+            if b.is_Mul:
+                rv = ([a, b], [], None)
+        if rv:
+            if all((s.is_commutative for s in rv[0])):
+                return rv
+            return ([], rv[0], None)
+    terms = {}
+    coeff = S.Zero
+    order_factors = []
+    extra = []
+    for o in seq:
+        if o.is_Order:
+            if o.expr.is_zero:
+                continue
+            for o1 in order_factors:
+                if o1.contains(o):
+                    o = None
+                    break
+            if o is None:
+                continue
+            order_factors = [o] + [o1 for o1 in order_factors if not o.contains(o1)]
+            continue
+        elif o.is_Number:
+            if (o is S.NaN or (coeff is S.ComplexInfinity and o.is_finite is False)) and (not extra):
+                return ([S.NaN], [], None)
+            if coeff.is_Number or isinstance(coeff, AccumBounds):
+                coeff += o
+                if coeff is S.NaN and (not extra):
+                    return ([S.NaN], [], None)
+            continue
+        elif isinstance(o, AccumBounds):
+            coeff = o.__add__(coeff)
+            continue
+        elif isinstance(o, MatrixExpr):
+            extra.append(o)
+            continue
+        elif isinstance(o, TensExpr):
+            coeff = o.__add__(coeff) if coeff else o
+            continue
+        elif o is S.ComplexInfinity:
+            if coeff.is_finite is False and (not extra):
+                return ([S.NaN], [], None)
+            coeff = S.ComplexInfinity
+            continue
+        elif o.is_Add:
+            seq.extend(o.args)
+            continue
+        elif o.is_Mul:
+            c, s = o.as_coeff_Mul()
+        elif o.is_Pow:
+            b, e = o.as_base_exp()
+            if b.is_Number and (e.is_Integer or (e.is_Rational and e.is_negative)):
+                seq.append(b ** e)
+                continue
+            c, s = (S.One, o)
+        else:
+            c = S.One
+            s = o
+        if s in terms:
+            terms[s] += c
+            if terms[s] is S.NaN and (not extra):
+                return ([S.NaN], [], None)
+        else:
+            terms[s] = c
+    newseq = []
+    noncommutative = False
+    for s, c in terms.items():
+        if c.is_zero:
+            continue
+        elif c is S.One:
+            newseq.append(s)
+        elif s.is_Mul:
+            cs = s._new_rawargs(*(c,) + s.args)
+            newseq.append(cs)
+        elif s.is_Add:
+            newseq.append(Mul(c, s, evaluate=False))
+        else:
+            newseq.append(Mul(c, s))
+        noncommutative = noncommutative or not s.is_commutative
+    if coeff is S.Infinity:
+        newseq = [f for f in newseq if not (f.is_extended_nonnegative or f.is_real)]
+    elif coeff is S.NegativeInfinity:
+        newseq = [f for f in newseq if not (f.is_extended_nonpositive or f.is_real)]
+    if coeff is S.ComplexInfinity:
+        newseq = [c for c in newseq if not (c.is_finite and c.is_extended_real is not None)]
+    if order_factors:
+        newseq2 = []
+        for t in newseq:
+            for o in order_factors:
+                if o.contains(t):
+                    t = None
+                    break
+            if t is not None:
+                newseq2.append(t)
+        newseq = newseq2 + order_factors
+        for o in order_factors:
+            if o.contains(coeff):
+                coeff = S.Zero
+                break
+    _addsort(newseq)
+    if coeff is not S.Zero:
+        newseq.insert(0, coeff)
+    if extra:
+        newseq += extra
+        noncommutative = True
+    if noncommutative:
+        return ([], newseq, None)
+    else:
+        return (newseq, [], None)
+
+.sympy.core.numbers.Rational.__add__
+
+def __add__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, Integer):
+            return Rational(self.p + self.q * other.p, self.q, 1)
+        elif isinstance(other, Rational):
+            return Rational(self.p * other.q + self.q * other.p, self.q * other.q)
+        elif isinstance(other, Float):
+            return other + self
+        else:
+            return Number.__add__(self, other)
+    return Number.__add__(self, other)
+
+.sympy.core.expr.Expr.__hash__
+
+def __hash__(self) -> int:
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+.sympy.core.add._addsort
+
+def _addsort(args):
+    args.sort(key=_args_sortkey)
+
+.sympy.core.add.Add.as_real_imag
+
+def as_real_imag(self, deep=True, **hints):
+    sargs = self.args
+    re_part, im_part = ([], [])
+    for term in sargs:
+        re, im = term.as_real_imag(deep=deep)
+        re_part.append(re)
+        im_part.append(im)
+    return (self.func(*re_part), self.func(*im_part))
+
+.sympy.core.expr.Expr.as_real_imag
+
+def as_real_imag(self, deep=True, **hints):
+    from sympy import im, re
+    if hints.get('ignore') == self:
+        return None
+    else:
+        return (re(self), im(self))
+
+.sympy.core.numbers.Float.__eq__
+
+def __eq__(self, other):
+    from sympy.logic.boolalg import Boolean
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if isinstance(other, Boolean):
+        return False
+    if other.is_NumberSymbol:
+        if other.is_irrational:
+            return False
+        return other.__eq__(self)
+    if other.is_Float:
+        return self._mpf_ == other._mpf_
+    if other.is_Rational:
+        return other.__eq__(self)
+    if other.is_Number:
+        ompf = other._as_mpf_val(self._prec)
+        return bool(mlib.mpf_eq(self._mpf_, ompf))
+    if not self:
+        return not other
+    return False
+
+.sympy.core.sympify.SympifyError.__init__
+
+def __init__(self, expr, base_exc=None):
+    self.expr = expr
+    self.base_exc = base_exc
+
+.sympy.core.function.Function.__new__
+
+def __new__(cls, *args, **options):
+    if cls is Function:
+        return UndefinedFunction(*args, **options)
+    n = len(args)
+    if n not in cls.nargs:
+        temp = '%(name)s takes %(qual)s %(args)s argument%(plural)s (%(given)s given)'
+        raise TypeError(temp % {'name': cls, 'qual': 'exactly' if len(cls.nargs) == 1 else 'at least', 'args': min(cls.nargs), 'plural': 's' * (min(cls.nargs) != 1), 'given': n})
+    evaluate = options.get('evaluate', global_parameters.evaluate)
+    result = super().__new__(cls, *args, **options)
+    if evaluate and isinstance(result, cls) and result.args:
+        pr2 = min((cls._should_evalf(a) for a in result.args))
+        if pr2 > 0:
+            pr = max((cls._should_evalf(a) for a in result.args))
+            result = result.evalf(mlib.libmpf.prec_to_dps(pr))
+    return result
+
+.sympy.core.function.FunctionClass.nargs
+
+def nargs(self):
+    from sympy.sets.sets import FiniteSet
+    return FiniteSet(*self._nargs) if self._nargs else S.Naturals0
+
+.sympy.sets.sets.FiniteSet.__new__
+
+def __new__(cls, *args, **kwargs):
+    evaluate = kwargs.get('evaluate', global_parameters.evaluate)
+    if evaluate:
+        args = list(map(sympify, args))
+        if len(args) == 0:
+            return S.EmptySet
+    else:
+        args = list(map(sympify, args))
+    dargs = {}
+    for i in reversed(list(ordered(args))):
+        if i.is_Symbol:
+            dargs[i] = i
+        else:
+            try:
+                dargs[i.as_dummy()] = i
+            except TypeError:
+                dargs[i] = i
+    _args_set = set(dargs.values())
+    args = list(ordered(_args_set, Set._infimum_key))
+    obj = Basic.__new__(cls, *args)
+    obj._args_set = _args_set
+    return obj
+
+.sympy.core.compatibility.ordered
+
+def ordered(seq, keys=None, default=True, warn=False):
+    d = defaultdict(list)
+    if keys:
+        if not isinstance(keys, (list, tuple)):
+            keys = [keys]
+        keys = list(keys)
+        f = keys.pop(0)
+        for a in seq:
+            d[f(a)].append(a)
+    else:
+        if not default:
+            raise ValueError('if default=False then keys must be provided')
+        d[None].extend(seq)
+    for k in sorted(d.keys()):
+        if len(d[k]) > 1:
+            if keys:
+                d[k] = ordered(d[k], keys, default, warn)
+            elif default:
+                d[k] = ordered(d[k], (_nodes, default_sort_key), default=False, warn=warn)
+            elif warn:
+                from sympy.utilities.iterables import uniq
+                u = list(uniq(d[k]))
+                if len(u) > 1:
+                    raise ValueError('not enough keys to break ties: %s' % u)
+        yield from d[k]
+        d.pop(k)
+
+.sympy.core.basic.Basic.as_dummy
+
+def as_dummy(self):
+    from sympy.core.symbol import Dummy, Symbol
+
+    def can(x):
+        free = x.free_symbols
+        bound = set(x.bound_symbols)
+        d = {i: Dummy() for i in bound & free}
+        x = x.subs(d)
+        x = x.xreplace(x.canonical_variables)
+        return x.xreplace({v: k for k, v in d.items()})
+    if not self.has(Symbol):
+        return self
+    return self.replace(lambda x: hasattr(x, 'bound_symbols'), lambda x: can(x), simultaneous=False)
+
+.sympy.core.basic.Basic.has
+
+def has(self, *patterns):
+    return any((self._has(pattern) for pattern in patterns))
+
+.sympy.core.basic.Basic._has
+
+def _has(self, pattern):
+    from sympy.core.function import UndefinedFunction, Function
+    if isinstance(pattern, UndefinedFunction):
+        return any((f.func == pattern or f == pattern for f in self.atoms(Function, UndefinedFunction)))
+    if isinstance(pattern, BasicMeta):
+        subtrees = preorder_traversal(self)
+        return any((isinstance(arg, pattern) for arg in subtrees))
+    pattern = _sympify(pattern)
+    _has_matcher = getattr(pattern, '_has_matcher', None)
+    if _has_matcher is not None:
+        match = _has_matcher()
+        return any((match(arg) for arg in preorder_traversal(self)))
+    else:
+        return any((arg == pattern for arg in preorder_traversal(self)))
+
+.sympy.core.basic.preorder_traversal.__init__
+
+def __init__(self, node, keys=None):
+    self._skip_flag = False
+    self._pt = self._preorder_traversal(node, keys)
+
+.sympy.core.basic.preorder_traversal.__iter__
+
+def __iter__(self):
+    return self
+
+.sympy.core.basic.preorder_traversal.__next__
+
+def __next__(self):
+    return next(self._pt)
+
+.sympy.core.basic.preorder_traversal._preorder_traversal
+
+def _preorder_traversal(self, node, keys):
+    yield node
+    if self._skip_flag:
+        self._skip_flag = False
+        return
+    if isinstance(node, Basic):
+        if not keys and hasattr(node, '_argset'):
+            args = node._argset
+        else:
+            args = node.args
+        if keys:
+            if keys != True:
+                args = ordered(args, keys, default=False)
+            else:
+                args = ordered(args)
+        for arg in args:
+            yield from self._preorder_traversal(arg, keys)
+    elif iterable(node):
+        for item in node:
+            yield from self._preorder_traversal(item, keys)
+
+.sympy.core.numbers.Integer.__hash__
+
+def __hash__(self):
+    return hash(self.p)
+
+.sympy.sets.sets.Set._infimum_key
+
+def _infimum_key(expr):
+    try:
+        infimum = expr.inf
+        assert infimum.is_comparable
+        infimum = infimum.evalf()
+    except (NotImplementedError, AttributeError, AssertionError, ValueError):
+        infimum = S.Infinity
+    return infimum
+
+.sympy.core.numbers.Infinity.__hash__
+
+def __hash__(self):
+    return super().__hash__()
+
+.sympy.core.numbers.Number.__hash__
+
+def __hash__(self):
+    return super().__hash__()
+
+.sympy.sets.sets.Set.__contains__
+
+def __contains__(self, other):
+    other = _sympify(other)
+    c = self._contains(other)
+    b = tfn[c]
+    if b is None:
+        raise TypeError('did not evaluate to a bool: %r' % c)
+    return b
+
+.sympy.sets.sets.FiniteSet._contains
+
+def _contains(self, other):
+    if other in self._args_set:
+        return True
+    else:
+        return fuzzy_or((fuzzy_bool(Eq(e, other, evaluate=True)) for e in self.args))
+
+.sympy.logic.boolalg.BooleanTrue.__bool__
+
+def __bool__(self):
+    return True
+
+.sympy.core.function.Application.__new__
+
+def __new__(cls, *args, **options):
+    from sympy.sets.fancysets import Naturals0
+    from sympy.sets.sets import FiniteSet
+    args = list(map(sympify, args))
+    evaluate = options.pop('evaluate', global_parameters.evaluate)
+    options.pop('nargs', None)
+    if options:
+        raise ValueError('Unknown options: %s' % options)
+    if evaluate:
+        evaluated = cls.eval(*args)
+        if evaluated is not None:
+            return evaluated
+    obj = super().__new__(cls, *args, **options)
+    sentinel = object()
+    objnargs = getattr(obj, 'nargs', sentinel)
+    if objnargs is not sentinel:
+        if is_sequence(objnargs):
+            nargs = tuple(ordered(set(objnargs)))
+        elif objnargs is not None:
+            nargs = (as_int(objnargs),)
+        else:
+            nargs = None
+    else:
+        nargs = obj._nargs
+    obj.nargs = FiniteSet(*nargs) if nargs else Naturals0()
+    return obj
+
+.sympy.functions.elementary.complexes.re.eval
+
+def eval(cls, arg):
+    if arg is S.NaN:
+        return S.NaN
+    elif arg is S.ComplexInfinity:
+        return S.NaN
+    elif arg.is_extended_real:
+        return arg
+    elif arg.is_imaginary or (S.ImaginaryUnit * arg).is_extended_real:
+        return S.Zero
+    elif arg.is_Matrix:
+        return arg.as_real_imag()[0]
+    elif arg.is_Function and isinstance(arg, conjugate):
+        return re(arg.args[0])
+    else:
+        included, reverted, excluded = ([], [], [])
+        args = Add.make_args(arg)
+        for term in args:
+            coeff = term.as_coefficient(S.ImaginaryUnit)
+            if coeff is not None:
+                if not coeff.is_extended_real:
+                    reverted.append(coeff)
+            elif not term.has(S.ImaginaryUnit) and term.is_extended_real:
+                excluded.append(term)
+            else:
+                real_imag = term.as_real_imag(ignore=arg)
+                if real_imag:
+                    excluded.append(real_imag[0])
+                else:
+                    included.append(term)
+        if len(args) != len(included):
+            a, b, c = (Add(*xs) for xs in [included, reverted, excluded])
+            return cls(a) - im(b) + c
+
+.sympy.functions.elementary.complexes.im.eval
+
+def eval(cls, arg):
+    if arg is S.NaN:
+        return S.NaN
+    elif arg is S.ComplexInfinity:
+        return S.NaN
+    elif arg.is_extended_real:
+        return S.Zero
+    elif arg.is_imaginary or (S.ImaginaryUnit * arg).is_extended_real:
+        return -S.ImaginaryUnit * arg
+    elif arg.is_Matrix:
+        return arg.as_real_imag()[1]
+    elif arg.is_Function and isinstance(arg, conjugate):
+        return -im(arg.args[0])
+    else:
+        included, reverted, excluded = ([], [], [])
+        args = Add.make_args(arg)
+        for term in args:
+            coeff = term.as_coefficient(S.ImaginaryUnit)
+            if coeff is not None:
+                if not coeff.is_extended_real:
+                    reverted.append(coeff)
+                else:
+                    excluded.append(coeff)
+            elif term.has(S.ImaginaryUnit) or not term.is_extended_real:
+                real_imag = term.as_real_imag(ignore=arg)
+                if real_imag:
+                    excluded.append(real_imag[1])
+                else:
+                    included.append(term)
+        if len(args) != len(included):
+            a, b, c = (Add(*xs) for xs in [included, reverted, excluded])
+            return cls(a) + re(b) + c
+
+.sympy.core.mul.Mul.as_real_imag
+
+def as_real_imag(self, deep=True, **hints):
+    from sympy import Abs, expand_mul, im, re
+    other = []
+    coeffr = []
+    coeffi = []
+    addterms = S.One
+    for a in self.args:
+        r, i = a.as_real_imag()
+        if i.is_zero:
+            coeffr.append(r)
+        elif r.is_zero:
+            coeffi.append(i * S.ImaginaryUnit)
+        elif a.is_commutative:
+            for i, x in enumerate(other):
+                if x == a.conjugate():
+                    coeffr.append(Abs(x) ** 2)
+                    del other[i]
+                    break
+            else:
+                if a.is_Add:
+                    addterms *= a
+                else:
+                    other.append(a)
+        else:
+            other.append(a)
+    m = self.func(*other)
+    if hints.get('ignore') == m:
+        return
+    if len(coeffi) % 2:
+        imco = im(coeffi.pop(0))
+    else:
+        imco = S.Zero
+    reco = self.func(*coeffr + coeffi)
+    r, i = (reco * re(m), reco * im(m))
+    if addterms == 1:
+        if m == 1:
+            if imco.is_zero:
+                return (reco, S.Zero)
+            else:
+                return (S.Zero, reco * imco)
+        if imco is S.Zero:
+            return (r, i)
+        return (-imco * i, imco * r)
+    addre, addim = expand_mul(addterms, deep=False).as_real_imag()
+    if imco is S.Zero:
+        return (r * addre - i * addim, i * addre + r * addim)
+    else:
+        r, i = (-imco * i, imco * r)
+        return (r * addre - i * addim, r * addim + i * addre)
+
+.sympy.core.expr.Expr.__eq__
+
+def __eq__(self, other):
+    try:
+        other = _sympify(other)
+        if not isinstance(other, Expr):
+            return False
+    except (SympifyError, SyntaxError):
+        return False
+    if not (self.is_Number and other.is_Number) and type(self) != type(other):
+        return False
+    a, b = (self._hashable_content(), other._hashable_content())
+    if a != b:
+        return False
+    for a, b in zip(a, b):
+        if not isinstance(a, Expr):
+            continue
+        if a.is_Number and type(a) != type(b):
+            return False
+    return True
+
+.sympy.core.expr.Expr.__neg__
+
+def __neg__(self):
+    c = self.is_commutative
+    return Mul._from_args((S.NegativeOne, self), c)
+
+.sympy.core.mul.Mul._eval_is_zero
+
+def _eval_is_zero(self):
+    zero = infinite = False
+    for a in self.args:
+        z = a.is_zero
+        if z:
+            if infinite:
+                return
+            zero = True
+        else:
+            if not a.is_finite:
+                if zero:
+                    return
+                infinite = True
+            if zero is False and z is None:
+                zero = None
+    return zero
+
+.sympy.core.numbers.igcd
+
+def igcd(*args):
+    if len(args) < 2:
+        raise TypeError('igcd() takes at least 2 arguments (%s given)' % len(args))
+    args_temp = [abs(as_int(i)) for i in args]
+    if 1 in args_temp:
+        return 1
+    a = args_temp.pop()
+    if HAS_GMPY:
+        for b in args_temp:
+            a = gmpy.gcd(a, b) if b else a
+        return as_int(a)
+    for b in args_temp:
+        a = math.gcd(a, b)
+    return a
+
+.sympy.core.compatibility.as_int
+
+def as_int(n, strict=True):
+    if strict:
+        try:
+            if type(n) is bool:
+                raise TypeError
+            return operator.index(n)
+        except TypeError:
+            raise ValueError('%s is not an integer' % (n,))
+    else:
+        try:
+            result = int(n)
+        except TypeError:
+            raise ValueError('%s is not an integer' % (n,))
+        if n != result:
+            raise ValueError('%s is not an integer' % (n,))
+        return result
+
+.sympy.core.numbers.Integer.as_numer_denom
+
+def as_numer_denom(self):
+    return (self, S.One)
+
+.sympy.core.numbers.NegativeOne.__neg__
+
+def __neg__():
+    return S.One
+
+.sympy.core.numbers.Rational.__eq__
+
+def __eq__(self, other):
+    from sympy.core.power import integer_log
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if not isinstance(other, Number):
+        return False
+    if not self:
+        return not other
+    if other.is_NumberSymbol:
+        if other.is_irrational:
+            return False
+        return other.__eq__(self)
+    if other.is_Rational:
+        return self.p == other.p and self.q == other.q
+    if other.is_Float:
+        if self.q & self.q - 1:
+            return False
+        s, m, t = other._mpf_[:3]
+        if s:
+            m = -m
+        if not t:
+            if not self.is_Integer or self.is_even:
+                return False
+            return m == self.p
+        if t > 0:
+            if not self.is_Integer:
+                return False
+            return self.p and (not self.p % m) and (integer_log(self.p // m, 2) == (t, True))
+        if self.is_Integer:
+            return False
+        return m == self.p and integer_log(self.q, 2) == (-t, True)
+    return False
+
+.sympy.core.evalf.evalf_mul
+
+def evalf_mul(v, prec, options):
+    res = pure_complex(v)
+    if res:
+        _, h = res
+        im, _, im_acc, _ = evalf(h, prec, options)
+        return (None, im, None, im_acc)
+    args = list(v.args)
+    special = []
+    from sympy.core.numbers import Float
+    for arg in args:
+        arg = evalf(arg, prec, options)
+        if arg[0] is None:
+            continue
+        arg = Float._new(arg[0], 1)
+        if arg is S.NaN or arg.is_infinite:
+            special.append(arg)
+    if special:
+        from sympy.core.mul import Mul
+        special = Mul(*special)
+        return evalf(special, prec + 4, {})
+    acc = prec
+    working_prec = prec + len(args) + 5
+    start = man, exp, bc = (MPZ(1), 0, 1)
+    last = len(args)
+    direction = 0
+    args.append(S.One)
+    complex_factors = []
+    for i, arg in enumerate(args):
+        if i != last and pure_complex(arg):
+            args[-1] = (args[-1] * arg).expand()
+            continue
+        elif i == last and arg is S.One:
+            continue
+        re, im, re_acc, im_acc = evalf(arg, working_prec, options)
+        if re and im:
+            complex_factors.append((re, im, re_acc, im_acc))
+            continue
+        elif re:
+            (s, m, e, b), w_acc = (re, re_acc)
+        elif im:
+            (s, m, e, b), w_acc = (im, im_acc)
+            direction += 1
+        else:
+            return (None, None, None, None)
+        direction += 2 * s
+        man *= m
+        exp += e
+        bc += b
+        if bc > 3 * working_prec:
+            man >>= working_prec
+            exp += working_prec
+        acc = min(acc, w_acc)
+    sign = (direction & 2) >> 1
+    if not complex_factors:
+        v = normalize(sign, man, exp, bitcount(man), prec, rnd)
+        if direction & 1:
+            return (None, v, None, acc)
+        else:
+            return (v, None, acc, None)
+    else:
+        if (man, exp, bc) != start:
+            re, im = ((sign, man, exp, bitcount(man)), (0, MPZ(0), 0, 0))
+            i0 = 0
+        else:
+            wre, wim, wre_acc, wim_acc = complex_factors[0]
+            acc = min(acc, complex_accuracy((wre, wim, wre_acc, wim_acc)))
+            re = wre
+            im = wim
+            i0 = 1
+        for wre, wim, wre_acc, wim_acc in complex_factors[i0:]:
+            acc = min(acc, complex_accuracy((wre, wim, wre_acc, wim_acc)))
+            use_prec = working_prec
+            A = mpf_mul(re, wre, use_prec)
+            B = mpf_mul(mpf_neg(im), wim, use_prec)
+            C = mpf_mul(re, wim, use_prec)
+            D = mpf_mul(im, wre, use_prec)
+            re = mpf_add(A, B, use_prec)
+            im = mpf_add(C, D, use_prec)
+        if options.get('verbose'):
+            print('MUL: wanted', prec, 'accurate bits, got', acc)
+        if direction & 1:
+            re, im = (mpf_neg(im), re)
+        return (re, im, acc, acc)
+
+.sympy.core.expr.Expr.is_number
+
+def is_number(self):
+    return all((obj.is_number for obj in self.args))
+
+.sympy.polys.polyoptions.Option.default
+
+def default(cls):
+    return None
+
+.sympy.polys.domains.integerring.IntegerRing.from_sympy
+
+def from_sympy(self, a):
+    if a.is_Integer:
+        return MPZ(a.p)
+    elif a.is_Float and int(a) == a:
+        return MPZ(int(a))
+    else:
+        raise CoercionFailed('expected an integer, got %s' % a)
+
+.sympy.core.expr.Expr.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False):
+    return (S.One, self)
+
+.sympy.core.numbers.Rational.as_coeff_Add
+
+def as_coeff_Add(self, rational=False):
+    return (self, S.Zero)
+
+.sympy.polys.domains.domain.Domain.convert_from
+
+def convert_from(self, element, base):
+    if base.alias is not None:
+        method = 'from_' + base.alias
+    else:
+        method = 'from_' + base.__class__.__name__
+    _convert = getattr(self, method)
+    if _convert is not None:
+        result = _convert(element, base)
+        if result is not None:
+            return result
+    raise CoercionFailed("can't convert %s of type %s from %s to %s" % (element, type(element), base, self))
+
+.sympy.polys.domains.rationalfield.RationalField.from_ZZ
+
+def from_ZZ(K1, a, K0):
+    return MPQ(a)
+
+.sympy.core.power.Pow._eval_is_algebraic
+
+def _eval_is_algebraic(self):
+
+    def _is_one(expr):
+        try:
+            return (expr - 1).is_zero
+        except ValueError:
+            return False
+    if self.base.is_zero or _is_one(self.base):
+        return True
+    elif self.base is S.Exp1:
+        s = self.func(*self.args)
+        if s.func == self.func:
+            if self.exp.is_nonzero:
+                if self.exp.is_algebraic:
+                    return False
+                elif (self.exp / S.Pi).is_rational:
+                    return False
+                elif (self.exp / (S.ImaginaryUnit * S.Pi)).is_rational:
+                    return True
+        else:
+            return s.is_algebraic
+    elif self.exp.is_rational:
+        if self.base.is_algebraic is False:
+            return self.exp.is_zero
+        if self.base.is_zero is False:
+            if self.exp.is_nonzero:
+                return self.base.is_algebraic
+            elif self.base.is_algebraic:
+                return True
+        if self.exp.is_positive:
+            return self.base.is_algebraic
+    elif self.base.is_algebraic and self.exp.is_algebraic:
+        if fuzzy_not(self.base.is_zero) and fuzzy_not(_is_one(self.base)) or self.base.is_integer is False or self.base.is_irrational:
+            return self.exp.is_rational
+
+.sympy.core.power.Pow.base
+
+def base(self):
+    return self._args[0]
+
+.sympy.core.numbers.Rational._eval_is_zero
+
+def _eval_is_zero(self):
+    return self.p == 0
+
+.sympy.core.power.Pow._is_one
+
+def _is_one(expr):
+    try:
+        return (expr - 1).is_zero
+    except ValueError:
+        return False
+
+.sympy.core.numbers.Integer.__sub__
+
+def __sub__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p - other)
+        elif isinstance(other, Integer):
+            return Integer(self.p - other.p)
+        elif isinstance(other, Rational):
+            return Rational(self.p * other.q - other.p, other.q, 1)
+        return Rational.__sub__(self, other)
+    return Rational.__sub__(self, other)
+
+.sympy.core.power.Pow.exp
+
+def exp(self):
+    return self._args[1]
+
+
+[/PYTHON]
+What will be the output of `_construct_simple`, given the following input:
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "coeffs": null,
+        "opt": {}
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]

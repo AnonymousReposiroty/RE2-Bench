@@ -1,0 +1,530 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+</think>
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from __future__ import annotations
+import datetime
+from typing import (
+    TYPE_CHECKING,
+    Iterable,
+    TypeVar,
+    overload,
+    Any,
+    Callable,
+)
+from multipledispatch.variadic import variadic
+import polars.datatypes as datatypes
+import polars.series as series
+from polars.series.utils import is_series
+from polars.utils._wrap import wrap_expr
+from polars.utils.convert import (
+    _timedelta_to_pl_duration,
+    _timedelta_to_pl_timedelta,
+    parse_as_duration_string,
+    timedelta_to_pl_timedelta,
+)
+
+from . import col
+
+if TYPE_CHECKING:
+    from polars.polars import PyExpr as PyExpr
+
+    from .names import PolarsDataType, PolarsTemporalType
+
+T = TypeVar("T")
+PolarsType = TypeVar("PolarsType")
+
+class Expr:
+    def __init__(self, pyexpr: PyExpr) -> None:
+        self._pyexpr = pyexpr
+
+    def __getattr__(self, item: str) -> Expr:
+        new_pyexpr = self._pyexpr._from_attr(item)
+        return wrap_expr(new_pyexpr)
+
+    def __getstate__(self) -> PyExpr:
+        return self._pyexpr
+
+    def __setstate__(self, state: PyExpr) -> None:
+        self._pyexpr = state
+
+    def reverse(self) -> Expr:
+        new = self._pyexpr._reverse()
+        return wrap_expr(new)
+
+    def __invert__(self) -> Expr:
+        new = self._pyexpr._invert()
+        return wrap_expr(new)
+
+    def __pos__(self) -> Expr:
+        new = self._pyexpr._pos()
+        return wrap_expr(new)
+
+    def __neg__(self) -> Expr:
+        new = self._pyexpr._neg()
+        return wrap_expr(new)
+
+    def __abs__(self) -> Expr:
+        new = self._pyexpr._abs()
+        return wrap_expr(new)
+
+    def __add__(self, other: Any) -> Expr:
+        if is_series(other):
+            return self + other.to_frame().select_at_idx(0).expr.squeeze()
+        new = self._pyexpr._add(other)
+        return wrap_expr(new)
+
+    @overload
+    def __radd__(self, other: Expr) -> Expr:
+        ...
+
+    @overload
+    def __radd__(self, other: Any) -> Expr:
+        ...
+
+    def __radd__(self, other: Any) -> Expr:
+        if is_series(other):
+            return self.__add__(other)
+        new = self._pyexpr._add(other)
+        return wrap_expr(new)
+
+    def __iadd__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._add(other))
+
+    def __sub__(self, other: Any) -> Expr:
+        new = self._pyexpr._sub(other)
+        return wrap_expr(new)
+
+    def __rsub__(self, other: Any) -> Expr:
+        new = self._pyexpr._sub(other)
+        return wrap_expr(new)
+
+    def __isub__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._sub(other))
+
+    def __mul__(self, other: Any) -> Expr:
+        new = self._pyexpr._mul(other)
+        return wrap_expr(new)
+
+    def __rmul__(self, other: Any) -> Expr:
+        new = self._pyexpr._mul(other)
+        return wrap_expr(new)
+
+    def __imul__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._mul(other))
+
+    def __floordiv__(self, other: Any) -> Expr:
+        new = self._pyexpr._floordiv(other)
+        return wrap_expr(new)
+
+    def __rfloordiv__(self, other: Any) -> Expr:
+        new = self._pyexpr._floordiv(other)
+        return wrap_expr(new)
+
+    def __ifloordiv__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._floordiv(other))
+
+    def __truediv__(self, other: Any) -> Expr:
+        new = self._pyexpr._truediv(other)
+        return wrap_expr(new)
+
+    def __rtruediv__(self, other: Any) -> Expr:
+        new = self._pyexpr._truediv(other)
+        return wrap_expr(new)
+
+    def __itruediv__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._truediv(other))
+
+    def __pow__(self, power: Any) -> Expr:
+        new = self._pyexpr._pow(power)
+        return wrap_expr(new)
+
+    def __rpow__(self, base: Any) -> Expr:
+        new = self._pyexpr._pow(base)
+        return wrap_expr(new)
+
+    def __ipow__(self, power: Any) -> Expr:
+        return wrap_expr(self._pyexpr._pow(power))
+
+    def __mod__(self, modulus: Any) -> Expr:
+        new = self._pyexpr._mod(modulus)
+        return wrap_expr(new)
+
+    def __rmod__(self, other: Any) -> Expr:
+        new = self._pyexpr._mod(other)
+        return wrap_expr(new)
+
+    def __imod__(self, modulus: Any) -> Expr:
+        return wrap_expr(self._pyexpr._mod(modulus))
+
+    def __divmod__(self, other: Any) -> Expr:
+        new = self._pyexpr._divmod(other)
+        return wrap_expr(new)
+
+    def __rdivmod__(self, other: Any) -> Expr:
+        new = self._pyexpr._divmod(other)
+        return wrap_expr(new)
+
+    def __divmod__(self, other: Any) -> Expr:
+        new = self._pyexpr._divmod(other)
+        return wrap_expr(new)
+
+    def eq(self, other: Any) -> Expr:
+        new = self._pyexpr._eq(other)
+        return wrap_expr(new)
+
+    def eq_missing(self, other: Any) -> Expr:
+        new = self._pyexpr._eq_missing(other)
+        return wrap_expr(new)
+
+    def ne(self, other: Any) -> Expr:
+        new = self._pyexpr._neq(other)
+        return wrap_expr(new)
+
+    def ne_missing(self, other: Any) -> Expr:
+        new = self._pyexpr._neq_missing(other)
+        return wrap_expr(new)
+
+    def gt(self, other: Any) -> Expr:
+        new = self._pyexpr._gt(other)
+        return wrap_expr(new)
+
+    def gt_eq(self, other: Any) -> Expr:
+        new = self._pyexpr._gt_eq(other)
+        return wrap_expr(new)
+
+    def lt(self, other: Any) -> Expr:
+        new = self._pyexpr._lt(other)
+        return wrap_expr(new)
+
+    def lt_eq(self, other: Any) -> Expr:
+        new = self._pyexpr._lt_eq(other)
+        return wrap_expr(new)
+
+    def __and__(self, other: Any) -> Expr:
+        new = self._pyexpr._and(other)
+        return wrap_expr(new)
+
+    def __rand__(self, other: Any) -> Expr:
+        new = self._pyexpr._and(other)
+        return wrap_expr(new)
+
+    def __iand__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._and(other))
+
+    def __or__(self, other: Any) -> Expr:
+        new = self._pyexpr._or(other)
+        return wrap_expr(new)
+
+    def __ror__(self, other: Any) -> Expr:
+        new = self._pyexpr._or(other)
+        return wrap_expr(new)
+
+    def __ior__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._or(other))
+
+    def __xor__(self, other: Any) -> Expr:
+        new = self._pyexpr._xor(other)
+        return wrap_expr(new)
+
+    def __rxor__(self, other: Any) -> Expr:
+        new = self._pyexpr._xor(other)
+        return wrap_expr(new)
+
+    def __ixor__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._xor(other))
+
+    def __matmul__(self, other: Any) -> Expr:
+        new = self._pyexpr._matmul(other)
+        return wrap_expr(new)
+
+    def __rmatmul__(self, other: Any) -> Expr:
+        new = self._pyexpr._matmul(other)
+        return wrap_expr(new)
+
+    def __imatmul__(self, other: Any) -> Expr:
+        return wrap_expr(self._pyexpr._matmul(other))
+
+    def pipe(
+        self,
+        function: Callable[[Expr], Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Expr:
+        return function(self, *args, **kwargs)
+
+    def is_in(self, other: Expr | list[Any]) -> Expr:
+        new = self._pyexpr._is_in(other)
+        return wrap_expr(new)
+
+    def is_null(self) -> Expr:
+        new = self._pyexpr._is_null()
+        return wrap_expr(new)
+
+    def is_not_null(self) -> Expr:
+        new = self._pyexpr._is_not_null()
+        return wrap_expr(new)
+
+    def is_finite(self) -> Expr:
+        new = self._pyexpr._is_finite()
+        return wrap_expr(new)
+
+    def is_infinite(self) -> Expr:
+        new = self._pyexpr._is_infinite()
+        return wrap_expr(new)
+
+    def is_nan(self) -> Expr:
+        new = self._pyexpr._is_nan()
+        return wrap_expr(new)
+
+    def is_not_nan(self) -> Expr:
+        new = self._pyexpr._is_not_nan()
+        return wrap_expr(new)
+
+    def is_first_distinct(self) -> Expr:
+        new = self._pyexpr._is_first_distinct()
+        return wrap_expr(new)
+
+    def is_last_distinct(self) -> Expr:
+        new = self._pyexpr._is_last_distinct()
+        return wrap_expr(new)
+
+    def is_unique(self) -> Expr:
+        new = self._pyexpr._is_unique()
+        return wrap_expr(new)
+
+    def is_duplicated(self) -> Expr:
+        new = self._pyexpr._is_duplicated()
+        return wrap_expr(new)
+
+    def is_between(self, lower_bound: Expr, upper_bound: Expr) -> Expr:
+        new = self._pyexpr._is_between(lower_bound, upper_bound)
+        return wrap_expr(new)
+
+    def min(self) -> Expr:
+        new = self._pyexpr._min()
+        return wrap_expr(new)
+
+    def max(self) -> Expr:
+        new = self._pyexpr._max()
+        return wrap_expr(new)
+
+    def nan_max(self) -> Expr:
+        new = self._pyexpr._nan_max()
+        return wrap_expr(new)
+
+    def nan_min(self) -> Expr:
+        new = self._pyexpr._nan_min()
+        return wrap_expr(new)
+
+    def mean(self) -> Expr:
+        new = self._pyexpr._mean()
+        return wrap_expr(new)
+
+    def median(self) -> Expr:
+        new = self._pyexpr._median()
+        return wrap_expr(new)
+
+    def sum(self) -> Expr:
+        new = self._pyexpr._sum()
+        return wrap_expr(new)
+
+    def n_unique(self) -> Expr:
+        new = self._pyexpr._n_unique()
+        return wrap_expr(new)
+
+    def any(self) -> Expr:
+        new = self._pyexpr._any()
+        return wrap_expr(new)
+
+    def all(self) -> Expr:
+        new = self._pyexpr._all()
+        return wrap_expr(new)
+
+    def unique(self) -> Expr:
+        new = self._pyexpr._unique()
+        return wrap_expr(new)
+
+    def first(self) -> Expr:
+        new = self._pyexpr._first()
+        return wrap_expr(new)
+
+    def last(self) -> Expr:
+        new = self._pyexpr._last()
+        return wrap_expr(new)
+
+    def cast(self, dtype: PolarsDataType, strict: bool = True) -> Expr:
+        new = self._pyexpr._cast(dtype, strict)
+        return wrap_expr(new)
+
+    def sort(self, descending: bool = False, nulls_last: bool = False) -> Expr:
+        new = self._pyexpr._sort(descending, nulls_last)
+        return wrap_expr(new)
+
+    def top_k(self, k: int = 5, *, selection_mode: str = "head") -> Expr:
+        new = self._pyexpr._top_k(k, selection_mode)
+        return wrap_expr(new)
+
+    def bottom_k(self, k: int = 5, *, selection_mode: str = "head") -> Expr:
+        new = self._pyexpr._bottom_k(k, selection_mode)
+        return wrap_expr(new)
+
+    def arg_sort(self, descending: bool = False, nulls_last: bool = False) -> Expr:
+        new = self._pyexpr._arg_sort(descending, nulls_last)
+        return wrap_expr(new)
+
+    def arg_max(self) -> Expr:
+        new = self._pyexpr._arg_max()
+        return wrap_expr(new)
+
+    def arg_min(self) -> Expr:
+        new = self._pyexpr._arg_min()
+        return wrap_expr(new)
+
+    def search_sorted(self, element: Any) -> Expr:
+        new = self._pyexpr._search_sorted(element)
+        return wrap_expr(new)
+
+    def filter(self, predicate: Expr) -> Expr:
+        new = self._pyexpr._filter(predicate)
+        return wrap_expr(new)
+
+    def take(self, indices: Expr | series.Series) -> Expr:
+        new = self._pyexpr._take(indices)
+        return wrap_expr(new)
+
+    def head(self, n: int) -> Expr:
+        new = self._pyexpr._head(n)
+        return wrap_expr(new)
+
+    def tail(self, n: int) -> Expr:
+        new = self._pyexpr._

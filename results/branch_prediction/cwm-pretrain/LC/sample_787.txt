@@ -1,0 +1,496 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You will be given:
+1. A Python code snippet wrapped in [PYTHON] ... [/PYTHON]. The code includes branch markers in comments of the form # [BRANCH]taken=??[/BRANCH].
+2. A method input wrapped in [INPUT] ... [/INPUT].
+Your task is to replace every "??" in "taken=??" with your prediction of whether the branches are taken during execution for the given input.
+
+Detailed Instructions:
+* Replace ?? with a list (e.g., ['Y', 'N', ...]).
+* For each time that branch point is encountered during execution:
+   ** Append 'Y' if that branch is taken.
+   ** Append 'N' if that branch is not taken.
+* Determine branch outcomes by tracing the code step by step, paying special attention to conditionals and loop iterations. Wrap your reasoning in <think> ... </think>
+* Output the fully annotated code (with ?? replaced) wrapped in [ANSWER] ... [/ANSWER]
+* Do not remove, reorder, or add any code lines. 
+* Preserve the original line numbers exactly as they appear in the [PYTHON] ... [/PYTHON] block.
+
+Please follow the format in the example below:
+
+[EXAMPLE]
+[PYTHON]
+1 def func(t):
+2     count = 0 
+3     for c in t:
+4         if not c.isnumeric(): ## [BRANCH]taken=??[/BRANCH]
+5             count += 1
+6     return count
+[/PYTHON]
+The input to the method ```func``` is :
+[INPUT]
+{
+    "self": {},
+    "args": {
+        "t": "#284"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+Complete the branch annotation in the code with "Y" and "N".
+
+<think>
+t = "#284" so the loop sees characters in order: '#', '2', '8', '4'.
+At line 4, the condition is if not c.isnumeric():
+c = '#': '#'.isnumeric() is False → not False is True → branch taken
+c = '2': '2'.isnumeric() is True → not True is False → branch not taken
+c = '8': branch not taken
+c = '4':  branch not taken
+</think>
+
+[ANSWER]
+1 def func(t):
+2     count = 0 
+3     for c in t:
+4         if not c.isnumeric(): ## [BRANCH]taken=[Y,N,N,N][/BRANCH]
+5             count += 1
+6     return count
+[/ANSWER]
+[/EXAMPLE]
+
+1 def add(num1, num2):
+2     if num1 > num2: ## [BRANCH]taken=??[/BRANCH]
+3         max_num = num1 
+4     else:
+5         max_num = num2 
+6     return max_num
+
+The input to the method ```add``` is: 
+ {
+    "self": {},
+    "args": {
+        "num1": -2,
+        "num2": 0
+    },
+    "kwargs": {}
+}
+
+Complete the branch annotation in the code with "Y" and "N".
+
+ Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+[ANSWER]
+1 def add(num1, num2):
+2     if num1 > num2: ## [BRANCH]taken=[N][/BRANCH]
+3         max_num = num1 
+4     else:
+5         max_num = num2 
+6     return max_num
+[/ANSWER]
+
+[FILEPATH] mingcholo-AutoTestmark-08e42cd/src/models.py [/FILEPATH]
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+import torch
+
+class Models:
+    def __init__(self, model_name):
+        self.model_name = model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", torch_dtype=torch.float16).cuda().eval()
+    
+    def generate(self, prompt, max_length, temperature):
+        print('Generating:', prompt)
+        tokens = self.tokenizer.encode(prompt, return_tensors='pt')
+        tokens = tokens.to(self.model.device)
+        if self.model_name == 'nousresearch/Llama-2-13b-hf':
+            tokens = tokens.to(self.model.device)
+        outputs = self.model.generate(tokens, max_length=max_length, temperature=temperature, num_beams=5, do_sample=True)
+        outputs = outputs[0].cpu().numpy()
+        outputs = outputs[1:] # remove start token
+        text = self.tokenizer.decode(outputs, skip_special_tokens=True)
+        print('Generated:', text)
+        return text
+
+[FILEPATH] mingcholo-AutoTestmark-08e42cd/src/LLM.py [/FILEPATH]
+import random
+import torch
+import requests
+import traceback
+from transformers import AutoTokenizer
+from models import Models
+
+
+class LLM:
+    def __init__(self, llm_name, max_length, temperature):
+        self.llm_name = llm_name
+        self.max_length = max_length
+        self.temperature = temperature
+        self.llm = Models(llm_name)
+    
+    def _generate(self, prompt):
+        return self.llm.generate(prompt, self.max_length, self.temperature)
+    
+    def generate(self, original_code, instrumented_code, testcases):
+        for testcase in testcases:
+            try:
+                instrumented_code[testcase['entry']] = instrumented_code[testcase['entry']].replace('??', 'Y')
+            except:
+                pass
+        result = {'is_correct': True}
+        for testidx, testcase in enumerate(testcases):
+            if result['is_correct'] == True:
+                result[f'code_{testidx}'] = instrumented_code[testcase['entry']].replace('??', 'Y').replace('## [BRANCH]', '')
+                result[f'input_{testidx}'] = testcase
+                try:
+                    prompt = f"{original_code}\n\n\nInstrumented Code:\n{instrumented_code[testcase['entry']]} \
+                        \nInput: {testcase['input']}\nOutput: {testcase['output']}\n"
+                    predict = self._generate(prompt)
+                    if predict.lower().strip() not in testcase['output'].lower().strip():
+                        result['is_correct'] = False
+                except:
+                    traceback.print_exc()
+                    result['is_correct'] = False
+        return result
+
+[FILEPATH] mingcholo-AutoTestmark-08e42cd/src/branch_analyser.py [/FILEPATH]
+import json
+from datasets import load_dataset
+from src.LLM import LLM
+from evaluate import load
+import numpy as np
+import os
+
+
+def get_prompt(orig_code, instr_code, testcase):
+    return orig_code + f'\n\nYour task is to return a valid python answer that are the instrumented code: ' + instr_code + ' for the input: ' + json.dumps(testcase, indent=4)
+
+orig_codes = load_dataset('csv', data_files=os.path.join('data', 'orig_codes', 'branch_analyser_data.csv'))['train']
+instr_codes = load_dataset('csv', data_files=os.path.join('data', 'instr_codes', 'branch_analyser_data.csv'))['train']
+testcases = load_dataset('json', data_files=os.path.join('data', 'testcases', 'branch_analyser_data.json'))['train']
+metrics = load('accuracy')
+
+model_names = ['codellama/CodeLlama-7b-hf', 'codellama/CodeLlama-34b-hf', 'nousresearch/Llama-2-7b-hf', 'nousresearch/Llama-2-13b-hf', 'nousresearch/Llama-2-70b-hf']
+results = []
+
+for model_name in model_names:
+    print(model_name)
+    for idx in range(len(orig_codes)):
+        if idx in [1552, 3752, 4933, 5234]:
+            print(f'{idx}: Orig: {orig_codes[idx]}\nInstr: {instr_codes[idx]}\n')
+        prompts = [get_prompt(orig_codes[idx], instr_codes[idx], tc) for tc in testcases[idx]]
+        llm = LLM(model_name, 256, 0.7)
+        try:
+            predictions = llm.generate(orig_codes[idx], instr_codes[idx], testcases[idx])
+            labels = instr_codes[idx]
+        except Exception as e:
+            print(e)
+            continue
+        instr_codes[idx] = predictions['code']
+        testcases[idx] = predictions['input']
+        accuracy = np.sum(predictions['is_correct']) / len(testcases[idx])
+        results.append({'model': model_name, 'accuracy': accuracy})
+        print(f'{model_name}: {accuracy}')
+
+print(results)
+with open('results/branch_analyser_results.json', 'w') as f:
+    json.dump(results, f, indent=4)
+
+[FILEPATH] mingcholo-AutoTestmark-08e42cd/src/execute.py [/FILEPATH]
+import os
+from datasets import load_dataset
+import numpy as np
+from evaluate import load
+
+results = {
+    'accuracy': [],
+    'precision': [],
+    'recall': [],
+    'f1': []
+}
+for filename in os.listdir('src/results'):
+    preds = load_dataset('json', data_files=f'src/results/{filename}', split='train')
+    data = load_dataset('json', data_files=f'src/data/fc_data.json', split='train')
+    fcids = np.array([x['fcid'] for x in data])
+    fcds = load_dataset('csv', data_files='src/data/fcds.csv', split='train')
+    idx = 0
+    for fcid in fcids:
+        print(fcid)
+        if fcid == 154:
+            print(preds[idx]['prediction'])
+            print(fcds[idx]['testcase'])
+            print(fcds[idx]['prediction'])
+            break
+        else:
+            idx += 1
+
+[FILEPATH] mingcholo-AutoTestmark-08e42cd/README.md [/FILEPATH]
+# AutoTestMark
+
+## 1. Setup
+
+### 1.1. Environment
+
+- Python 3.9
+- Cuda version 11.8 (cu118)
+
+### 1.2. Install requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+### 1.3. Pretrained models
+
+- CodeLlama 7B: https://huggingface.co/codellama/CodeLlama-7b-hf
+- CodeLlama 34B: https://huggingface.co/codellama/CodeLlama-34b-hf
+- Llama-2-7b-hf: https://huggingface.co/nousresearch/Llama-2-7b-hf
+- Llama-2-13b-hf: https://huggingface.co/nousresearch/Llama-2-13b-hf
+- Llama-2-70b-hf: https://huggingface.co/nousresearch/Llama-2-70b-hf
+
+
+## 2. Data
+
+### 2.1. FC Data
+
+- **Post Processing**: Split dataset into files according to entrypoint (data/orig_code/..., data/instr_code/..., data/testcase/...)
+- **Generating Testcases**: /src/generate_testcase.ipynb
+- **Preprocessing**: /src/preprocess.ipynb
+
+
+### 2.2. Branch Analyser Data
+
+- **Original codes**: [original files](https://raw.githubusercontent.com/brendanr/branch_analyser_testcases/master/testdata/bsuite_testdata/files.json)
+- **Testcases**: [testcases](https://raw.githubusercontent.com/brendanr/branch_analyser_testcases/master/testdata/bsuite_testdata/testcases.py)
+- **Preprocessing**:
+    - **Version 1**: /src/branch_analyser1_preprocess.ipynb
+    - **Version 2**: /src/branch_analyser2_preprocess.ipynb
+    - **Version 3**: /src/branch_analyser3_preprocess.ipynb
+
+## 3. Models
+
+- **Single LLM**: models.py, LLM.py
+
+## 4. Run
+
+- **FC Data**: `python src/fc.py`
+- **Branch Analyser Data - Version 1**: `python src/branch_analyser1.py`
+- **Branch Analyser Data - Version 2**: `python src/branch_analyser2.py`
+- **Branch Analyser Data - Version 3**: `python src/branch_analyser3.py`
+
+## 5. Results
+
+- **FC Data**:
+    - CodeLlama-7B: 49.146852301432255%
+    - CodeLlama-34B: 44.222238021547145%
+    - Llama-2-7B-hf: 46.28264761222903%
+    - Llama-2-13B-hf: 49.80762545619835%
+    - Llama-2-70B-hf: 47.42974811318366%
+- **Branch Analyser - Version 1**:
+    - CodeLlama-7B: 72.89189%
+    - CodeLlama-34B: 60.39956%
+    - Llama-2-7B-hf: 83.77912%
+    - Llama-2-13B-hf: 64.20232%
+    - Llama-2-70B-hf: 57.21122%
+- **Branch Analyser - Version 2**:
+    - CodeLlama-7B: 77.63737%
+    - CodeLlama-34B: 74.06786%
+    - Llama-2-7B-hf: 86.31111%
+    - Llama-2-13B-hf: 70.27659%
+    - Llama-2-70B-hf: 66.74334%
+- **Branch Analyser - Version 3**:
+    - CodeLlama-7B: 92.22871%
+    - CodeLlama-34B: 85.65861%
+    - Llama-2-7B-hf: 93.45455%
+    - Llama-2-13B-hf: 94.57527%
+    - Llama-2-70B-hf: 82.26541%
+
+[FILEPATH] data/branch_analyser2_data.csv/1700880548.4774621.json [/FILEPATH]
+{
+    "annotations": [
+        "country = g.member.get('name', '???')",
+        "return string",
+        "g.member.get('name', '???')"
+    ],
+    "description": "Select the correct return value for g.members.get('name', ???) for a group that has the following format:\n{\n    'length': 10,\n    'log': {},\n    'member': {'minion': 'Davros'}\n}",
+    "history": [
+        {
+            "country": "Davros",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "??",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "m",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "Davros",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "Davros",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "??",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "m",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "Davros",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "Davros",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "m",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        },
+        {
+            "country": "Davros",
+            "instructor": {
+                "block": {},
+                "environment": {},
+                "file": {},
+                "group": {},
+                "plot": {},
+                "publish": {},
+                "put": {},
+                "put_async": {},
+                "session": {}
+            }
+        }
+    ],
+    "id": "1700880548.4774621",
+    "method": "country",
+    "parameters": [
+        {
+            "values": [
+                {
+                    "log": {},
+                    "member": {
+                        "minion": "Davros"
+                    }
+                },
+                {
+                    "log": {},
+                    "member": {
+                        "minion": "Davros"
+                    }
+                },
+                {
+                    "log": {},
+                   

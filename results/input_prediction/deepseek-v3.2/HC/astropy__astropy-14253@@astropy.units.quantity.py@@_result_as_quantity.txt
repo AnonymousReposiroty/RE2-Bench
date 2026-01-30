@@ -1,0 +1,118 @@
+Let’s reason this out step by step.
+
+We’re looking at `_result_as_quantity`, which handles the conversion of a raw result (numeric array) into a Quantity with the proper unit, possibly dealing with `out` arguments.  
+
+From the code snippet, `_result_as_quantity` does:
+- If result is tuple/list → recursion for each element.
+- If out is None → returns `self._new_view(result, unit, finalize=False)` if unit is not None else returns `result`.
+- If out is a Quantity → `out._set_unit(unit)` is called.
+
+The output given is:
+
+```json
+{
+    "_unit": {
+        "_represents": {
+            "_bases": null,
+            "_powers": null,
+            "_scale": 0.125
+        },
+        "_names": null,
+        "_short_names": null,
+        "_long_names": null,
+        "_format": {},
+        "__doc__": "U.S. fluid ounce"
+    }
+}
+```
+
+This output appears to be the state of `self._unit` after `_set_unit(unit)` is called (or maybe after `_result_as_quantity` returns a Quantity with this unit).  
+
+The `_unit` shown has `_scale: 0.125`, null bases/powers, and docstring "U.S. fluid ounce". This suggests the unit is a simple scaled unit (not composite like m/s), just a single scaled base unit.  
+
+Looking at `_set_unit`:
+- If `unit` is not a `UnitBase` instance, it tries to convert string or structured cases.
+- For structured units, uses `StructuredUnit(unit, self.dtype)`.
+- Otherwise, creates `Unit(str(unit), parse_strict='silent')`.
+
+So `unit` input could be a `Unit` object already, or something convertible to one (string, etc.).
+
+Given output’s `self._unit` has scale 0.125 and doc "U.S. fluid ounce", this matches the known conversion: 1 US fluid ounce = 1/128 US gallon = 0.125 cups? Wait, 1 US fluid ounce = 0.125 US cups? Actually:  
+1 US cup = 8 US fl oz → so 1 fl oz = 1/8 = 0.125 cups. Yes — so the unit here might actually be “cup” equivalent in base unit of fluid ounces?  
+
+But doc says "U.S. fluid ounce", scale 0.125 — maybe this is in units of “cup” (cup=1) → fl oz = 0.125 cup. So `_scale` is the factor to multiply to get the base unit (cup). But then `_bases` and `_powers` null means it’s not a product of base units, just a simple scaled version of dimensionless? Actually in astropy units, a simple unit like “cup” is a base unit with scale relative to some reference. But here `_scale` is 0.125 — could be fl oz defined relative to cup.
+
+But: output’s `_unit.__doc__` is "U.S. fluid ounce", meaning the resulting unit is “US fluid ounce” as a named unit. That suggests input `unit` argument might be something like “cup” and conversion happened? Wait — but `_result_as_quantity` just passes unit along to `_set_unit`, so output unit should match input unit.
+
+Maybe input `unit` argument was the string `"cup"` (scale=1), and `self._unit` before call was `"fl_oz"`? No — output is self._unit after call, so `self._unit` after call is the unit passed as argument? Actually `_result_as_quantity` doesn’t change `self._unit`, except when `out` is `self`?  
+
+Look: If `out` is a Quantity and `out._set_unit(unit)` is called, `out`’s unit becomes `unit`. So output could be `out._unit` after that call.
+
+Given output matches exactly `unit` argument, maybe `self._unit` before call was irrelevant to output, but the output shown is `out._unit` after `_set_unit(unit)`. And `out` equals `self`? Could be.
+
+But structure shows `args.unit` and `self._unit` separately — we have to fill both.
+
+Output only shows `self._unit` after call. Let’s assume:
+- `self` before call had some unit (maybe None).
+- `unit` argument had `_scale: 0.125`, null bases/powers, doc "U.S. fluid ounce".
+- `out` was `self`.
+- `result` was some array (value unimportant).
+Then `_result_as_quantity` would call `out._set_unit(unit)` and output `out`, but return value not shown — output is just `self._unit` after.
+
+Therefore, we can infer `unit` argument is exactly the output unit. `self._unit` before call could be different, but output overwritten to `unit`. For simplicity, assume `self._unit` before call was same as after? Possibly, but not required.
+
+Given output matches `unit` argument exactly, let’s set `self._unit` initially to same as final (since output shows final state). But if `out` is `self`, `self._unit` is overwritten anyway.
+
+Let’s pick minimal example:  
+`result = np.array([1.0])`,  
+`unit` = Unit with scale 0.125, doc "U.S. fluid ounce",  
+`out = self`,  
+`self._unit` initially same as `unit`.  
+
+Then `_result_as_quantity` returns `out` (with unit unchanged), and output state matches.
+
+Now fill structure:  
+`self._unit` = `unit` = output given.  
+`args.result` = any array, say `[1.0]`.  
+`args.unit` = same as output unit.  
+`args.out` = `self`.
+
+Thus:
+
+```
+[INPUT]
+{
+    "self": {
+        "_unit": {
+            "_represents": {
+                "_bases": null,
+                "_powers": null,
+                "_scale": 0.125
+            },
+            "_names": null,
+            "_short_names": null,
+            "_long_names": null,
+            "_format": {},
+            "__doc__": "U.S. fluid ounce"
+        }
+    },
+    "args": {
+        "result": [1.0],
+        "unit": {
+            "_represents": {
+                "_bases": null,
+                "_powers": null,
+                "_scale": 0.125
+            },
+            "_names": null,
+            "_short_names": null,
+            "_long_names": null,
+            "_format": {},
+            "__doc__": "U.S. fluid ounce"
+        },
+        "out": {"self_reference": true}
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

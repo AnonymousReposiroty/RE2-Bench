@@ -1,0 +1,601 @@
+[OUTPUT]
+1 from __future__ import print_function, division
+2 import re
+3 import collections
+4 
+5 _name_with_digits_p = re.compile(r'^([a-zA-Z]+)([0-9]+)$')
+6 
+7 def split_super_sub(text):
+8     if len(text) == 0:
+9         return text, [], []
+10 
+11     pos = 0
+12     name = None
+13     supers = []
+14     subs = []
+15     while pos < len(text):## [STATE]pos=[0,7,8,9,10,11,12][/STATE] [STATE]len(text)=12[/STATE]
+16         start = pos + 1
+17         if text[pos:pos + 2] == "__":
+18             start += 1
+19         pos_hat = text.find("^", start)
+20         if pos_hat < 0:
+21             pos_hat = len(text)
+22         pos_usc = text.find("_", start)
+23         if pos_usc < 0:
+24             pos_usc = len(text)
+25         pos_next = min(pos_hat, pos_usc)
+26         part = text[pos:pos_next]
+27         pos = pos_next
+28         if name is None:
+29             name = part
+30         elif part.startswith("^"):
+31             supers.append(part[1:])
+32         elif part.startswith("__"):
+33             supers.append(part[2:])
+34         elif part.startswith("_"):
+35             subs.append(part[1:])
+36         else:
+37             raise RuntimeError("This should never happen.")
+38 
+39     m = _name_with_digits_p.match(name)
+40     if m:
+41         name, sub = m.groups()
+42         subs.insert(0, sub)
+43 
+44     return name, supers, subs
+[/ANSWER]
+[/OUTPUT]
+
+[FILEPATH] Liu-Mengxi-Jailbreak-in-Conversation-89861d1/best_dataset/llms/woof/llm_input/robustness of llm/examples/task0/example_153_translation_llm2.py [/FILEPATH]
+[INPUT]
+{
+    "self": {},
+    "args": {
+        "text": "1 + 2 = a?"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[OUTPUT]
+from __future__ import print_function, division
+import re
+from .genutils import gen_basic_skeleton, Grid
+from . import pattern as pattern
+from .pattern import all_symbols
+
+def to_mathml(code, verbose=True):
+    """
+    Generate latex for sympy expression
+    :param code:
+    :return:
+    """
+    try:
+        import sympy
+        from sympy import latex
+        return latex(sympy.sympify(code))
+    except:
+        return False
+
+def print_rules(rules, rules_namess, verbose=True):
+    """
+    Print grammar in human-readable form
+    :param rules:
+    :param rules_namess:
+    :param verbose:
+    :return:
+    """
+    print("Non terminals: {0}\nRules:\n".format(rules_namess))
+    for name in rules_namess:
+        print(name, ":")
+        for r in rules[name]:
+            print("   {0}".format(r.as_string()),
+                  " ".join([r.as_python().strip("'").replace("{", "(").replace("}", ")")
+                            for r in r.right_childrens]))
+
+
+def print_rules_patterns(rules, verbose=True):
+    """
+    Print grammar in human-readable form
+    :param rules:
+    :param rules_namess:
+    :param verbose:
+    :return:
+    """
+    for name in sorted(rules):
+        print("{0} -> {1}".format(name, " / ".join(rules[name])))
+
+
+def print_examples(examples, grammar, rules):
+    print("EXAMPLES")
+    for example in examples:
+        print(example, "->", grammar.from_string(example).get_parse_tree_string(rule_string=rules))
+
+math_expr_head = "<math>"
+math_expr_tail = "</math>"
+latex_separator = "\displaystyle"
+
+def tree_to_mathml(node, prefix="", result=""):
+    """
+    Recursive method to convert tree into latex
+    :param node: tree root node
+    :param prefix: prefix that will be prepended to each element
+    :param result: current result
+    :return: recursive call
+    """
+    code = str(node.__class__.__name__)
+    if hasattr(node, "tex_func"):
+        code = node.tex_func(node, with_separator=False)
+        return tree_to_mathml(node.children[0], result=result, prefix=prefix) + code
+
+    new_prefix = prefix
+    if node.__class__.__name__ in ('Fraction', 'Sub', 'Pow', 'Mul', 'Add'):
+        new_prefix += r"\left("
+    if hasattr(node, "tex_func"):
+        code = node.tex_func(node, with_separator=False)
+        result += code
+    else:
+        code = str(node.__class__.__name__)
+        if node.__class__.__name__ in ('Number', 'Symbol'):
+            result += code
+        else:
+            result += new_prefix + code
+    if len(node.children) == 0:
+        if node.__class__.__name__ in ('Fraction', 'Sub', 'Pow', 'Mul', 'Add'):
+            result += r"\right)"
+        result += prefix
+    else:
+        if node.__class__.__name__ in ('Fraction', 'Sub', 'Pow', 'Mul', 'Add') and len(node.children) == 1:
+            result += r"\right)"
+        for c in node.children:
+            result = tree_to_mathml(c, prefix=new_prefix, result=result)
+    return result
+
+
+def mathml_to_tree(string):
+    from pyparsing import *
+    try:
+        import mpmath as mp
+    except:
+        from sympy import *
+
+    def toint(t):
+        try:
+            return mp.mpf(t[0])
+        except:
+            return mp.mpf(t[0][1:-1])
+
+    def tofloat(t):
+        return mp.mpf(t[0])
+
+    def checkparen(t):
+        print(t)
+
+    LPar, RPar, Mul, Div = map(Suppress, "()*/")
+
+    op_dict = {"+": lambda t: Add(*t),
+               "-": lambda t: Sub(*t),
+               "*": lambda t: Mul(*t),
+               "/": lambda t: Div(*t),
+               "^": lambda t: Pow(t[0], t[1]),
+               }
+
+    operand = (Word("+-" + "".join(all_symbols) + "".join(map(str, range(10))))
+               | real)
+
+    bnf = OperatorPrecedence(operand,
+                             [(" ", 1, opAssoc.RIGHT, ),
+                              (Mul, 2, opAssoc.LEFT, ),
+                              (Div, 2, opAssoc.LEFT, ),
+                              (Word("+-"), 2, opAssoc.LEFT, )],
+                             lpar=LPar, rpar=RPar)
+
+    return bnf.parseString(string).asList()
+
+
+class BaseVisitor:
+    """
+    Base visitor class
+    """
+    def visit(self, value):
+        raise NotImplementedError()
+
+
+class MathTreeVisitor(BaseVisitor):
+    def visitPow(self, value):
+        base = self.visit(value.children[0])
+        power = self.visit(value.children[1])
+        return Pow(base, power)
+
+    def visitMul(self, value):
+        if len(value.children) == 2:
+            left = self.visit(value.children[0])
+            right = self.visit(value.children[1])
+            return Mul(left, right)
+        elif len(value.children) == 1:
+            return self.visit(value.children[0])
+        else:
+            raise ValueError("Unsupported size of Mul: {0}".format(value.children))
+
+    def visitDiv(self, value):
+        if len(value.children) == 2:
+            left = self.visit(value.children[0])
+            right = self.visit(value.children[1])
+            return Div(left, right)
+        elif len(value.children) == 1:
+            return self.visit(value.children[0])
+        else:
+            raise ValueError("Unsupported size of Div: {0}".format(value.children))
+
+    def visitAdd(self, value):
+        if len(value.children) == 2:
+            left = self.visit(value.children[0])
+            right = self.visit(value.children[1])
+            return Add(left, right)
+        elif len(value.children) == 1:
+            return self.visit(value.children[0])
+        else:
+            raise ValueError("Unsupported size of Add: {0}".format(value.children))
+
+    def visitSub(self, value):
+        if len(value.children) == 2:
+            left = self.visit(value.children[0])
+            right = self.visit(value.children[1])
+            return Sub(left, right)
+        elif len(value.children) == 1:
+            return self.visit(value.children[0])
+        else:
+            raise ValueError("Unsupported size of Sub: {0}".format(value.children))
+
+    def visitNumber(self, value):
+        return Number(value.children[0])
+
+    def visitSymbol(self, value):
+        return Symbol(value.children[0])
+
+
+class BaseAST:
+    """
+    Base class for all AST elements
+    """
+    def __init__(self, *args, **kwargs):
+        self.children = []
+
+    def append(self, *nodes):
+        for node in nodes:
+            if not node:
+                continue
+            if isinstance(node, type(self)) and not len(self.children):
+                self.children = node.children
+            else:
+                self.children.append(node)
+
+    def __repr__(self):
+        return str(self.__class__.__name__) + ": " + ",".join([str(c) for c in self.children])
+
+    @staticmethod
+    def is_terminal():
+        return False
+
+    def __len__(self):
+        return len(self.children)
+
+
+class Symbol(BaseAST):
+    """
+    Symbol node class
+    """
+    def __init__(self, value):
+        super().__init__()
+        self.value = value
+
+    def __repr__(self):
+        return self.value
+
+
+class Number(BaseAST):
+    """
+    Number node class
+    """
+    def __init__(self, value):
+        super().__init__()
+        self.value = value
+
+    def __repr__(self):
+        return self.value
+
+
+class BinaryOp(BaseAST):
+    """
+    Binary op class
+    """
+    def __init__(self, left, right):
+        super().__init__()
+        self.children = [left, right]
+
+    def __repr__(self):
+        return "({0})".format(str(self.__class__.__name__).split(".")[-1])
+
+
+class Pow(BaseAST):
+    """
+    Pow node class
+    """
+
+
+class Mul(BaseAST):
+    """
+    Mul node class
+    """
+
+
+class Div(BaseAST):
+    """
+    Div node class
+    """
+
+
+class Add(BaseAST):
+    """
+    Add node class
+    """
+
+
+class Sub(BaseAST):
+    """
+    Sub node class
+    """
+
+
+class Fraction(BaseAST):
+    """
+    Fraction node class
+    """
+    @staticmethod
+    def tex_func(node, with_separator=True):
+        return r"\frac{{ {left} }}{{ {right} }}".format(left=tree_to_mathml(node.children[0]),
+                                                        right=tree_to_mathml(node.children[1]))
+
+
+class MathTree(BaseAST):
+    """
+    Math tree is base class for all AST trees
+    """
+    def __init__(self):
+        super().__init__()
+
+    def __add__(self, other):
+        if isinstance(other, type(self)):
+            for i, c in enumerate(other.children):
+                if not i < len(self.children):
+                    self.children.append(c)
+                else:
+                    self.children[i] += c
+        return self
+
+    def to_string(self, with_prefix=False, prefix=""):
+        """
+        Convert tree into string
+        :return:
+        """
+        prefix = "" if not with_prefix else prefix
+        if len(self.children) == 0:
+            if hasattr(self, "value"):
+                return prefix + self.value
+            else:
+                return prefix + str(self.__class__.__name__)
+        elif len(self.children) == 1:
+            if hasattr(self, "value"):
+                return prefix + self.value
+            return prefix + self.to_string(with_prefix=True, prefix=str(self.__class__.__name__))
+        else:
+            return prefix + self.to_string(with_prefix=True, prefix=str(self.__class__.__name__))
+
+    def get_parse_tree_string(self, with_values=False, with_separator=True, rule_string=None, depth=0,
+                              initial_rule_name=None):
+        """
+        Convert tree into human readable parse tree
+        :param rule_string:
+        :param with_separator:
+        :param with_values:
+        :param depth:
+        :return:
+        """
+        result = ""
+        if depth == 0 and initial_rule_name is not None:
+            rule_string = pattern.get_rule_dict([initial_rule_name])
+        if with_values:
+            result += self.value
+        else:
+            if len(self.children) == 0:
+                result += str(self.__class__.__name__)
+            else:
+                if hasattr(self, "tex_func"):
+                    result += self.tex_func(self, with_separator=with_separator)
+                else:
+                    result += str(self.__class__.__name__)
+        if rule_string is not None:
+            result = rule_string[self.__class__.__name__].replace(pattern.arrow + " ", "").split("|")[0]
+        if not with_separator:
+            return result
+        if len(self.children) == 0:
+            return result
+        result = "{0}({1})".format(result, ", ".join([c.get_parse_tree_string(with_values=with_values,
+                                                                              rule_string=rule_string, depth=depth + 1)
+                                                      for c in self.children]))
+        return result
+
+    def to_latex(self):
+        """
+        Convert tree into latex
+        :return:
+        """
+        from math_expr.utils import to_mathml
+        return r"\displaystyle {0}".format(to_mathml(tree_to_mathml(self)))
+
+    def to_latex_no_header(self):
+        """
+        Convert tree into latex without header
+        :return:
+        """
+        from math_expr.utils import to_mathml
+        return to_mathml(tree_to_mathml(self))
+
+    def to_sympy(self):
+        """
+        Convert tree into sympy expression
+        :return:
+        """
+        return MathTreeVisitor().visit(self)
+
+    @staticmethod
+    def is_terminal():
+        """
+        Method to check whether terminal node or not
+        :return:
+        """
+        return True
+
+
+class Grammar:
+    """
+    Main class to build grammar
+    """
+    def __init__(self, name, rules, initial_rule_name):
+        self.name = name
+        self.rules = rules
+        self.initial_rule_name = initial_rule_name
+        self.terminals = [getattr(MathTree, x) for x in dir(MathTree) if MathTree.is_terminal()]
+        self.all_rules = []
+
+    def to_bnf_string(self, with_values=False):
+        """
+        Print grammar in BNF-like form
+        :param with_values:
+        :return:
+        """
+        return self.get_parse_tree_string(with_values=with_values)
+
+    def get_parse_tree_string(self, with_values=False, with_separator=True):
+        """
+        Convert tree into human readable parse tree
+        :param with_separator:
+        :param with_values:
+        :return:
+        """
+        result = ""
+        result += self.name
+        result += " : "
+        result += self.initial_rule_name
+        result += "\n"
+        for rule, string in self.rules.items():
+            result += string
+            result += "\n"
+        return result
+
+    def from_string(self, string):
+        """
+        Create tree from string
+        :param string:
+        :return:
+        """
+        grid = Grid(None, None, start_symbol=self.initial_rule_name)
+        for rule_name, rule in self.rules.items():
+            grid.add_rule(rule_name, rule)
+        self.all_rules = grid.start_symbol.expand()
+        self.grid = grid
+        return grid.parse(string, self.initial_rule_name)
+
+    def get_all_rules(self):
+        """
+        Get all rules as simple dict
+        :return:
+        """
+        rules = {}
+        for rule in self.all_rules:
+            rules[rule[0]] = " ".join(rule[1])
+        return rules
+
+    def get_parse_tree(self, string):
+        """
+        Get parse tree for string
+        :param string:
+        :return:
+        """
+        result = self.from_string(string)
+        return result
+
+    def get_parse_tree_string(self, string):
+        """
+        Print parse tree in human-readable form
+        :param string:
+        :return:
+        """
+        tree = self.get_parse_tree(string)
+        return tree.get_parse_tree_string(rule_string=self.get_all_rules())
+
+    def to_sympy(self, string):
+        """
+        Convert tree into sympy expression
+        :param string:
+        :return:
+        """
+        from math_expr.utils import to_mathml
+        try:
+            import sympy
+            from sympy import latex
+            tree = self.get_parse_tree(string)
+            return sympy.sympify(to_mathml(tree_to_mathml(tree)))
+        except:
+            return False
+
+
+class MathExprGrammar(Grammar):
+    """
+    Grammar generation for MathExpr
+    """
+    def __init__(self, new_symbols=None):
+        """
+        Construct grammar from BNF
+        :param new_symbols: New symbols to add
+        """
+        self.new_symbols = new_symbols if new_symbols else []
+        self.rules = {
+            "Expr": "Term AddOp2 Expr",
+            "Term": "Factor MulOp2 Term",
+            "Factor": "Base PowOp Factor",
+            "PowOp": "^",
+            "AddOp": "+",
+            "AddOp2": "",
+            "MulOp": "*",
+            "MulOp2": "",
+            "Base": "( Expr )",
+            "Base2": "Number",
+            "Base3": "Symbol",
+            "Number": "Digit*",
+            "Digit": "[0-9]",
+            "Symbol": all_symbols
+        }
+        self.name = "MATH_EXPRESSION_GRAMMAR"
+        self.initial_rule_name = "Expr"
+        self.rules_names = ["Number", "Symbol", "Digit"] + self.new_symbols
+        self.complex_types = ["Expr", "Term", "Factor"]
+        for c in self.complex_types:
+            self.rules_names.append(c)
+            for i in range(1, len(self.rules[c].split()) + 1):
+                self.rules_names.append(c + str(i))
+        for r in ["PowOp", "AddOp", "MulOp"]:
+            self.rules_names.append(r)
+            for i in range(1, len(self.rules[r].split()) + 1):
+                self.rules_names.append(r + str(i))
+        for i in range(1, len(self.rules["Base"].split()) + 1):
+            self.rules_names.append("Base" + str(i))
+        for i in range(1, len(self.rules["AddOp2"].split()) + 1):
+            self.rules_names.append("AddOp2" + str(i))
+        for i in range(1, len(self.rules["MulOp2"].split()) + 1):
+            self.rules_names.append("MulOp2" + str(i))
+        self.terminals = [getattr(MathTree, x) for x in dir(MathTree) if MathTree.is_terminal()]
+        self.terminals += self.new_symbols
+        self.terminals = list(set(self.terminals))
+        super().__init__(name=self.name, rules=self.rules, initial_rule_name=self.initial_rule_name)
+        self.from_string("

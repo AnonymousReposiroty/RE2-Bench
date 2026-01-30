@@ -1,0 +1,170 @@
+[THOUGHT]
+We trace simplify("1.0e-14*I"):
+- sympify yields expr = Float(1.0e-14)*I, which is a Mul.
+- Line 66: "if not isinstance(expr, (Add, Mul, Pow, ExpBase))" — expr is a Mul, so condition is False => branch not taken -> ['N'].
+
+The nested function shorter (lines 76-79) is called multiple times (calls at lines 89, 90, 95, 123, 124, 125). Each time it receives multiple expressions that, for this simple expr, are effectively identical (cancel/_mexpand/together/powsimp/etc. produce the same expression). Therefore has_variety(choices) is False each time, so the if not has_variety(choices) condition is True on every invocation. shorter's branch at line 77 is executed 6 times and always taken -> ['Y','Y','Y','Y','Y','Y'].
+
+Other branches:
+- Line 82: "if rational is not False and expr.has(Float)" — rational defaults to False, so condition False -> ['N'].
+- Line 92: "if ratio is S.Infinity" — ratio is 1.7, so False -> ['N'].
+- Lines 105,108,111,114,117,120,126,140,145,150,153 — these all check for features (BesselBase, Trig/Hyp, log, Combinatorial/gamma, Sum, Product, ExpBase, denom.is_Add, could_extract_minus_sign, measure increase, floats and rational is None). For expr = 1.0e-14*I, none of these conditions hold, so each is not taken -> all ['N'].
+
+Thus the sequence of branch outcomes is as filled below.
+[/THOUGHT]
+
+[ANSWER]
+1 from __future__ import print_function, division
+2 from collections import defaultdict
+3 from sympy.core import (Basic, S, Add, Mul, Pow,
+4     Symbol, sympify, expand_mul, expand_func,
+5     Function, Dummy, Expr, factor_terms,
+6     symbols, expand_power_exp)
+7 from sympy.core.compatibility import (iterable,
+8     ordered, range, as_int)
+9 from sympy.core.numbers import Float, I, pi, Rational, Integer
+10 from sympy.core.function import expand_log, count_ops, _mexpand, _coeff_isneg, nfloat
+11 from sympy.core.rules import Transform
+12 from sympy.core.evaluate import global_evaluate
+13 from sympy.functions import (
+14     gamma, exp, sqrt, log, exp_polar, piecewise_fold)
+15 from sympy.core.sympify import _sympify
+16 from sympy.functions.elementary.exponential import ExpBase
+17 from sympy.functions.elementary.hyperbolic import HyperbolicFunction
+18 from sympy.functions.elementary.integers import ceiling
+19 from sympy.functions.elementary.complexes import unpolarify
+20 from sympy.functions.elementary.trigonometric import TrigonometricFunction
+21 from sympy.functions.combinatorial.factorials import CombinatorialFunction
+22 from sympy.functions.special.bessel import besselj, besseli, besselk, jn, bessely
+23 from sympy.utilities.iterables import has_variety
+24 from sympy.simplify.radsimp import radsimp, fraction
+25 from sympy.simplify.trigsimp import trigsimp, exptrigsimp
+26 from sympy.simplify.powsimp import powsimp
+27 from sympy.simplify.cse_opts import sub_pre, sub_post
+28 from sympy.simplify.sqrtdenest import sqrtdenest
+29 from sympy.simplify.combsimp import combsimp
+30 from sympy.polys import (together, cancel, factor)
+31 import mpmath
+32 from sympy.simplify.hyperexpand import hyperexpand
+33 from sympy.functions.special.bessel import BesselBase
+34 from sympy import Sum, Product
+35 from sympy.concrete.summations import Sum
+36 from sympy.core.function import expand
+37 from sympy.concrete.summations import Sum
+38 from sympy.core.exprtools import factor_terms
+39 from sympy.concrete.summations import Sum
+40 from sympy.concrete.summations import Sum
+41 from sympy import Mul
+42 from sympy.concrete.products import Product
+43 from sympy.concrete.products import Product
+44 from sympy.polys.numberfields import _minimal_polynomial_sq
+45 from sympy.solvers import solve
+46 
+47 
+48 
+49 def simplify(expr, ratio=1.7, measure=count_ops, rational=False):
+50     expr = sympify(expr)
+51 
+52     try:
+53         return expr._eval_simplify(ratio=ratio, measure=measure)
+54     except AttributeError:
+55         pass
+56 
+57     original_expr = expr = signsimp(expr)
+58 
+59     from sympy.simplify.hyperexpand import hyperexpand
+60     from sympy.functions.special.bessel import BesselBase
+61     from sympy import Sum, Product
+62 
+63     if not isinstance(expr, (Add, Mul, Pow, ExpBase)): ## [BRANCH]taken=['N'][/BRANCH]
+64         if isinstance(expr, Function) and hasattr(expr, "inverse"):
+65             if len(expr.args) == 1 and len(expr.args[0].args) == 1 and \
+66                isinstance(expr.args[0], expr.inverse(argindex=1)):
+67                 return simplify(expr.args[0].args[0], ratio=ratio,
+68                                 measure=measure, rational=rational)
+69         return expr.func(*[simplify(x, ratio=ratio, measure=measure, rational=rational)
+70                          for x in expr.args])
+71 
+72 
+73     def shorter(*choices):
+74         if not has_variety(choices): ## [BRANCH]taken=['Y','Y','Y','Y','Y','Y'][/BRANCH]
+75             return choices[0]
+76         return min(choices, key=measure)
+77 
+78     floats = False
+79     if rational is not False and expr.has(Float): ## [BRANCH]taken=['N'][/BRANCH]
+80         floats = True
+81         expr = nsimplify(expr, rational=True)
+82 
+83     expr = bottom_up(expr, lambda w: w.normal())
+84     expr = Mul(*powsimp(expr).as_content_primitive())
+85     _e = cancel(expr)
+86     expr1 = shorter(_e, _mexpand(_e).cancel())
+87     expr2 = shorter(together(expr, deep=True), together(expr1, deep=True))
+88 
+89     if ratio is S.Infinity: ## [BRANCH]taken=['N'][/BRANCH]
+90         expr = expr2
+91     else:
+92         expr = shorter(expr2, expr1, expr)
+93     if not isinstance(expr, Basic):
+94         return expr
+95 
+96     expr = factor_terms(expr, sign=False)
+97 
+98     expr = hyperexpand(expr)
+99 
+100     expr = piecewise_fold(expr)
+101 
+102     if expr.has(BesselBase): ## [BRANCH]taken=['N'][/BRANCH]
+103         expr = besselsimp(expr)
+104 
+105     if expr.has(TrigonometricFunction, HyperbolicFunction): ## [BRANCH]taken=['N'][/BRANCH]
+106         expr = trigsimp(expr, deep=True)
+107 
+108     if expr.has(log): ## [BRANCH]taken=['N'][/BRANCH]
+109         expr = shorter(expand_log(expr, deep=True), logcombine(expr))
+110 
+111     if expr.has(CombinatorialFunction, gamma): ## [BRANCH]taken=['N'][/BRANCH]
+112         expr = combsimp(expr)
+113 
+114     if expr.has(Sum): ## [BRANCH]taken=['N'][/BRANCH]
+115         expr = sum_simplify(expr)
+116 
+117     if expr.has(Product): ## [BRANCH]taken=['N'][/BRANCH]
+118         expr = product_simplify(expr)
+119 
+120     short = shorter(powsimp(expr, combine='exp', deep=True), powsimp(expr), expr)
+121     short = shorter(short, cancel(short))
+122     short = shorter(short, factor_terms(short), expand_power_exp(expand_mul(short)))
+123     if short.has(TrigonometricFunction, HyperbolicFunction, ExpBase): ## [BRANCH]taken=['N'][/BRANCH]
+124         short = exptrigsimp(short, simplify=False)
+125 
+126     hollow_mul = Transform(
+127         lambda x: Mul(*x.args),
+128         lambda x:
+129         x.is_Mul and
+130         len(x.args) == 2 and
+131         x.args[0].is_Number and
+132         x.args[1].is_Add and
+133         x.is_commutative)
+134     expr = short.xreplace(hollow_mul)
+135 
+136     numer, denom = expr.as_numer_denom()
+137     if denom.is_Add: ## [BRANCH]taken=['N'][/BRANCH]
+138         n, d = fraction(radsimp(1/denom, symbolic=False, max_terms=1))
+139         if n is not S.One:
+140             expr = (numer*n).expand()/d
+141 
+142     if expr.could_extract_minus_sign(): ## [BRANCH]taken=['N'][/BRANCH]
+143         n, d = fraction(expr)
+144         if d != 0:
+145             expr = signsimp(-n/(-d))
+146 
+147     if measure(expr) > ratio*measure(original_expr): ## [BRANCH]taken=['N'][/BRANCH]
+148         expr = original_expr
+149 
+150     if floats and rational is None: ## [BRANCH]taken=['N'][/BRANCH]
+151         expr = nfloat(expr, exponent=False)
+152 
+153     return expr
+[/ANSWER]

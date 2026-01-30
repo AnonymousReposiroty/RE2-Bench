@@ -1,0 +1,113 @@
+[THOUGHT]
+We must trace the list comprehensions and nested comprehensions. The function calls expr._eval_derivative_matrix_lines(x) — for a 2x2 matrix this typically yields one "line object" per matrix entry, so I'll assume there are 4 line objects: line0..line3. Each line.build() returns a small sequence of elements (commonly a single element per line for scalar entries), which I'll call e0..e3.
+
+- At line 57: the comprehension iterates over lines; i takes each line object: ['line0','line1','line2','line3']; lines is that same list.
+
+- At line 61: the outer comprehension iterates over the built parts from line 57; each built part is assumed to be a list with a single element (['e0'], ['e1'], ['e2'], ['e3']). Thus i takes those lists and j takes the inner elements e0..e3. I'll represent i as [['e0'],['e1'],['e2'],['e3']] and j across the inner loops as ['e0','e1','e2','e3'] (each inner list only yields one j).
+
+- At line 69: get_rank is called once per element of parts (four calls). For each call the local parameter parts will be one of ['e0'], ['e1'], ['e2'], ['e3']; inside get_rank the comprehension iterates i over that singleton list (so i takes e0, then in next call e1, etc.). Representing the sequence across the four calls: i=['e0','e1','e2','e3'] and parts=[['e0'],['e1'],['e2'],['e3']].
+
+- At line 71: the comprehension iterates over the (converted) parts which are [['e0'],['e1'],['e2'],['e3']]; so i takes those four lists and parts (at that point) is that same list.
+
+These are symbolic placeholders ('line0' and 'e0' etc.) to show iteration states given the 2x2 input.
+[/THOUGHT]
+
+[ANSWER]
+1 from typing import Tuple as tTuple
+2 from sympy.core.logic import FuzzyBool
+3 from functools import wraps, reduce
+4 import collections
+5 from sympy.core import S, Symbol, Integer, Basic, Expr, Mul, Add
+6 from sympy.core.decorators import call_highest_priority
+7 from sympy.core.compatibility import SYMPY_INTS, default_sort_key
+8 from sympy.core.symbol import Str
+9 from sympy.core.sympify import SympifyError, _sympify
+10 from sympy.functions import conjugate, adjoint
+11 from sympy.functions.special.tensor_functions import KroneckerDelta
+12 from sympy.matrices.common import NonSquareMatrixError
+13 from sympy.simplify import simplify
+14 from sympy.matrices.matrices import MatrixKind
+15 from sympy.utilities.misc import filldedent
+16 from sympy.multipledispatch import dispatch
+17 from .matmul import MatMul
+18 from .matadd import MatAdd
+19 from .matpow import MatPow
+20 from .transpose import Transpose
+21 from .inverse import Inverse
+22 from .special import ZeroMatrix, Identity
+23 from sympy.tensor.array.array_derivatives import ArrayDerivative
+24 from sympy.tensor.array.expressions.conv_array_to_matrix import convert_array_to_matrix
+25 from sympy import ImmutableDenseMatrix
+26 from sympy.matrices.expressions.adjoint import Adjoint
+27 from sympy.matrices.expressions.transpose import Transpose
+28 from sympy import I
+29 from sympy.matrices.expressions.inverse import Inverse
+30 from sympy.matrices.expressions.adjoint import Adjoint
+31 from sympy.core.assumptions import check_assumptions
+32 from sympy.matrices.expressions.transpose import transpose
+33 from sympy.matrices.immutable import ImmutableDenseMatrix
+34 from numpy import empty
+35 from sympy import Sum, Mul, Add, MatMul, transpose, trace
+36 from sympy.strategies.traverse import bottom_up
+37 from .applyfunc import ElementwiseApplyFunction
+38 from sympy import MatrixBase
+39 from sympy import Sum, symbols, Dummy
+40 from sympy.core.expr import ExprBuilder
+41 from sympy.core.expr import ExprBuilder
+42 from ...tensor.array.expressions.array_expressions import ArrayTensorProduct
+43 from ...tensor.array.expressions.array_expressions import ArrayContraction
+44 from sympy.matrices.expressions.slice import MatrixSlice
+45 from sympy import MatrixBase
+46 from sympy.matrices.expressions.slice import MatrixSlice
+47 
+48 Basic._constructor_postprocessor_mapping[MatrixExpr] = {
+49     "Mul": [get_postprocessor(Mul)],
+50     "Add": [get_postprocessor(Add)],
+51 }
+52 
+53 def _matrix_derivative(expr, x):
+54     from sympy.tensor.array.array_derivatives import ArrayDerivative
+55     lines = expr._eval_derivative_matrix_lines(x)
+56 
+57     parts = [i.build() for i in lines]## [STATE]i=['line0','line1','line2','line3'][/STATE] [STATE]lines=['line0','line1','line2','line3'][/STATE]
+58 
+59     from sympy.tensor.array.expressions.conv_array_to_matrix import convert_array_to_matrix
+60 
+61     parts = [[convert_array_to_matrix(j) for j in i] for i in parts]## [STATE]j=['e0','e1','e2','e3'][/STATE] [STATE]i=[['e0'],['e1'],['e2'],['e3']][/STATE]
+62 
+63     def _get_shape(elem):
+64         if isinstance(elem, MatrixExpr):
+65             return elem.shape
+66         return 1, 1
+67 
+68     def get_rank(parts):
+69         return sum([j not in (1, None) for i in parts for j in _get_shape(i)]) ## [STATE]i=['e0','e1','e2','e3'][/STATE] [STATE]parts=[['e0'],['e1'],['e2'],['e3']][/STATE]
+70 
+71     ranks = [get_rank(i) for i in parts]## [STATE]i=[['e0'],['e1'],['e2'],['e3']][/STATE] [STATE]parts=[['e0'],['e1'],['e2'],['e3']][/STATE]
+72     rank = ranks[0]
+73 
+74     def contract_one_dims(parts):
+75         if len(parts) == 1:
+76             return parts[0]
+77         else:
+78             p1, p2 = parts[:2]
+79             if p2.is_Matrix:
+80                 p2 = p2.T
+81             if p1 == Identity(1):
+82                 pbase = p2
+83             elif p2 == Identity(1):
+84                 pbase = p1
+85             else:
+86                 pbase = p1*p2
+87             if len(parts) == 2:
+88                 return pbase
+89             else:
+90                 if pbase.is_Matrix:
+91                     raise ValueError("")
+92                 return pbase*Mul.fromiter(parts[2:])
+93 
+94     if rank <= 2:
+95         return Add.fromiter([contract_one_dims(i) for i in parts])
+96 
+97     return ArrayDerivative(expr, x)
+[/ANSWER]

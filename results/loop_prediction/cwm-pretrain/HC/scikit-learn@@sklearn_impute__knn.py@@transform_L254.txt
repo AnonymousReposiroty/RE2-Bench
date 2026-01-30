@@ -1,0 +1,123 @@
+<think>
+Input:
+X.shape = (4, 5)
+self._valid_mask = [True, True, True, False, True]
+range(X.shape[1]) ⇒ range(5)
+Valid columns: indices where self._valid_mask is True → [0, 1, 2, 4]
+col takes values: 0, 1, 2, 4
+gen: Each chunk in `pairwise_distances_chunked` is a partial distance matrix computed between rows of X with missing values and self._fit_X using the specified metric (nan_euclidean). 
+
+Since X and self._fit_X have 4 rows each, and assuming chunk size is 1 (typical for some distance metrics like Euclidean):
+Number of chunks = min(4, 4) / chunk size
+With chunk size = 1, we get 4 chunks.
+
+Therefore `gen` produces 4 chunks, each a (m, n) matrix where:
+- m = number of rows in current chunk of X (rows with missing values)
+- n = number of rows in self._fit_X (4 in this case)
+</think>
+
+[ANSWER]
+1 from numbers import Integral
+2 import numpy as np
+3 from sklearn.impute._base import _BaseImputer
+4 from sklearn.metrics import pairwise_distances_chunked
+5 from sklearn.metrics.pairwise import _NAN_METRICS
+6 from sklearn.neighbors._base import _get_weights
+7 from sklearn.utils._mask import _get_mask
+8 from sklearn.utils._missing import is_scalar_nan
+9 from sklearn.utils._param_validation import Hidden, Interval, StrOptions
+10 from sklearn.utils.validation import (
+11     FLOAT_DTYPES,
+12     _check_feature_names_in,
+13     check_is_fitted,
+14     validate_data,
+15 )
+16 
+17 class KNNImputer(_BaseImputer):
+18     _parameter_constraints: dict = {**_BaseImputer._parameter_constraints, 'n_neighbors': [Interval(Integral, 1, None, closed='left')], 'weights': [StrOptions({'uniform', 'distance'}), callable, Hidden(None)], 'metric': [StrOptions(set(_NAN_METRICS)), callable], 'copy': ['boolean']}
+19 
+20     def __init__(self, *, missing_values=np.nan, n_neighbors=5, weights='uniform', metric='nan_euclidean', copy=True, add_indicator=False, keep_empty_features=False):
+21         super().__init__(missing_values=missing_values, add_indicator=add_indicator, keep_empty_features=keep_empty_features)
+22         self.n_neighbors = n_neighbors
+23         self.weights = weights
+24         self.metric = metric
+25         self.copy = copy
+26 
+27     def _calc_impute(self, dist_pot_donors, n_neighbors, fit_X_col, mask_fit_X_col):
+28         donors_idx = np.argpartition(dist_pot_donors, n_neighbors - 1, axis=1)[:, :n_neighbors]
+29         donors_dist = dist_pot_donors[np.arange(donors_idx.shape[0])[:, None], donors_idx]
+30         weight_matrix = _get_weights(donors_dist, self.weights)
+31         if weight_matrix is not None:
+32             weight_matrix[np.isnan(weight_matrix)] = 0.0
+33         else:
+34             weight_matrix = np.ones_like(donors_dist)
+35             weight_matrix[np.isnan(donors_dist)] = 0.0
+36         donors = fit_X_col.take(donors_idx)
+37         donors_mask = mask_fit_X_col.take(donors_idx)
+38         donors = np.ma.array(donors, mask=donors_mask)
+39         return np.ma.average(donors, axis=1, weights=weight_matrix).data
+40 
+41     def transform(self, X):
+42         check_is_fitted(self)
+43         if not is_scalar_nan(self.missing_values):
+44             ensure_all_finite = True
+45         else:
+46             ensure_all_finite = 'allow-nan'
+47         X = validate_data(self, X, accept_sparse=False, dtype=FLOAT_DTYPES, force_writeable=True, ensure_all_finite=ensure_all_finite, copy=self.copy, reset=False)
+48         mask = _get_mask(X, self.missing_values)
+49         mask_fit_X = self._mask_fit_X
+50         valid_mask = self._valid_mask
+51         X_indicator = super()._transform_indicator(mask)
+52         if not np.any(mask[:, valid_mask]):
+53             if self.keep_empty_features:
+54                 Xc = X
+55                 Xc[:, ~valid_mask] = 0
+56             else:
+57                 Xc = X[:, valid_mask]
+58             return super()._concatenate_indicator(Xc, X_indicator)
+59         row_missing_idx = np.flatnonzero(mask[:, valid_mask].any(axis=1))
+60         non_missing_fix_X = np.logical_not(mask_fit_X)
+61         dist_idx_map = np.zeros(X.shape[0], dtype=int)
+62         dist_idx_map[row_missing_idx] = np.arange(row_missing_idx.shape[0])
+63 
+64         def process_chunk(dist_chunk, start):
+65             row_missing_chunk = row_missing_idx[start:start + len(dist_chunk)]
+66             for col in range(X.shape[1]):## [STATE]col=[0,1,2,4][/STATE] [STATE]range(X.shape[1])=[range(0,5),range(0,5),range(0,5),range(0,5)][/STATE]
+67                 if not valid_mask[col]:
+68                     continue
+69                 col_mask = mask[row_missing_chunk, col]
+70                 if not np.any(col_mask):
+71                     continue
+72                 potential_donors_idx, = np.nonzero(non_missing_fix_X[:, col])
+73                 receivers_idx = row_missing_chunk[np.flatnonzero(col_mask)]
+74                 dist_subset = dist_chunk[dist_idx_map[receivers_idx] - start][:, potential_donors_idx]
+75                 all_nan_dist_mask = np.isnan(dist_subset).all(axis=1)
+76                 all_nan_receivers_idx = receivers_idx[all_nan_dist_mask]
+77                 if all_nan_receivers_idx.size:
+78                     col_mean = np.ma.array(self._fit_X[:, col], mask=mask_fit_X[:, col]).mean()
+79                     X[all_nan_receivers_idx, col] = col_mean
+80                     if len(all_nan_receivers_idx) == len(receivers_idx):
+81                         continue
+82                     receivers_idx = receivers_idx[~all_nan_dist_mask]
+83                     dist_subset = dist_chunk[dist_idx_map[receivers_idx] - start][:, potential_donors_idx]
+84                 n_neighbors = min(self.n_neighbors, len(potential_donors_idx))
+85                 value = self._calc_impute(dist_subset, n_neighbors, self._fit_X[potential_donors_idx, col], mask_fit_X[potential_donors_idx, col])
+86                 X[receivers_idx, col] = value
+87         gen = pairwise_distances_chunked(X[row_missing_idx, :], self._fit_X, metric=self.metric, missing_values=self.missing_values, ensure_all_finite=ensure_all_finite, reduce_func=process_chunk)
+88         for chunk in gen:## [STATE]chunk=[?, ?, ?, ?][/STATE] [STATE]gen=[(1, 4) matrix, (1, 4) matrix, (1, 4) matrix, (1, 4) matrix][/STATE]
+89             pass
+90         if self.keep_empty_features:
+91             Xc = X
+92             Xc[:, ~valid_mask] = 0
+93         else:
+94             Xc = X[:, valid_mask]
+95         return super()._concatenate_indicator(Xc, X_indicator)
+[/ANSWER]
+[OUTPUT]
+
+[/OUTPUT]
+</s>
+
+[FILEPATH] Ahrarsifat-StatEngine-d2ac3d5/python/statengine/utils/tc-predictor/src/training_data_5.json [/FILEPATH]
+{
+    "prompt": "1 import time\n2 from typing import Optional, Type, Union, Literal\n3 \n4 import numpy as np\n5 \n6 from scipy.sparse import spmatrix, csr_matrix, csc_matrix\n7 from sklearn.base import is_classifier\n8 from sklearn.model_selection._search import BaseSearchCV, ParameterGrid\n9 from sklearn.model_selection._split import check_cv\n10 from sklearn.utils import Bunch\n11 from sklearn.utils.metaestimators import if_delegate_has_method\n12 from sklearn.utils.validation import _is_arraylike, _check_y\n13 \n14 # Instead of from joblib import Parallel, delayed we use custom versions\n15 # here. It is simpler and supports 'spawn' as well (used on\n16 # Windows)\n17 from .._parallel import Parallel, delayed\n18 \n19 from ._process_pool import ProcessPool\n20 from ._validate_select_params import validate_params\n21 \n22 \n23 # early stopping constants\n24 INTERMEDIATE_RESULTS_KEY = \"intermediate_results\"\n25 N_JOBS_KEY = \"n_jobs\"\n26 DISPATCHING_METHOD_KEY = \"dispatching_method\"\n27 RUNTIME_ERROR_MSG = \"Exception in `fit` method\"\n28 \n29 from .logger import _schedule_commands_logger, _fit_callback_logger\n30 \n31 class EarlyStopCallable:\n32     \"\"\"\n33     The callable that can be passed to Parallel. This class controls\n34     callback calling.\n35     \"\"\"\n36     _search_cv: Type[BaseSearchCV]\n37     _n_iteratable: int\n38     _search_is_iteratable: bool\n39     _intermediate_results: dict\n40     _cv_results_orig: Optional[dict]\n41     _n_jobs: int\n42     _dispatching_method: Literal[\"sequentially\" | \"linked\" | \"dask\"]\n43 \n44     def __init__(\n45         self,\n46         search_cv: BaseSearchCV,\n47         n_iteratable: int,\n48         intermediate_results: dict,\n49         n_jobs: int,\n50         dispatching_method: Literal[\"sequentially\" | \"linked\" | \"dask\"],\n51     ):\n52         self._search_cv = search_cv\n53         self._n_iteratable = n_iteratable\n54         self._search_is_iteratable = n_iteratable > 0\n55         self._intermediate_results = intermediate_results\n56         self._cv_results_orig = None\n57         self._n_jobs = n_jobs\n58         self._dispatching_method = dispatching_method\n59 \n60     def __call__(self, result: Bunch) -> Bunch:\n61         if self._search_is_iteratable:\n62             # log results only if there is at least one iteration done\n63             # by a process. This situation is possible if the pool size\n64             # equals the number of candidates and the scheduling strategy\n65             # is 'spawn' (used on Windows)\n66             # The case when the scheduling strategy is 'forkserver' is not\n67             # handled separately because it should be used only when the\n68             # number of candidates is big enough (see _validate_params\n69             # function in _validate_select_params.py)\n70             _schedule_commands_logger.debug(\n71                 \"Received result %s\", (result.n_iteration, result.split_idx)\n72             )\n73             self._intermediate_results[(result.n_iteration, result.split_idx)] = result\n74             # do not compare scores if early_stopping=True\n75             if result.candidates_order is None:\n76                 result = None  # nullify result to avoid serializing it\n77                 return result\n78             early_stopped = len(result.candidates_order) < self._n_iteratable\n79             n_iter_current = len(result.candidates_order)\n80             # check if the iteration was the last one\n81             is_last_it = (result.n_iteration, result.split_idx) == (\n82                 self._n_iteratable - 1,\n83                 self._search_cv.n_splits - 1,\n84             )\n85             result = None  # nullify result to avoid serializing it\n86             if not early_stopped or is_last_it:\n87                 return result\n88             # If early stopping occurs, store the cv_results_ results\n89             # obtained before this point, so that joblib can re-use them\n90             # and we can perform refitting\n91             self._cv_results_orig = self._search_cv.cv_results_\n92             # early stop the loop\n93             if self._n_jobs == 1:\n94                 # We can throw an exception if we are running in a single\n95                 # process, the user will not lose any computation as she will\n96                 # have access to all the results through the _intermediate_results\n97                 # attribute\n98                 raise ValueError(\n99                     \"Loop can be early stopped, force refit\"\n100                 )\n101             return result\n102         return result\n103 \n104     def update(self, result: Union[None, Bunch]) -> None:\n105         # Only log and update the intermediate results when the scheduling\n106         # is done sequentially. We may consider adding the support of the\n107         # futures-based _result_cb which is available only when\n108         # dispatching_method == \"dask\" in the future if there is a demand\n109         # for it.\n110         if self._dispatching_method == \"sequentially\":\n111             self(result)\n112 \n113 \n114 def _stop_if_required(\n115     search: BaseSearchCV,\n116     search_iter_results: Bunch,\n117     n_iteratable: int,\n118     early_stopped: bool,\n119     early_stopped_iter_idx: int,\n120     kind_of_estimator: str,\n121 ) -> bool:\n122     \"\"\"\n123     Helper function to trigger an early stop if all the iteratables\n124     converged\n125     \"\"\"\n126     search_iteration_converged = False\n127     if early_stopped:\n128         # Early stopped in an intermediate result, check if any\n129         # other parameter set has a better score\n130         current_best_score = search.best_score_\n131         if kind_of_estimator == \"regressor\":\n132             search_iteration_converged = np.all(\n133                 search_iter_results[\"mean_test_score\"]\n134                 <= current_best_score\n135             )\n136         elif kind_of_estimator == \"classifier\":\n137             search_iteration_converged = np.all(\n138                 search_iter_results[\"mean_test_score\"]\n139                 >= current_best_score\n140             )\n141 \n142         # Only True if this is the last configuration to iterate\n143         search_should_be_early_stopped = n_iteratable == early_stopped_iter_idx + 1\n144     else:\n145         # Early stopped at the end\n146         search_should_be_early_stopped = False\n147         search_iteration_converged = True\n148 \n149     return search_should_be_early_stopped and search_iteration_converged\n150 \n151 \n152 def _get_refit_fn(\n153     method: Literal[\"fit\" | \"predict\" | \"decision_function\"],\n154     default_cls: Optional[Type],\n155     _threadsafe_fit: bool,\n156 ) -> Optional[Callable]:\n157     \"\"\"\n158     Helper function to return a method's local refit function. Returns\n159     None if no method was found\n160     \"\"\"\n161     if default_cls is not None and not is_classifier(default_cls):\n162         # skip predict which only exists for classifiers\n163         available_methods = (\"fit\", \"predict_proba\", \"decision_function\")\n164     else:\n165         available_methods = (\"fit\", \"predict\")\n166 \n167     methods = {\n168         mth: getattr(default_cls, \"{}_refit_{mth}\".format(method), None)\n169         for mth in available_methods\n170     }\n171     # Only the methods that actually exist\n172     methods = {\n173         k: v\n174         for (k, v) in methods.items()\n175         if v is not None\n176     }\n177     # Threadsafety is a hard constraint\n178     if _threadsafe_fit and method == \"fit\":\n179         return methods.get(\"fit\")\n180     if method != \"fit\":\n181         return methods.get(method)\n182     return None\n183 \n184 \n185 def _setup_pool(\n186     cv: Iterator,\n187     candidates_params: list,\n188     search: BaseSearchCV,\n189     refit_function: Callable,\n190     threadsafe_fit: bool,\n191     X: Union[np.ndarray, spmatrix],\n192     y: np.ndarray,\n193     groups: Optional[np.ndarray],\n194     sample_weights: Optional[np.ndarray],\n195     scorer: Callable,\n196     n_jobs: int,\n197     verbose: int,\n198     pre_dispatch: int,\n199     dispatching_method: Literal[\"sequentially\" | \"linked\" | \"dask\"],\n200     error_score: float,\n201     step: str,\n202     **fit_params,\n203 ) -> Tuple[Parallel, EarlyStopCallable, int, bool]:\n204     \"\"\"\n205     Generate a pool to apply jobs in parallel.\n206     \"\"\"\n207     n_iteratable = search.n_splits * len(candidates_params)\n208     # If no parameter list is provided (eg for model selection), generate\n209     # one based on the given parameter grid. The size of the grid\n210     # will determine the number of jobs we can dispatch\n211     if not len(candidates_params):\n212         # using non-scientific number of jobs to prevent the spawn of\n213         # too many jobs in case of a huge parameter grid\n214         candidates_params = list(ParameterGrid(search.param_grid))\n215         if n_iteratable >= 200:\n216             n_jobs = 2\n217         else:\n218             n_jobs = 3\n219 \n220     # create single fit set and send with the parallel loop to avoid\n221     # (un)pickling errors\n222     fit_single_call_params = {\"X\": X, \"y\": y, \"groups\": groups}\n223 \n224     with np.errstate(divide=\"ignore\", invalid=\"ignore\"):\n225         # Split only on the candidate_params axis. This generates\n226         # `n_splits * len(candidate_params)` tuples\n227         iterable = (\n228             (\n229                 estimator.clone(),\n230                 parameters,\n231                 cv,\n232                 (estimator.estimator, parameters),\n233                 search,\n234                 step,\n235                 pre_dispatch,\n236             )\n

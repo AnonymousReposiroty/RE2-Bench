@@ -1,0 +1,117 @@
+[THOUGHT]
+We trace prepare_url with url="http://127.0.0.1:10000//v:h" (a str) and params={}.
+
+- Line 56: isinstance(url, bytes) is False (it's str) => branch at 56 is N; the else at 58 is taken (Y).
+- Line 61: ':' in url is True, but url.lower().startswith('http') is True, so the combined condition is False => 61 is N.
+- parse_url yields scheme='http', host='127.0.0.1', port=10000, path='//v:h', query and fragment empty. So:
+  - Line 68: not scheme is False => N.
+  - Line 70: not host is False => N.
+  - Line 72: unicode_is_ascii(host) is True, so not unicode_is_ascii(host) is False => 72 is N.
+  - Line 77: host.startswith(('*', '.')) is False => 77 is N.
+- netloc = auth or '' yields empty string, so Line 80 (if netloc) is False => 80 is N.
+- port exists (10000), so Line 83 is True => 83 is Y.
+- path is non-empty ('//v:h'), so Line 85 (if not path) is False => 85 is N.
+- params is a dict, not str/bytes, so Line 87 is False => 87 is N.
+- _encode_params({}) will produce an empty/falsy value, so Line 90 (if enc_params) is False => 90 is N, and the nested Line 91 is not entered so it's N.
+
+All branch markers are single-occurrence decisions, so each list contains one 'Y' or 'N' accordingly.
+[/THOUGHT]
+
+[ANSWER]
+1 from urllib3.exceptions import (
+2     DecodeError,
+3     LocationParseError,
+4     ProtocolError,
+5     ReadTimeoutError,
+6     SSLError,
+7 )
+8 from urllib3.util import parse_url
+9 from ._internal_utils import to_native_string, unicode_is_ascii
+10 from .compat import urlencode, urlsplit, urlunparse
+11 from .exceptions import (
+12     ChunkedEncodingError,
+13     ConnectionError,
+14     ContentDecodingError,
+15     HTTPError,
+16     InvalidJSONError,
+17     InvalidURL,
+18 )
+19 from .exceptions import MissingSchema
+20 from .hooks import default_hooks
+21 from .utils import (
+22     check_header_validity,
+23     get_auth_from_url,
+24     guess_filename,
+25     guess_json_utf,
+26     iter_slices,
+27     parse_header_links,
+28     requote_uri,
+29     stream_decode_response_unicode,
+30     super_len,
+31     to_key_val_list,
+32 )
+33 import idna
+34 
+35 class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+36 
+37     def __init__(self):
+38         self.method = None
+39         self.url = None
+40         self.headers = None
+41         self._cookies = None
+42         self.body = None
+43         self.hooks = default_hooks()
+44         self._body_position = None
+45 
+46     @staticmethod
+47     def _get_idna_encoded_host(host):
+48         import idna
+49         try:
+50             host = idna.encode(host, uts46=True).decode('utf-8')
+51         except idna.IDNAError:
+52             raise UnicodeError
+53         return host
+54 
+55     def prepare_url(self, url, params):
+56         if isinstance(url, bytes): ## [BRANCH]taken=['N'][/BRANCH]
+57             url = url.decode('utf8')
+58         else: ## [BRANCH]taken=['Y'][/BRANCH]
+59             url = str(url)
+60         url = url.lstrip()
+61         if ':' in url and (not url.lower().startswith('http')): ## [BRANCH]taken=['N'][/BRANCH]
+62             self.url = url
+63             return
+64         try:
+65             scheme, auth, host, port, path, query, fragment = parse_url(url)
+66         except LocationParseError as e:
+67             raise InvalidURL(*e.args)
+68         if not scheme: ## [BRANCH]taken=['N'][/BRANCH]
+69             raise MissingSchema(f'Invalid URL {url!r}: No scheme supplied. Perhaps you meant https://{url}?')
+70         if not host: ## [BRANCH]taken=['N'][/BRANCH]
+71             raise InvalidURL(f'Invalid URL {url!r}: No host supplied')
+72         if not unicode_is_ascii(host): ## [BRANCH]taken=['N'][/BRANCH]
+73             try:
+74                 host = self._get_idna_encoded_host(host)
+75             except UnicodeError:
+76                 raise InvalidURL('URL has an invalid label.')
+77         elif host.startswith(('*', '.')): ## [BRANCH]taken=['N'][/BRANCH]
+78             raise InvalidURL('URL has an invalid label.')
+79         netloc = auth or ''
+80         if netloc: ## [BRANCH]taken=['N'][/BRANCH]
+81             netloc += '@'
+82         netloc += host
+83         if port: ## [BRANCH]taken=['Y'][/BRANCH]
+84             netloc += f':{port}'
+85         if not path: ## [BRANCH]taken=['N'][/BRANCH]
+86             path = '/'
+87         if isinstance(params, (str, bytes)): ## [BRANCH]taken=['N'][/BRANCH]
+88             params = to_native_string(params)
+89         enc_params = self._encode_params(params)
+90         if enc_params: ## [BRANCH]taken=['N'][/BRANCH]
+91             if query: ## [BRANCH]taken=['N'][/BRANCH]
+92                 query = f'{query}&{enc_params}'
+93             else:
+94                 query = enc_params
+95         url = requote_uri(urlunparse([scheme, netloc, path, None, query, fragment]))
+96         self.url = url
+97

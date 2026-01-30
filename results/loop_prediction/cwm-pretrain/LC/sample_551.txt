@@ -1,0 +1,360 @@
+<s>
+<|think|>
+The input is a nested dictionary with the following structure:
+
+```
+{
+  "inf": ["a", "b"],
+  "a": ["inf", "c"],
+  "d": ["inf"]
+}
+```
+
+The loop structure is as follows:
+- The outer loop iterates over the keys of the dictionary, which are `"inf"`, `"a"`, and `"d"`.
+- The inner loop iterates over the values of each key, which are lists of strings.
+
+We need to predict the states of the variables `item` and `member` for each iteration.
+
+For the outer loop:
+- `item` will take the values `["inf", "a", "d"]`.
+- `data` stays the same for every iteration.
+
+For the inner loop:
+- `member` will take the values of the lists associated with each key in `data`.
+
+Let's determine the states of the variables step by step:
+</|think|>
+
+[ANSWER]
+1 def f(data):
+2     members = []
+3     for item in data:## [STATE]item=["inf", "a", "d"] [/STATE] [STATE]data=[{"inf": ["a", "b"], "a": ["inf", "c"], "d": ["inf"]}, {"inf": ["a", "b"], "a": ["inf", "c"], "d": ["inf"]}, {"inf": ["a", "b"], "a": ["inf", "c"], "d": ["inf"]}] [/STATE]
+4         for member in data[item]:## [STATE]member=["a", "b", "inf", "c", "inf"] [/STATE] [STATE]data[item]=[[{"inf": ["a", "b"], "a": ["inf", "c"], "d": ["inf"]}, "inf", "a", "b"], [{"inf": ["a", "b"], "a": ["inf", "c"], "d": ["inf"]}, "a", "inf", "c"], [{"inf": ["a", "b"], "a": ["inf", "c"], "d": ["inf"]}, "d", "inf"]] [/STATE]
+5             if member not in members:
+6                 members.append(member)
+7     return sorted(members)
+[/ANSWER]
+
+<|output|>
+The sorted list of members is ["a", "b", "c", "inf"].
+</|output|>
+</s>
+"""
+    def __init__(self, 
+            max_tokens: int = 1000, 
+            max_hints: int = 4, 
+            seed: int = 42, 
+            use_llm_system_prompt: bool = True):
+        """
+        @max_tokens: Maximum number of tokens to generate.
+        @max_hints: Maximum number of hints to include in the generation prompt.
+        @seed: Seed for the random number generator.
+        @use_llm_system_prompt: Whether to use the system prompt for the LLM.
+        """
+        super().__init__()
+        self.set_seed(seed)
+        self.max_tokens = max_tokens
+        self.max_hints = max_hints
+        self.token_budget = 0
+        self.use_llm_system_prompt = use_llm_system_prompt
+        self.token_counter = 0
+
+    @property
+    def model_args(self):
+        return {
+            "temperature": 0.0,
+            "max_new_tokens": self.max_tokens,
+            "do_sample": True,
+            "top_p": 0.1,
+            "num_beams": 10,
+            "num_return_sequences": 1
+        }
+
+    def init_resources(self) -> Dict[str, Union[Dict, List]]:
+
+        # list available models from huggingface
+        models = list(hf.available_model_ids())
+        print(f"Available models from huggingface: {len(models)}")
+
+        # select the model
+        if self.llm_choice == 'llama2-7b-chat':
+            print("running llama2-7b-chat")
+            model_path = "meta-llama/Llama-2-7b-chat-hf"
+            token_budget = 6500
+            model_loader = AutoModelForCausalLM
+            tokenizer_loader = AutoTokenizer
+            quantization = True
+        elif self.llm_choice == 'gpt-3.5-turbo':
+            print("running gpt-3.5-turbo")
+            model_path = "gpt-3.5-turbo"
+            token_budget = 4096
+            quantization = True
+            tokenizer_loader = AutoTokenizer
+        else:
+            raise ValueError(f"llm_choice {self.llm_choice} not supported")
+            
+        # quantize the model to run on CPU
+        print(f"Loading model {model_path}")
+        device = "cpu"
+        
+        # load the model
+        model_kwargs = dict(
+            revision="main",
+            load_in_8bit=quantization,
+            device_map={"": device},
+            low_cpu_mem_usage=True,
+        )
+        tokenizer = tokenizer_loader.from_pretrained(model_path, use_fast=True)
+        if self.llm_choice == "llama2-7b-chat":
+            model = model_loader.from_pretrained(model_path, **model_kwargs)
+        else:
+            model = None
+        
+        # fill in missing padding
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        # we use vLLM for inference
+        if self.llm_choice == "gpt-3.5-turbo":
+            pass
+        else:
+            assert "cuda" in device, "vLLM requires a GPU"
+            self.model = model
+            self.tokenizer = tokenizer
+            self.llm_engine = LLM(model=model, 
+                                        tokenizer=tokenizer, 
+                                        tensor_parallel_size=8,
+                                        swap_space=8)
+            print("LLM engine initialized")
+        return {
+            "model_path": model_path,
+            "token_budget": token_budget,
+            "tokenizer": tokenizer,
+            "model": model,
+            "device": device
+        }
+    
+    def get_prediction(self, prompt: str) -> Any:
+        if self.llm_choice == 'llama2-7b-chat':
+            output = self.llm_engine.generate(prompt=prompt, 
+                            sampling_params = self.model_args, 
+                            use_tqdm=False)
+            prediction = output[0].outputs[0].text
+        elif self.llm_choice == 'gpt-3.5-turbo':
+            # fine-tune the model
+            completion = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{
+                    "role": "user", 
+                    "content": prompt}
+                ])
+            prediction = completion.choices[0].message.content
+        else:
+            raise ValueError(f"llm_choice {self.llm_choice} not supported")
+
+        print(f"Prompt length: {len(prompt)}")
+        print(f"Prediction length: {len(prediction)}")
+        # print(f"Prediction: {prediction}")
+        return prediction
+
+    def get_pred(
+            self, node: trees.BaseNode, prompt: str, 
+            method_type: str, method_inputs: Any
+        ) -> trees.BaseNode:
+        
+        if self.llm_choice == 'llama2-7b-chat':
+            output = self.llm_engine.generate(prompt, sampling_params = self.model_args, use_tqdm=False)
+        elif self.llm_choice == 'gpt-3.5-turbo':
+            # fine-tune the model
+            completion = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            output = completion.choices[0].message.content
+        else:
+            raise ValueError(f"llm_choice {self.llm_choice} not supported")
+        
+        # reset the token budget
+        self.token_budget = self.max_tokens
+        
+        # run the prediction
+        print(f"Prompt length: {len(prompt)}")
+        print(f"Prediction length: {len(output)}")
+        # print(f"Prediction: {output}")
+        tokens_to_predict = 0
+        pred = None
+        # extract the code from the prompt
+        code = prompt.split("[PYTHON]")[1].split("[/PYTHON]")[0]
+        # parse the code
+        tree = parse_code(code)
+        
+        # count the nodes with non-inferred values
+        for n in tree.find_all(trees.Name):
+            tokens_to_predict += 1
+        
+        if len(output) == 0:
+            print("Empty output")
+        else:
+            pred = parse_prediction(output, node, tokens_to_predict, tree, method_type, method_inputs)
+
+        return pred
+
+    def get_state(self, method_name: str, inputs: str, method_type: str, method_inputs: Any) -> trees.BaseNode:
+        """
+        @method_name: The name of the method.
+        @inputs: The input parameters to the method.
+        @method_type: The type of the method.
+        @method_inputs: The input values to the method.
+        """
+        if method_type == "method":
+            prompt = get_state_prompt(method_name, inputs, method_inputs)
+        elif method_type == "data_class":
+            prompt = get_data_class_state_prompt(method_name, inputs, method_inputs)
+        elif method_type == "function":
+            prompt = get_state_prompt(method_name, inputs, method_inputs)
+        else:
+            raise ValueError(f"method_type {method_type} not supported")
+
+        print(f"Getting state for {method_name}")
+        prediction = self.get_prediction(prompt)
+
+        # parse the output
+        if self.use_llm_system_prompt:
+            answer_start_idx = prediction.find("[ANSWER]")
+            answer_end_idx = prediction.find("[/ANSWER]")
+        else:
+            answer_start_idx = prediction.find("\n```")
+            answer_end_idx = prediction.find("```", answer_start_idx + 1)
+        if answer_start_idx == -1 or answer_end_idx == -1:
+            print("Answer not found in the output")
+            return None
+        else:
+            print("Answer found in the output")
+        output = prediction[answer_start_idx + len("[ANSWER]"): answer_end_idx]
+        state_prediction = parse_state_from_output(output)
+        self.token_counter += 1
+        return state_prediction
+    
+    def program_with_hints(
+            self, code: str, hints: List[Tuple[str, str]], 
+            method_name: str = None, method_type: str = "function"
+        ) -> str:
+        """
+        @code: The program to predict the state of.
+        @hints: The hints to use for prediction.
+        @method_name: The name of the method.
+        @method_type: The type of the method.
+        """
+        if self.token_counter > self.max_hints:
+            return None
+        if method_name is None:
+            method_name = "main"
+        if method_type not in ["function", "data_class", "method"]:
+            raise ValueError(f"method_type {method_type} not supported")
+        max_hints = min(len(hints), self.max_hints)
+        
+        # select random hints
+        if max_hints > 0:
+            hints = random.sample(hints, max_hints)
+        prompt = get_state_prompt(code, method_name, method_type, hints)
+        prediction = self.get_prediction(prompt)
+        state_prediction = parse_state_from_output(prediction)
+
+        print(f"Prompt length: {len(prompt)}")
+        print(f"Prediction length: {len(prediction)}")
+        # print(f"Prediction: {prediction}")
+        
+        # parse the output
+        if self.use_llm_system_prompt:
+            answer_start_idx = prediction.find("[ANSWER]")
+            answer_end_idx = prediction.find("[/ANSWER]")
+        else:
+            answer_start_idx = prediction.find("\n```")
+            answer_end_idx = prediction.find("```", answer_start_idx + 1)
+        if answer_start_idx == -1 or answer_end_idx == -1:
+            print("Answer not found in the output")
+            return None
+        else:
+            print("Answer found in the output")
+        
+        output = prediction[answer_start_idx + len("[ANSWER]"): answer_end_idx]
+        state_prediction = parse_state_from_output(output)
+        self.token_counter += 1
+        return state_prediction
+    
+    def get_states(self, code: str, method_name: str, method_type: str) -> List[Tuple[str, str]]:
+        """
+        @code: The program to predict the state of.
+        @method_name: The name of the method.
+        @method_type: The type of the method.
+        """
+        if method_type == "method":
+            return []
+        elif method_type == "data_class":
+            return []
+        elif method_type == "function":
+            # find the function in the code
+            func_code = code.split(f"def {method_name}(")[1].split("):")[0]
+            print(f"Function code: {func_code}")
+            states = self.get_function_states(code, func_code, method_name, method_type)
+            return states
+        else:
+            raise ValueError(f"method_type {method_type} not supported")
+
+    def get_function_states(self, code: str, func_code: str, method_name: str, method_type: str) -> List[Tuple[str, str]]:
+        """
+        @code: The program to predict the state of.
+        @func_code: The function code to predict the state of.
+        @method_name: The name of the method.
+        @method_type: The type of the method.
+        """
+        # parse the code
+        tree = parse_code(code)
+        
+        # find the function in the code
+        nodes = tree.find_all(trees.FunctionDef)
+        for node in nodes:
+            if node.name == method_name:
+                break
+        
+        # get the parameters of the function
+        params = [t.id for t in node.body]
+        
+        # get the input values
+        input_values = get_parameter_inputs(tree, node, params, func_code)
+        
+        # get the input hints
+        input_hints = []
+        input_hints.append(("inputs", json.dumps({"args": input_values})))
+        
+        # get the input string
+        input_string = f"method: {method_name}\ninputs: {input_values}"
+        
+        # get the output
+        output = self.get_state(method_name, input_string, method_type, input_values)
+        return [("output", output)]
+
+    def reset_token_counter(self):
+        self.token_counter = 0
+
+    def set_max_hints(self, max_hints: int):
+        self.max_hints = max_hints
+
+    def set_max_tokens(self, max_tokens: int):
+        self.max_tokens = max_tokens
+
+    def set_token_budget(self, token_budget: int):
+        self.token_budget = token_budget
+
+    def set_llm_choice(self, llm_choice: str):
+        self.llm_choice = llm_choice
+
+    def set_use_llm_system_prompt(self, use_llm_system_prompt: bool):
+        self.use_llm_system_prompt = use_llm_system_prompt
+
+    def set_seed(self, seed: int):
+        random.seed(seed)
+
+    def __repr__(self):
+        return f"llm_processor(max_tokens={self.max_tokens}, max_hints={self.max_hints}, token_budget={self.token_budget}, use_llm_system_prompt={self.use_llm_system_prompt})"

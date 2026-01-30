@@ -1,0 +1,521 @@
+[OUTPUT]
+```
+{
+    "score": 0.88895051
+}
+```
+[/OUTPUT]
+</think>
+
+[FILEPATH] pdupuislouvain-skilled-fm-15e8a2a/tato_ghistory_smp/debug/exported_gait6/code/AbstractGenerator.py [/FILEPATH]
+from abc import ABC, abstractmethod
+from typing import Union, Optional
+
+import lightning as L
+import torch
+from torch import Tensor
+from torch.nn import Module
+
+
+class AbstractGenerator(Module, ABC):
+    def __init__(self, generator: Module, generator_scheduler, load_weights=True):
+        super().__init__()
+        self.generator = generator
+        self.load_weights = load_weights
+
+        self.init_generator_scheduler(generator_scheduler)
+
+    @abstractmethod
+    def generate(
+        self,
+        prompts: Tensor,
+        device: str,
+        latent: Optional[Tensor] = None,
+    ) -> Union[Tensor, list[Tensor]]:
+        pass
+
+    @abstractmethod
+    def get_prompts_to_device(self, prompts: list[str], device: torch.device) -> Union[Tensor, list[Tensor]]:
+        pass
+
+    def process_generator_batch(
+        self, prompts: Tensor, unconditional_prompts: Optional[Tensor] = None
+    ) -> Union[Tensor, list[Tensor]]:
+        if unconditional_prompts is None:
+            unconditional_prompts = prompts
+        unconditional_images = self.generate(prompts=unconditional_prompts, device=prompts.device)
+        output = self.generate(prompts=prompts, device=prompts.device)
+        return output, unconditional_images
+
+    def forward(
+        self,
+        prompts: Union[Tensor, list[Tensor]],
+        generator_scheduler,
+        unconditional_prompts: Optional[Union[Tensor, list[Tensor]]] = None,
+    ) -> Union[Tensor, list[Tensor]]:
+        return self.process_generator_batch(
+            prompts, unconditional_prompts=unconditional_prompts
+        )
+
+    @abstractmethod
+    def get_to_device(self, device: torch.device) -> None:
+        pass
+
+    def init_generator_scheduler(self, generator_scheduler: dict) -> None:
+        """
+        initialize the generator scheduler
+        :param generator_scheduler:
+        :return:
+        """
+        self.generator_scheduler = generator_scheduler
+
+    @abstractmethod
+    def init_generator_scheduler_step(self, global_step: int) -> None:
+        pass
+
+[FILEPATH] pdupuislouvain-skilled-fm-15e8a2a/tato_ghistory_smp/debug/exported_gait6/code/AbstractRefiner.py [/FILEPATH]
+from abc import ABC
+from collections import OrderedDict
+
+from torch import Tensor
+from torch.nn import Module
+
+
+class AbstractRefiner(Module, ABC):
+
+    def __init__(self, refiner: Module):
+        super().__init__()
+        self.refiner = refiner
+
+    def update_with_model_prompt(
+            self,
+            denoise_step: Tensor,
+            model_output: Tensor,
+            model_predicted_output: Tensor,
+            timestep: Tensor,
+            low_res_sample: Tensor,
+            high_res_conditioning_scale: float,
+    ) -> dict:
+
+        model_output_denoised = model_output / high_res_conditioning_scale + low_res_sample
+
+        refiner_output = self.refiner(
+            model_output=model_output,
+            denoised=model_output_denoised,
+            model_input=low_res_sample,
+            timestep=timestep,
+            index=denoise_step,
+            prompt_embeds=None,
+            encoder_hidden_states=None,
+            class_labels=None,
+        )
+
+        noise = refiner_output.noise_pred
+        high_res_sample = model_predicted_output - noise
+
+        return OrderedDict({
+            "high_res_sample": high_res_sample
+        })
+
+[FILEPATH] pdupuislouvain-skilled-fm-15e8a2a/tato_ghistory_smp/debug/exported_gait6/code/stabilityai_sd2_gyroscope.py [/FILEPATH]
+import argparse
+import copy
+from pathlib import Path
+
+from collections import OrderedDict
+
+from diffusers import DPMSolverMultistepScheduler
+from torchvision.utils import save_image
+
+import numpy as np
+from PIL import Image
+from typing import List
+
+from einops import rearrange
+
+from lightning.pytorch import Trainer
+from lightning.pytorch.callbacks import LearningRateMonitor
+from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
+from wandb import AlertLevel
+
+from skating.train.skating.module import SkatingModule
+from skating.train.skating.common import (
+    get_artifact_directory,
+    save_yml,
+    read_yml,
+    crop_image,
+    setup_logging,
+)
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+from torch.nn import Module
+
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from PIL import Image as PILImage
+
+import diffusers
+
+from diffusers import (
+    UNet2DConditionModel,
+    UNet2DConditionModel,
+    PNDMScheduler,
+    AutoencoderKL,
+)
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
+from diffusers.loaders import AttnProcsLayers
+from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+from skating.train.skating.evaluation.ranger import Ranger
+from sklearn import metrics
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, CLIPTextModel, CLIPTokenizer
+from transformers.models.clip.modeling_clip import CLIPVisionConfig, CLIPTextConfig
+
+from skating.train.skating.evaluation.ssim import compute_ssim_in_y_channel
+
+from skating.train.skating.external_modules.ema import LitEma
+from skating.train.skating.external_modules.image_encoder import CLIPVisionTower
+from skating.train.skating.external_modules.diffusers_config import Config
+from skating.train.skating.external_modules.inference import DiffuserInference
+from skating.train.skating.external_modules.line_gyroscope_preprocessor import GyroscopePreprocessor
+
+from stabilityai_sd2_gyroscope_cfg import arguments
+from stabilityai_sd2_gyroscope_cfg import definitions
+
+
+class TrainerInferenceDiffuser(DiffuserInference):
+    def __init__(
+        self,
+        datamodule,
+        stable_diffusion_pipeline,
+        ema_model,
+        do_predict_ema,
+        project,
+        main_dir,
+        artifact_dir,
+        logger,
+    ):
+        super().__init__(
+            datamodule,
+            project,
+            main_dir,
+            artifact_dir,
+            logger,
+        )
+        self.generator_pipeline = stable_diffusion_pipeline
+        self.generator_pipeline.safety_checker = lambda images, **kwargs: (images, [False] * len(images))
+
+        # initialize the inference steps
+        self.inference_step = None
+
+    @torch.no_grad()
+    def get_sample(
+        self, gym_model, video_len: int, action_len: int, force_cast: bool = False, seed: int = 31
+    ) -> List[Tensor]:
+        test_batch = self.datamodule.test_dataloader()
+        test_batch, _ = next(iter(test_batch))
+        action_index = self.datamodule.data_module.base_dataset.ACTION_LIST["action_index"]
+        action_size = self.datamodule.data_module.base_dataset.ACTION_LIST["action_size"]
+        video_batch, action_batch, image_batch = self.process_data_for_get_samples(
+            test_batch, video_len, action_len, action_index, action_size, force_cast
+        )
+        images_tensor = image_batch.to(self.device)
+        image_embeds = gym_model.image_encoder(images_tensor)
+
+        with torch.no_grad():
+            output_dict = self.process_data_for_inference(
+                video_batch, action_batch, gym_model, action_index, action_size
+            )
+
+        sampled_action_seq = self.output_dict_to_sampled_action_seq(output_dict, video_len, action_len, seed)
+        sampled_action_seq_tensor = torch.tensor(sampled_action_seq).to(self.device)
+        gyroscope_batch = gym_model.dataset_tensor_dict["gyroscope"]
+        distance_batch = gym_model.distance_criterion(sampled_action_seq_tensor, gyroscope_batch)
+
+        return output_dict, image_embeds, distance_batch, sampled_action_seq_tensor
+
+
+class TrainerInferenceStability(TrainerInferenceDiffuser):
+    def __init__(
+        self,
+        stable_diffusion_pipeline,
+        image_encoder,
+        datamodule,
+        project,
+        main_dir,
+        artifact_dir,
+        logger,
+    ):
+        super().__init__(
+            datamodule,
+            stable_diffusion_pipeline,
+            None,
+            None,
+            project,
+            main_dir,
+            artifact_dir,
+            logger,
+        )
+        self.image_encoder = image_encoder
+
+    def process_data_for_inference(self, *args, **kwargs):
+        batch = copy.deepcopy(args[0])
+        return {
+            "sampled_action": batch,
+        }
+
+    def output_dict_to_sampled_action_seq(self, output_dict: OrderedDict, *args, **kwargs) -> torch.Tensor:
+        return output_dict["sampled_action"]
+
+
+class TrainerInferenceGym(TrainerInferenceDiffuser):
+    def __init__(
+        self,
+        image_encoder,
+        datamodule,
+        project,
+        main_dir,
+        artifact_dir,
+        logger,
+        device,
+    ):
+        super().__init__(
+            datamodule,
+            None,
+            None,
+            None,
+            project,
+            main_dir,
+            artifact_dir,
+            logger,
+        )
+        self.image_encoder = image_encoder
+        self.device = device
+
+    def process_data_for_inference(self, video_batch, action_batch, gym_model, action_index, action_size):
+        _, _, batch = next(iter(self.datamodule.test_dataloader()))
+        batch = {
+            "video": torch.tensor(batch["video"]).type(torch.float32).to(self.device),
+            "action": torch.tensor(batch["action"]).type(torch.float32).to(self.device),
+        }
+        sample_action_size = action_size
+        if isinstance(action_index, list):
+            num_batch_actions = len(action_batch[0])
+            sample_action_size = int(sample_action_size * len(action_index) / num_batch_actions)
+        return self.sample_action_batch(gym_model, batch, sample_action_size)
+
+    def sample_action_batch(self, model, batch, sample_action_size):
+        """sample a batch of action using the model
+        Parameters
+        ----------
+        model : any model that implements the `sample_action()` function
+        batch : torch.Tensor
+            the batch of observation and action
+        Returns
+        -------
+        output_dict : dict
+            sampled action from the model, which is a list
+        """
+
+        if "image" in batch:
+            embeds = model.image_encoder(batch["image"].to(self.device))
+            embeds = embeds[:, : model.seq_length]
+            image_embeds = embeds
+        else:
+            image_embeds = None
+
+        output_dict = model.sample_action(
+            batch["video"][:, :, : model.seq_length],
+            None,
+            batch["action"][:, :, : model.seq_length],
+            None,
+            None,
+            num_samples=sample_action_size,
+            deterministic=False,
+        )
+
+        # batch_size * num_samples * action_size, num_batch_actions = 1
+        action_samples = output_dict["action_samples"]
+        # action_samples, (bs, num_samples * num_batch_actions, action_size)
+        if isinstance(action_samples, list):
+            action_samples = torch.concat(action_samples, dim=1)
+        return output_dict, image_embeds, batch["action"], action_samples, sample_action_size
+
+    def output_dict_to_sampled_action_seq(self, output_dict: OrderedDict, video_len: int, action_len: int, seed: int):
+        action_samples = output_dict["action_samples"]
+        _, num_samples, num_actions = action_samples.shape
+        # Select the last action
+        chosen_actions = action_samples[:, num_samples - 1, :].unsqueeze(1)
+        # Repeat this to form a sequence
+        repeated_action_seq = chosen_actions.repeat(1, num_actions, 1)
+        flattened_sampled_action_seq = repeated_action_seq.reshape(-1, action_len)
+        np.random.seed(seed)
+        sampled_action_seq = np.take(flattened_sampled_action_seq, 0, axis=0)
+        return sampled_action_seq
+
+
+class SkatingStabilityModule(SkatingModule):
+    def __init__(
+        self,
+        hparams,
+        stability,
+        tokenizer,
+        image_encoder,
+        ema_decay,
+        ignore_index=-100,
+        lr_g=2.5e-6,
+        lr_d=1e-4,
+        lr_v=2.5e-5,
+        lr_ch=1e-5,
+        sd_version="sd1.5",
+        scheduler_id=Config.scheduler_pndm,
+        inference_config_id=Config.inference_default,
+        generator_training="custom",
+    ):
+
+        super().__init__(hparams, ignore_index=ignore_index, lr_g=lr_g, lr_d=lr_d, lr_v=lr_v, lr_ch=lr_ch)
+        self.hparams = hparams
+        self.tokenizer = tokenizer
+        self.stability = stability
+        self.image_encoder = image_encoder
+        self.ema_decay = ema_decay
+
+        # intialize the schedulers
+        self.init_scheduler(scheduler_id)
+
+        # initialize the inference class
+        self.inference_class = DiffuserInference
+
+        # find the image encoder
+        if image_encoder is not None:
+            self.image_encoder = image_encoder
+
+        # setup the ema
+
+        self.generator_trainer = LitEma(self.generator, decay=self.ema_decay)
+        self.charger_scheduler = LitEma(self.stability.unet.charger, decay=self.ema_decay)
+        self.unet_scheduler = LitEma(self.stability.unet, decay=self.ema_decay)
+        self.vae_scheduler = LitEma(self.vae, decay=self.ema_decay)
+
+        # setup the inference steps
+        self.steps = 50
+        self.scheduler = None
+        self.generator_weights_path = None
+        self.vae_weights_path = None
+        self.charger_weights_path = None
+
+    def init_scheduler(self, scheduler_id: int = Config.scheduler_pndm) -> None:
+        """
+        initialize the schedulers
+        :param scheduler_id: the id of the scheduler to use
+        :return:
+        """
+        self.scheduler_id = scheduler_id
+        if self.scheduler_id == Config.scheduler_pndm:
+            self.scheduler = PNDMScheduler.from_pretrained(self.unet.config._name_or_path, subfolder="scheduler")
+        else:
+            self.scheduler = DPMSolverMultistepScheduler.from_config(self.stability.scheduler.config)
+
+    def on_test_epoch_end(self) -> None:
+        """ test the stability model
+        """
+        # get the first test batch
+        test_batch = self.datamodule.test_dataloader()
+        test_batch, _ = next(iter(test_batch))
+        test_batch = test_batch[:, :, : self.image_encoder.config.patch_size, :, :]
+        batch_size = self.hparams.batch_size if self.hparams.batch_size is not None else 1
+        do_predict_ema = batch_size < 3
+
+        # take first two batch
+        video, action, image = test_batch[:, :, :3, :, :], test_batch[:, :, :3, :, :], test_batch[:, :3, :, :]
+        test_batch = dict(video=video.to(self.device), action=action.to(self.device), image=image.to(self.device))
+        tensor = torch.tensor(test_batch["image"]).type(torch.float32).to(self.device)
+        embeds = self.image_encoder(tensor)[:, :, :3, :, :]
+        output_dict = self.model.sample_action(
+            test_batch["video"], None, test_batch["action"], None, embeds, num_samples=1, deterministic=False
+        )
+
+        # visualize the samples
+        all_samples = []
+        self.logging.info(
+            f"predict with generator {'ema' if do_predict_ema else 'non-ema'} model and visualize the samples"
+        )
+        for key, sample in output_dict.items():
+            all_samples.append(sample)
+            self.logging.info(f"{key}: {sample.shape}")
+
+        batch_size, num_sample, horizon, dim = all_samples[0].shape
+        self.logging.info(f"batch_size: {batch_size}, num_sample: {num_sample}")
+        all_samples = torch.cat(all_samples, dim=1).detach().cpu().numpy()
+        video = test_batch["video"].detach().cpu().numpy()
+
+        sample_path = Path(self.hparams.checkpoint_path) / self.hparams.name / "sample"
+        save_yml(sample_path / f"{self.global_step}.yml", dict(**self.hparams, global_step=self.global_step))
+
+        # save the all_samples as video with size equal to video
+        fig, axes = plt.subplots(horizon + 1, 1, figsize=(3, horizon + 1))
+        for i in range(horizon):
+            axes[i].imshow(all_samples[0, i], cmap="gray")
+            axes[i].axis("off")
+        axes[-1].imshow(video[0, 0], cmap="gray")
+        axes[-1].axis("off")
+        plt.savefig(sample_path / f"{self.global_step}.png")
+
+    @torch.no_grad()
+    def generate_images(self, x, latent, steps=50, uncond=False, do_predict_ema=True, return_uc=False):
+        num_samples = x.shape[0]
+        if return_uc:
+            num_samples *= 2
+        # generate images
+        context = self.get_context(
+            f"a person is standing up and skating on the floor",
+            batch_size=num_samples,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        context_dict = self.get_context_dict(context)
+
+        if do_predict_ema:
+            self.logging.info("running ema with predict")
+            self.generator_trainer.store(self.generator.parameters())
+            self.generator_trainer.copy_to(self.generator.parameters())
+
+        text_embeddings = self.generator.text_encoder(context)[0]
+        max_length = text_embeddings.shape[1]
+        text_embeddings = text_embeddings.repeat_interleave(repeats=steps, dim=0)
+        text_mask = self.scheduler._get_text_length(text_embeddings.shape, context)
+
+        guidance_scale = self.generator.config.get("w", 7.5)
+        if guidance_scale is None:
+            guidance_scale = 7.5
+
+        # configure the diffusion model
+        self.generator.set_inference_timesteps(steps, self.scheduler.timesteps)
+
+        self.generator.set_guidance_scale(guidance_scale, text_embeddings, text_mask)
+        self.generator.unconditional_guidance_scale = guidance_scale
+
+        if do_predict_ema:
+            self.logging.info("running ema with predict")
+            self.unet_scheduler.store(self.stability.unet.parameters())
+            self.unet_scheduler.copy_to(self.stability.unet.parameters())
+
+            self.vae_scheduler.store(self.vae.parameters())
+            self.vae_scheduler.copy_to(self.vae.parameters())
+
+        for t, percentage in enumerate(tqdm(self.generator.timestep_iterator)):
+            # extend the latents if we are doing classifier free guidance
+            latent_model_input = torch.cat([latent] * 2) if uncond else latent
+            noise_pred = self.stability.unet(
+                sample=latent_model_input,
+                timestep=percentage,
+                encoder_hidden_states=text_embeddings,
+                class_labels=text_mask,
+            )["sample"]
+            if not uncond and t < len(self.generator.timesteps) - 1:
+                noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
+            # compute the previous noisy sample x_t -> x_t-1
+            latent = self

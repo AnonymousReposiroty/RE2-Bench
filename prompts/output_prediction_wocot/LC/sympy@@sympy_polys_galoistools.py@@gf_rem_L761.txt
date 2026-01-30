@@ -1,0 +1,217 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from sympy.external.gmpy import MPZ, invert
+from sympy.polys.domains.domain import Domain
+from sympy.polys.densebasic import dup
+
+def gf_rem(f: dup[MPZ], g: dup[MPZ], p: MPZ, K: Domain[MPZ]) -> dup[MPZ]:
+    return gf_div(f, g, p, K)[1]
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.polys.galoistools.gf_div
+
+def gf_div(
+    f: dup[MPZ], g: dup[MPZ], p: MPZ, K: Domain[MPZ]
+) -> tuple[dup[MPZ], dup[MPZ]]:
+    """
+    Division with remainder in ``GF(p)[x]``.
+
+    Given univariate polynomials ``f`` and ``g`` with coefficients in a
+    finite field with ``p`` elements, returns polynomials ``q`` and ``r``
+    (quotient and remainder) such that ``f = q*g + r``.
+
+    Consider polynomials ``x**3 + x + 1`` and ``x**2 + x`` in GF(2)::
+
+       >>> from sympy.polys.domains import ZZ
+       >>> from sympy.polys.galoistools import gf_div, gf_add_mul
+
+       >>> gf_div(ZZ.map([1, 0, 1, 1]), ZZ.map([1, 1, 0]), 2, ZZ)
+       ([1, 1], [1])
+
+    As result we obtained quotient ``x + 1`` and remainder ``1``, thus::
+
+       >>> gf_add_mul(ZZ.map([1]), ZZ.map([1, 1]), ZZ.map([1, 1, 0]), 2, ZZ)
+       [1, 0, 1, 1]
+
+    References
+    ==========
+
+    .. [1] [Monagan93]_
+    .. [2] [Gathen99]_
+
+    """
+    df = gf_degree(f)
+    dg = gf_degree(g)
+
+    if not g:
+        raise ZeroDivisionError("polynomial division")
+    elif df < dg:
+        return [], f
+
+    inv = K.invert(g[0], p)
+
+    h, dq, dr = list(f), df - dg, dg - 1
+
+    for i in range(0, df + 1):
+        coeff = h[i]
+
+        for j in range(max(0, dg - i), min(df - i, dr) + 1):
+            coeff -= h[i + j - dg] * g[dg - j]
+
+        if i <= dq:
+            coeff *= inv
+
+        h[i] = coeff % p
+
+    return h[: dq + 1], gf_strip(h[dq + 1 :])
+
+
+[/PYTHON]
+What will be the output of `gf_rem`, given the following input:
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "f": [
+            2,
+            0
+        ],
+        "g": [
+            1,
+            0,
+            1
+        ],
+        "p": 3,
+        "K": "ZZ"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]

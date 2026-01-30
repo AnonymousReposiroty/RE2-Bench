@@ -1,0 +1,48 @@
+from sympy.external.gmpy import MPZ, GROUND_TYPES
+from sympy.polys.domains.groundtypes import (
+    SymPyInteger,
+    factorial,
+    gcdex, gcd, lcm, sqrt, is_square, sqrtrem,
+)
+from sympy.polys.domains.characteristiczero import CharacteristicZero
+from sympy.polys.domains.ring import Ring
+from sympy.polys.domains.simpledomain import SimpleDomain
+from sympy.utilities import public
+
+@public
+class IntegerRing(Ring[MPZ], CharacteristicZero, SimpleDomain):
+    """The domain ``ZZ`` representing the integers `\\mathbb{Z}`.
+
+    The :py:class:`IntegerRing` class represents the ring of integers as a
+    :py:class:`~.Domain` in the domain system. :py:class:`IntegerRing` is a
+    super class of :py:class:`PythonIntegerRing` and
+    :py:class:`GMPYIntegerRing` one of which will be the implementation for
+    :ref:`ZZ` depending on whether or not ``gmpy`` or ``gmpy2`` is installed.
+
+    See also
+    ========
+
+    Domain
+    """
+    rep = 'ZZ'
+    alias = 'ZZ'
+    dtype = MPZ
+    zero = dtype(0)
+    one = dtype(1)
+    tp = type(one)
+    is_IntegerRing = is_ZZ = True
+    is_Numerical = True
+    is_PID = True
+    has_assoc_Ring = True
+    has_assoc_Field = True
+
+    def __init__(self):
+        """Allow instantiation of this domain. """
+
+    def gcdex(self, a: MPZ, b: MPZ) -> tuple[MPZ, MPZ, MPZ]:
+        """Compute extended GCD of ``a`` and ``b``. """
+        h, s, t = gcdex(a, b)
+        if GROUND_TYPES == 'gmpy':
+            return (s, t, h)
+        else:
+            return (h, s, t)

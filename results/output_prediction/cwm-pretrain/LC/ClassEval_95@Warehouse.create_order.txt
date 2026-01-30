@@ -1,0 +1,501 @@
+<think>
+Let's execute the code step by step:
+1. Create_order is called with order_id=1, product_id=1, quantity=10
+2. It calls get_product_quantity(product_id=1):
+   - product_id 1 is in inventory with quantity 90
+   - returns 90 which is >= 10
+3. It calls update_product_quantity(product_id=1, quantity=-10):
+   - inventory[1]['quantity'] = 90 - 10 = 80
+4. It creates orders[1] = {
+   'product_id': 1,
+   'quantity': 10,
+   'status': 'Shipped'
+}
+5. returns None
+</think>
+[OUTPUT]
+{
+    "output": null
+}
+[/OUTPUT]
+
+</think>
+[OUTPUT]
+</think>
+[OUTPUT]
+
+[FILEPATH] peter3047-Input-To-Output-2a32dc8/train/gpt-3.5-turbo-0613/gpt.py [/FILEPATH]
+import ast
+import json
+import openai
+from collections import defaultdict
+from multiprocessing import Pool
+from functools import partial
+import os
+import time
+from tqdm import tqdm
+from pathlib import Path
+from hashlib import sha256
+from typing import List, Tuple, Optional
+import sys
+import pdb
+
+import urllib.parse
+import yaml
+import re
+import shutil
+from io import StringIO
+
+# import cProfile, pstats
+
+CWD = Path(__file__).parent
+
+# From ARA
+def normalize_prompt(prompt):
+    prompt = re.sub("\n{2,}", "\n\n", prompt).strip()
+    return prompt
+
+
+def construct_query(
+    filepath: str,
+    lang: str,
+    api_name: str,
+    cur_k: int,
+    batch: int,
+    ratio: int,
+    prompt_template: str,
+    mode: str = "cot",
+    n_samples: Optional[int] = None,
+    recency_bias: Optional[float] = None,
+    include_test: bool = True,
+) -> Tuple[List[dict], List[dict]]:
+    api_messages = [message for message in read_python_files(filepath) if message.get("api_name", "") == api_name]
+    
+    # Shuffle and take a sample if n_samples is provided
+    if n_samples is not None:
+        # The deterministic shuffle operation
+        api_messages = sorted(api_messages, key=lambda x: ast.literal_eval(x["call"]))
+        api_messages = api_messages[:n_samples]
+        
+    # Split into train and test
+    if recency_bias:
+        test_messages = api_messages[:recency_bias * len(api_messages)]
+        train_messages = api_messages[recency_bias * len(api_messages) : ]
+    elif include_test:
+        test_messages = api_messages[:2 * len(api_messages) // 3]
+        train_messages = api_messages[2 * len(api_messages) // 3 :]
+    else:
+        test_messages = []
+        train_messages = api_messages
+    # n_test_samples = len(test_messages)
+    n_train_samples = len(train_messages)
+
+    # Create queries
+    queries = []
+    ref_outputs = []
+    tot_examples = 0
+    for k in range(cur_k, min(2 * cur_k, n_train_samples)):
+        if (n_train_samples - k) / n_train_samples <= ratio:
+            break
+        examples = []
+        ref_output = []
+        idx = 0
+        example_cnt = 0
+        while example_cnt < batch:
+            example = train_messages[idx]
+            examples.append(example["messages"])
+            ref_output.append(example["output"])
+            idx += 1
+            if idx >= n_train_samples:
+                idx = 0
+            example_cnt += 1
+        prompt = prompt_template.replace("#EXAMPLE", "\n".join(examples))
+        prompt = prompt_template.replace("#INPUT", examples[0])
+        queries.append({"role": "user", "content": prompt})
+        ref_outputs.append(ref_output[0])
+        tot_examples += len(examples)
+    
+    return queries, ref_outputs, tot_examples, n_train_samples
+
+
+def read_python_files(filepath: str) -> List[dict]:
+    """
+    Read all .py files in a folder, and return a list of messages
+    """
+    messages = []
+    files = [filepath / p for p in os.listdir(filepath) if p.endswith(".py")]
+
+    for p in files:
+        content = p.read_text()
+        matches = list(re.finditer(r"(?<=<|user|>)|(?<=<|assistant|>)", content))
+        # split by <|im_start|> or <|im_end|>
+        idx_pairs = list(zip(matches[::2], matches[1::2]))
+        cur_idx = 0
+        for pair in idx_pairs:
+            start, end = pair[0].start(), pair[1].start()
+            cur_message = {"messages": content[cur_idx:start], "output": content[start:end]}
+            messages.append(cur_message)
+            cur_idx = end
+    return messages
+
+
+def load_jsonl(filename):
+    with open(filename, "r") as f:
+        data = [json.loads(line) for line in f]
+    return data
+
+
+# utils for configs
+def save_config(config, filepath):
+    def _map(x):
+        if isinstance(x, dict):
+            return {k: _map(v) for k, v in x.items()}
+        elif isinstance(x, list):
+            return [_map(v) for v in x]
+        elif isinstance(x, set):
+            return {_map(v) for v in x}
+        else:
+            return x
+
+    with open(filepath, "w") as f:
+        yaml.dump(_map(config), f, default_flow_style=False, sort_keys=False)
+
+
+def load_config(filepath):
+    with open(filepath, "r") as f:
+        return yaml.load(f, Loader=yaml.FullLoader)
+
+
+# utils for blob
+def is_valid_blob(output):
+    try:
+        output = output.strip().strip(" ").strip().strip('"')
+        # 0. empty
+        if output == "":
+            return False
+        # 1. prefix: ['output', 'predictions']
+        if output.startswith("[") or output.startswith("{"):
+            output = json.loads(output)
+        elif len(output) >= 5 and output[:5] == "```\n" and output[-4:] == "\n```":
+            output = json.loads(output[5:-4])
+        else:
+            return False
+    except:
+        return False
+    if isinstance(output, str):
+        output = [output]
+    for o in output:
+        if not isinstance(o, (str, int, float, bool)) and not isinstance(o, dict):
+            return False
+    return True
+
+
+def post_processing(blob, target=None):
+    blob = blob.strip().strip(" ").strip().strip('"')
+    if blob.startswith("[") or blob.startswith("{"):
+        output = json.loads(blob)
+    elif len(blob) >= 5 and blob[:5] == "```\n" and blob[-4:] == "\n```":
+        output = json.loads(blob[5:-4])
+    else:
+        output = blob
+
+    if isinstance(output, str):
+        output = [output]
+    elif isinstance(output, dict):
+        output = list(output.values())
+
+    # check if a llm output is a subset of gt
+    if target is not None:
+        return all([o in target for o in output])
+
+    return output
+
+
+def get_stats(
+    data,
+    save_file,
+    write_file=True,
+    show_stats=False,
+    return_stats=True,
+    model_specific=False,
+):
+    data = load_jsonl(save_file) if isinstance(save_file, str) else data
+    data = [x for x in data if x.get("output", "") != ""]
+    results = defaultdict(list)
+    responses = []
+    for x in data:
+        output = x["output"]
+        parsed = post_processing(output)
+        responses.append(parsed)
+        for o in parsed:
+            if not model_specific:
+                results[o].append(1)
+            else:
+                if isinstance(o, str):
+                    # whether have blob in the output
+                    results[1].append(1)
+                else:
+                    results[0].append(1)
+    results["hit1"] = [1 if any(o in x for o in x) else 0 for x in responses]
+    if show_stats:
+        print(f"Total lines: {len(responses)}")
+        print(f"Mean tokens: {len(str(responses)) / len(responses)}")
+        for k, v in results.items():
+            if isinstance(k, str):
+                print(f"{k}: {sum(v)}/{len(v)}")
+    if return_stats:
+        return {k: sum(v) / len(v) for k, v in results.items()}
+    else:
+        if write_file:
+            with open(save_file + ".stats", "w") as f:
+                json.dump(results, f)
+
+
+def evaluate_cot_direct(gpt_output, gpt_truth, example_count):
+    if len(gpt_output["outputs"]) == 0:
+        return []
+    else:
+        out = gpt_output["outputs"][0]
+        out = post_processing(out, target=gpt_truth)
+        if isinstance(out, str):
+            out = [out]
+        return [all([o in gpt_truth for o in out])]
+
+
+def get_stats_cot_direct(
+    data,
+    save_file,
+    write_file=True,
+    show_stats=False,
+    return_stats=True,
+    model_specific=False,
+):
+    data = load_jsonl(save_file) if isinstance(save_file, str) else data
+    data = [x for x in data if x.get("output", "") != ""]
+    results = defaultdict(list)
+    responses = []
+    for x in data:
+        output = x["output"]
+        # prefix: ['output', 'predictions']
+        parsed = post_processing(output)
+        responses.append(parsed)
+        for o in parsed:
+            if not model_specific:
+                results[o].append(1)
+            else:
+                if isinstance(o, str):
+                    # whether have blob in the output
+                    results[1].append(1)
+                else:
+                    results[0].append(1)
+    # whether a llm output is a subset of gt
+    # results["hit1"] = [1 if any(o in x for o in x) else 0 for x in responses]
+    results = [all([o in x for o in x]) for x in responses]
+    if show_stats:
+        print(f"Total lines: {len(responses)}")
+        print(f"Mean tokens: {len(str(responses)) / len(responses)}")
+        for k, v in results.items():
+            if isinstance(k, str):
+                print(f"{k}: {sum(v) / len(v)}")
+    if return_stats:
+        # return {k: sum(v) / len(v) for k, v in results.items()}
+        return sum(results) / len(results)
+    else:
+        if write_file:
+            with open(save_file + ".stats", "w") as f:
+                json.dump(results, f)
+
+
+# interface to OpenAI ChatCompletions
+def build_message(prompt, model):
+    if isinstance(prompt, list):
+        messages = [{"role": "system", "content": ""}]
+        for p in prompt:
+            messages += [{"role": "user", "content": p["messages"]}, {"role": "assistant", "content": p["output"]}]
+    else:
+        messages = [{"role": "system", "content": ""}, {"role": "user", "content": prompt}]
+    return messages
+
+
+def query_openai(model, message, print_answer=False, **kwargs):
+    messages = build_message(message, model)
+    payload = {
+        "model": model,
+        "messages": messages,
+        **kwargs,
+    }
+    while True:
+        try:
+            # print(payload)
+            ret = openai.ChatCompletion.create(**payload)
+            if print_answer:
+                print(f'Answer of model {model}: {ret["choices"][0]["message"]["content"]}')
+            return ret
+        except Exception as e:
+            print(e)
+            # if service is overloaded, wait for a while and retry
+            time.sleep(60)
+
+
+def get_answers_openai(
+    prompts,
+    model,
+    max_tokens=128,
+    temperature=0.2,
+    print_answer=False,
+    n=1,
+    stop=None,
+    logit_bias=None,
+    **kwargs,
+):
+    answer = []
+    for prompt in prompts:
+        # Try to decrease temperature if service is overloaded
+        i = 0
+        while True:
+            try:
+                completion = query_openai(
+                    model,
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    n=n,
+                    print_answer=print_answer,
+                    stop=stop,
+                    logit_bias=logit_bias,
+                    **kwargs,
+                )
+                # breakpoint()
+                # print(completion)
+                answer += [c["message"]["content"] for c in completion["choices"]]
+                break
+            except Exception as e:
+                print(e)
+                print("retrying...")
+                time.sleep(2)
+                i += 1
+                if i > 10:
+                    break
+        time.sleep(0.05)
+    return answer
+
+
+def get_ref_outputs(data, fields=["output"]):
+    ref_outputs = [[d[field] for field in fields] for d in data]
+    return ref_outputs
+
+
+def get_metadata(data, fields):
+    metadata = []
+    for d in data:
+        meta = {field: d[field] for field in fields if field in d}
+        metadata.append(meta)
+    return metadata
+
+
+def save_jsonl(data, filename):
+    with open(filename, "w") as f:
+        for line in data:
+            json.dump(line, f)
+            f.write("\n")
+
+
+def gen_unique_hash(prompt: str, meta: str, examples: List[str], model: str):
+    text = f"{prompt}\n{str(meta)}\n{str(examples)}\n{model}"
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+class ChatClient:
+    def __init__(self, args):
+        self.args = args
+        self.example_counter = defaultdict(int)
+        if not args.test:
+            args.ckpts = [x.split("/")[-1] for x in args.ckpts]
+        self.ckpts = args.ckpts
+        self.ckpts = args.ckpts
+        self.logit_bias = args.logit_bias
+        self.eval_logit_bias = args.eval_logit_bias
+        self.model_specific = args.model_specific
+        # self.ckpts = [f"hans/{x}" for x in args.ckpts]
+        self.init_clients()
+        self.base_url = args.base_url
+        self.model = args.model
+        self.kwargs = {"max_tokens": args.max_tokens, "temperature": args.temperature}
+
+    def init_clients(self):
+        self.clients = {"gpt-3.5-turbo": openai.ChatCompletion, "gpt-4": openai.ChatCompletion}
+        # self.clients = {"gpt-3.5-turbo": openai.ChatCompletion, "gpt-4": openai.ChatCompletion}
+
+    def encode_args(self, client_args, user=False):
+        # Replacing the OpenAI tool call format with the one used by the SFT model
+        if self.model_specific and user:
+            for _a in range(len(client_args)):
+                if client_args[_a]["role"] == "assistant":
+                    if "tool_calls" in client_args[_a]:
+                        client_args[_a]["tool_calls"] = client_args[_a]["tool_calls"][0]
+                        client_args[_a]["content"] = client_args[_a]["tool_calls"]["function"]
+                        client_args[_a]["tool_calls"] = ""
+                    elif "content" in client_args[_a]:
+                        # client_args[_a]["content"] = client_args[_a]["content"]["annotations"][0]
+                        if isinstance(client_args[_a]["content"], str):
+                            client_args[_a]["content"] = {}
+                        elif isinstance(client_args[_a]["content"], dict):
+                            client_args[_a]["content"] = client_args[_a]["content"]["arguments"][0]
+                        elif isinstance(client_args[_a]["content"], list):
+                            client_args[_a]["content"] = client_args[_a]["content"][-1]["arguments"][0]
+                        client_args[_a]["tool_calls"] = ""
+
+        return client_args
+
+    def decode_args(self, client_args, assistant=False):
+        # Converting the SFT model's tool call format to the OpenAI tool call format
+        if self.model_specific and assistant:
+            for _a in range(len(client_args)):
+                if client_args[_a]["role"] == "assistant":
+                    if "content" in client_args[_a]:
+                        # client_args[_a]["tool_calls"] = [{"function": client_args[_a]["content"], "id": "call_JhTKAanO4FhnQvqzFR5dxmEL"}]
+                        if isinstance(client_args[_a]["content"], str):
+                            client_args[_a]["content"] = [client_args[_a]["content"]]
+                        elif isinstance(client_args[_a]["content"], dict):
+                            client_args[_a]["content"] = [client_args[_a]["content"]]
+                        elif isinstance(client_args[_a]["content"], list):
+                            client_args[_a]["content"] = [x for x in client_args[_a]["content"] if x]
+                        client_args[_a]["content"] = {"type": "function", "function": {"name": "api_call", "arguments": [{"type": "string", "value": x} for x in client_args[_a]["content"]]}}
+                        client_args[_a]["tool_calls"] = ""
+                    elif "tool_calls" in client_args[_a]:
+                        client_args[_a]["tool_calls"] = [{"function": client_args[_a]["tool_calls"]["function"], "id": "call_JhTKAanO4FhnQvqzFR5dxmEL"}]
+                        client_args[_a]["content"] = ""
+                    else:
+                        client_args[_a]["content"] = {"type": "function", "function": {"name": "api_call", "arguments": []}}
+                        client_args[_a]["tool_calls"] = ""
+        return client_args
+
+    def query(self, client_args):
+        client = self.clients[self.model]
+        # print(client_args)
+        kwargs = {
+            "model": self.model,
+            "messages": client_args,
+            "logit_bias": self.logit_bias,
+        }
+        kwargs.update(self.kwargs)
+        while True:
+            try:
+                ret = client.create(**kwargs)
+                return ret
+            except Exception as e:
+                print(f"Error: {e}. Try again in 60s...")
+                time.sleep(60)
+
+    def call_chat(self, prompt, load_cached=True, save_cached=True, return_input=False, print_output=False):
+        if isinstance(prompt, list) and not load_cached:
+            # Case 1: prompt is a list of examples, and we do not load cached answers
+            all_messages = []
+            # breakpoint()
+            for i in range(len(prompt)):
+                input_message = prompt[i]
+                input_message = self.encode_args(input_message, user=True)
+                if save_cached:
+                    cached_path = self.args.save + f"_client_{self.ckpts[self.args.cur_ckpt]}.jsonl"
+                    all_messages += input_message
+                    query_hash = gen_unique_hash(str(all_messages), str(self.args

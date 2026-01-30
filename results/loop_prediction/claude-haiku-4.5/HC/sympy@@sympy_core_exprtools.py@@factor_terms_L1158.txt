@@ -1,0 +1,102 @@
+[THOUGHT]
+Let me trace through the code with input `expr = "3 + I"` (which will be sympified to a SymPy expression).
+
+1. Line 63: `expr2 = sympify(expr)` converts the string "3 + I" to a SymPy Add object: `Add(3, I)`
+
+2. Line 64: `return do(expr2)` calls `do()` with this Add expression.
+
+3. In `do(expr)` with `expr = Add(3, I)`:
+   - Line 17: `is_iterable = iterable(expr)` → `False` (Add is not iterable)
+   - Line 19: `isinstance(expr, Basic)` → `True`, `expr.is_Atom` → `False`, so we don't return early
+   - Line 24-25: `expr.is_Pow` → `False`, `expr.is_Function` → `False`, `is_iterable` → `False`, `hasattr(expr, 'args_cnc')` → `True`, so we don't take this branch
+   - Line 32: `isinstance(expr, (Sum, Integral))` → `False`, so we don't take this branch
+   - Line 37: `cont, p = expr.as_content_primitive(...)` is called on the Add expression
+     - For `Add(3, I)`, this will return `cont = 1, p = Add(3, I)` (or similar)
+   - Line 38: `p.is_Add` → `True`
+   - Line 39: `list_args = [do(a) for a in Add.make_args(p)]`
+     - `Add.make_args(p)` yields the arguments of the Add: `[3, I]`
+     - This is a list comprehension that calls `do()` on each element
+     - `do(3)` → `3` (it's an Atom, line 19 returns it)
+     - `do(I)` → `I` (it's an Atom, line 19 returns it)
+     - So `list_args = [3, I]`
+   
+   - Line 41-44: Check and potentially negate
+     - The condition checks if all args have no negative multiplicative factor
+     - For `[3, I]`, this condition is `False` (3 is positive), so we don't negate
+   
+   - Line 46: `special = {}`
+   - Line 47: Loop `for i, a in enumerate(list_args):`
+     - `list_args = [3, I]` (length 2)
+     - Enumerate produces pairs: `(0, 3)` and `(1, I)`
+     - So `i` takes values: `0, 1`
+     - And `a` takes values: `3, I`
+     - `list_args` stays the same throughout: `[3, I]`
+
+[/THOUGHT]
+
+[ANSWER]
+1 from .add import Add
+2 from .mul import Mul, _keep_coeff
+3 from .basic import Basic
+4 from .expr import Expr
+5 from .sympify import sympify
+6 from .symbol import Dummy
+7 from sympy.utilities.iterables import (common_prefix, common_suffix,
+8         variations, iterable, is_sequence)
+9 from sympy.concrete.summations import Sum
+10 from sympy.integrals.integrals import Integral
+11 from .symbol import Dummy
+12 
+13 def factor_terms(expr: Expr | complex, radical=False, clear=False, fraction=False, sign=True) -> Expr:
+14     def do(expr):
+15         from sympy.concrete.summations import Sum
+16         from sympy.integrals.integrals import Integral
+17         is_iterable = iterable(expr)
+18 
+19         if not isinstance(expr, Basic) or expr.is_Atom:
+20             if is_iterable:
+21                 return type(expr)([do(i) for i in expr])
+22             return expr
+23 
+24         if expr.is_Pow or expr.is_Function or \
+25                 is_iterable or not hasattr(expr, 'args_cnc'):
+26             args = expr.args
+27             newargs = tuple([do(i) for i in args])
+28             if newargs == args:
+29                 return expr
+30             return expr.func(*newargs)
+31 
+32         if isinstance(expr, (Sum, Integral)):
+33             return _factor_sum_int(expr,
+34                 radical=radical, clear=clear,
+35                 fraction=fraction, sign=sign)
+36 
+37         cont, p = expr.as_content_primitive(radical=radical, clear=clear)
+38         if p.is_Add:
+39             list_args = [do(a) for a in Add.make_args(p)]
+40 
+41             if not any(a.as_coeff_Mul()[0].extract_multiplicatively(-1) is None
+42                        for a in list_args):
+43                 cont = -cont
+44                 list_args = [-a for a in list_args]
+45 
+46             special = {}
+47             for i, a in enumerate(list_args):## [STATE]i=[0, 1][/STATE] [STATE]a=[3, I][/STATE] [STATE]list_args=[[3, I], [3, I]][/STATE]
+48                 b, e = a.as_base_exp()
+49                 if e.is_Mul and e != Mul(*e.args):
+50                     list_args[i] = Dummy()
+51                     special[list_args[i]] = a
+52 
+53             p = Add._from_args(list_args)
+54             p = gcd_terms(p,
+55                 isprimitive=True,
+56                 clear=clear,
+57                 fraction=fraction).xreplace(special)
+58         elif p.args:
+59             p = p.func(
+60                 *[do(a) for a in p.args])
+61         rv = _keep_coeff(cont, p, clear=clear, sign=sign)
+62         return rv
+63     expr2 = sympify(expr)
+64     return do(expr2)
+[/ANSWER]

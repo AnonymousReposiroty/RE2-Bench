@@ -1,0 +1,542 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+</think>
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from pkg_resources import ResourceConflict
+from .platform import parse_platform
+import logging
+logger = logging.getLogger(__name__)
+
+# Constraints are parsed into tuples with this structure:
+# (attr, op, value)
+# attr is the field being acted on, such as the name, version, environment marker,
+# or platform specifier, value is the match we are expecting
+# op is the operator and can be one of "==", "!=", "in", or "not in".
+def _parsed_marker_constraint(constraint):
+    constraint = constraint.lower().replace(" ", "")
+    attr, op, value = [None, None, None]
+    op_type = ""
+    if "==" in constraint:
+        op_type = "=="
+    if ">=" in constraint:
+        op_type = ">="
+    if "<=" in constraint:
+        op_type = "<="
+    if ">" in constraint:
+        op_type = ">"
+    if "<" in constraint:
+        op_type = "<"
+
+    if op_type:
+        attr, op, value = constraint.split(op_type, 1)
+        op = op_type.strip()
+    else:
+        attr = constraint.split()[0]
+        op = "==" if constraint.split()[0] == attr else constraint.split()[1]
+        value = constraint.split()[2]
+    return attr, op, value
+
+# Split a python version string into its components
+def _get_platform_constraint_key(pyver):
+    if not pyver:
+        return None
+
+    pyver = pyver.lower().replace("-", ".")
+    parts = pyver.split(".")
+    vparts = []
+    for p in parts:
+        try:
+            vparts.append(int(p))
+        except ValueError:
+            continue
+    if len(vparts) == 2:
+        vparts.append(0)
+    pyver_str = ".".join([str(x) for x in vparts])
+    return pyver_str, vparts[0], vparts[1], vparts[2]
+
+class Match:
+    @staticmethod
+    def requirement_matches(requirement, possible_resolutions, active_constraints):
+        if not possible_resolutions:
+            return None
+        elif len(possible_resolutions) == 1:
+            return possible_resolutions[0]
+        else:
+            return Match._pick_solution(requirement, possible_resolutions, active_constraints)
+
+    @staticmethod
+    def _pick_solution(requirement, possible_resolutions, active_constraints):
+        if not possible_resolutions:
+            return None
+
+        returnable = []
+        # We want to resolve to the highest version with the highest priority
+        for res in possible_resolutions:
+            # Don't consider things from the wrong platform.
+            if res.download_url.startswith('win32'):
+                continue
+
+            # Don't return a package that is known to be bad on this platform
+            if res.platform == 'UNKNOWN' or res.platform == 'ANY':
+                continue
+
+            # Don't include packages that won't be installed on this platform
+            if res.download_url.startswith('macosx') and requirement.platform in ('linux_x86_64', 'win_amd64', 'win32'):
+                continue
+
+            if res.download_url.startswith('win32') and requirement.platform in ('linux_x86_64', 'macosx_10_6_intel'):
+                continue
+
+            if res.download_url.startswith('linux') and requirement.platform in ('macosx_10_6_intel', 'win_amd64', 'win32'):
+                continue
+
+            # Don't install something older than our installed version
+            if res.version <= requirement.constraint_version:
+                continue
+
+            returnable.append(res)
+        returnable = sorted(returnable, key=lambda x: x.version, reverse=True)
+        return returnable[0] if returnable else None
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+pkg-resources.pkg_resources.requirement_matches
+
+@staticmethod
+def requirement_matches(requirement, possible_resolutions, active_constraints):
+    """Check if the requirement can be satisfied by ``possible_resolutions``
+
+    Return a ``Resolution`` object that provides the ``distribution`` and other
+    properties required for a dependency to be resolved.
+
+    :param Requirement requirement: Requirement to check.
+    :param List[Distribution] possible_resolutions: Distributions available to
+        resolve this requirement against.
+    :param List[str] active_constraints: Other constraints that must be taken
+        into account.
+    :return: A ``Resolution`` instance.
+    :rtype: Resolution
+    :raises RequirementError: No resolution meeting the given constraints.
+    :raises VersionConflict: No version meeting the given constraints.
+    """
+    possible_resolutions = [
+        res for res in possible_resolutions
+        if not active_constraints or res.project_name not in active_constraints
+    ]
+    if not possible_resolutions:
+        raise RequirementError(
+            f"No resolution found for {requirement} in {possible_resolutions}"
+        )
+
+    if len(possible_resolutions) == 1:
+        return Resolution(requirement, possible_resolutions[0])
+
+    # Sort possible resolutions by their version
+    possible_resolutions.sort(key=lambda res: res.version)
+
+    # Check if any of the possible resolutions meet the requirement
+    for res in possible_resolutions:
+        if res.version in requirement.specifier:
+            return Resolution(requirement, res)
+
+    # If no resolution meets the requirement, raise an error
+    raise RequirementError(
+        f"No resolution found for {requirement} in {possible_resolutions}"
+    )
+
+[/PYTHON]
+What will be the output of `requirement_matches`, given the following input:
+[INPUT]
+{
+    "args": [
+        {
+            "name": "numpy",
+            "specifier": "1.21.5"
+        },
+        [
+            {
+                "name": "numpy",
+                "version": "1.19.5"
+            },
+            {
+                "name": "numpy",
+                "version": "1.20.3"
+            },
+            {
+                "name": "numpy",
+                "version": "1.21.5"
+            },
+            {
+                "name": "numpy",
+                "version": "1.22.3"
+            },
+            {
+                "name": "numpy",
+                "version": "1.23.5"
+            }
+        ]
+    ],
+    "kwargs": {
+        "active_constraints": []
+    }
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "distribution": {
+        "name": XXX,
+        "version": XXX
+    }
+}
+```
+[/STRUCTURE]
+
+<think>
+
+ Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+</think>
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import pandas as pd
+import numpy as np
+import inspect
+
+class FlatToHierarchyConverter:
+    """Converts flat key-value pairs to a nested dictionary using a hierarchy based on the delimiter."""
+
+    HIERARCHY_DELIMITER = "__"
+
+    def __init__(self, columns: list, delimiter: str = HIERARCHY_DELIMITER):
+        self.columns = columns
+        self.delimiter = delimiter
+
+    def convert(self, data: dict) -> dict:
+        """
+        Converts flat key-value pairs to a nested dictionary using a hierarchy based on the delimiter.
+
+        Parameters
+        ----------
+        data : dict
+            The data to convert.
+
+        Returns
+        -------
+        dict
+            The converted data.
+        """
+        converted_data = {}
+        for key, value in data.items():
+            parts = key.split(self.delimiter)
+            current_level = converted_data
+            for part in parts[:-1]:
+                if part not in current_level:
+                    current_level[part] = {}
+                current_level = current_level[part]
+            current_level[parts[-1]] = value
+        return converted_data
+
+class HierarchyToFlatConverter:
+    """Converts nested dictionary to flat key-value pairs based on a given hierarchy and delimiter."""
+
+    HIERARCHY_DELIMITER = "__"
+
+    def __init__(self, hierarchy: list, delimiter: str = HIERARCHY_DELIMITER):
+        self.hierarchy = hierarchy
+        self.delimiter = delimiter
+
+    def convert(self, data: dict) -> dict:
+        """
+        Converts nested dictionary to flat key-value pairs based on a given hierarchy and delimiter.
+
+        Parameters
+        ----------
+        data : dict
+            The data to convert.
+
+        Returns
+        -------
+        dict
+            The converted data.
+        """
+        converted_data = {}
+        for key, value in data.items():
+            if isinstance(value, dict):
+                for sub_key, sub_value in self.convert(value).items():
+                    converted_data[f"{key}{self.delimiter}{sub_key}"] = sub_value
+            else:
+                converted_data[key] = value
+        return converted_data
+
+def create_extractor(obj, config):
+    """
+    Creates an extractor function based on the object type and configuration.
+
+    Parameters
+    ----------
+    obj : object
+        The object to extract information from.
+    config : dict
+        The

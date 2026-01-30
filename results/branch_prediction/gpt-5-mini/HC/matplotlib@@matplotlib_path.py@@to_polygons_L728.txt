@@ -1,0 +1,103 @@
+[THOUGHT]
+We only call to_polygons with the provided self; __init__ is not invoked, so the else branch at line 40 is never encountered -> [].
+
+In to_polygons:
+- len(self.vertices) == 0? vertices has 2 points -> False -> [N].
+- transform is not None? transform is None -> False -> [N].
+- self.codes is None and (width == 0 or height == 0)? codes is None and width==0 -> True -> [Y].
+  - closed_only is False so that inner block is skipped.
+  - transform is None? True -> [Y] for the if at line 81, so the else at line 83 is not taken -> [N].
+[/THOUGHT]
+
+[ANSWER]
+1 from weakref import WeakValueDictionary
+2 import numpy as np
+3 import matplotlib as mpl
+4 from . import _api, _path
+5 from .cbook import _to_unmasked_float_array, simple_linear_interpolation
+6 
+7 class Path:
+8     code_type = np.uint8
+9     STOP = code_type(0)
+10     MOVETO = code_type(1)
+11     LINETO = code_type(2)
+12     CURVE3 = code_type(3)
+13     CURVE4 = code_type(4)
+14     CLOSEPOLY = code_type(79)
+15     NUM_VERTICES_FOR_CODE = {STOP: 1, MOVETO: 1, LINETO: 1, CURVE3: 2, CURVE4: 3, CLOSEPOLY: 1}
+16 
+17     def __init__(self, vertices, codes=None, _interpolation_steps=1, closed=False, readonly=False):
+18         vertices = _to_unmasked_float_array(vertices)
+19         _api.check_shape((None, 2), vertices=vertices)
+20         if codes is not None and len(vertices):
+21             codes = np.asarray(codes, self.code_type)
+22             if codes.ndim != 1 or len(codes) != len(vertices):
+23                 raise ValueError(f"'codes' must be a 1D list or array with the same length of 'vertices'. Your vertices have shape {vertices.shape} but your codes have shape {codes.shape}")
+24             if len(codes) and codes[0] != self.MOVETO:
+25                 raise ValueError(f"The first element of 'code' must be equal to 'MOVETO' ({self.MOVETO}).  Your first code is {codes[0]}")
+26         elif closed and len(vertices):
+27             codes = np.empty(len(vertices), dtype=self.code_type)
+28             codes[0] = self.MOVETO
+29             codes[1:-1] = self.LINETO
+30             codes[-1] = self.CLOSEPOLY
+31         self._vertices = vertices
+32         self._codes = codes
+33         self._interpolation_steps = _interpolation_steps
+34         self._update_values()
+35         if readonly:
+36             self._vertices.flags.writeable = False
+37             if self._codes is not None:
+38                 self._codes.flags.writeable = False
+39             self._readonly = True
+40         else: ## [BRANCH]taken=[][/BRANCH]
+41             self._readonly = False
+42 
+43     def _update_values(self):
+44         self._simplify_threshold = mpl.rcParams['path.simplify_threshold']
+45         self._should_simplify = self._simplify_threshold > 0 and mpl.rcParams['path.simplify'] and (len(self._vertices) >= 128) and (self._codes is None or np.all(self._codes <= Path.LINETO))
+46 
+47     @property
+48     def vertices(self):
+49         return self._vertices
+50 
+51     @vertices.setter
+52     def vertices(self, vertices):
+53         if self._readonly:
+54             raise AttributeError("Can't set vertices on a readonly Path")
+55         self._vertices = vertices
+56         self._update_values()
+57 
+58     @property
+59     def codes(self):
+60         return self._codes
+61 
+62     @codes.setter
+63     def codes(self, codes):
+64         if self._readonly:
+65             raise AttributeError("Can't set codes on a readonly Path")
+66         self._codes = codes
+67         self._update_values()
+68 
+69     def to_polygons(self, transform=None, width=0, height=0, closed_only=True):
+70         if len(self.vertices) == 0: ## [BRANCH]taken=[N][/BRANCH]
+71             return []
+72         if transform is not None: ## [BRANCH]taken=[N][/BRANCH]
+73             transform = transform.frozen()
+74         if self.codes is None and (width == 0 or height == 0): ## [BRANCH]taken=[Y][/BRANCH]
+75             vertices = self.vertices
+76             if closed_only:
+77                 if len(vertices) < 3:
+78                     return []
+79                 elif np.any(vertices[0] != vertices[-1]):
+80                     vertices = [*vertices, vertices[0]]
+81             if transform is None: ## [BRANCH]taken=[Y][/BRANCH]
+82                 return [vertices]
+83             else: ## [BRANCH]taken=[N][/BRANCH]
+84                 return [transform.transform(vertices)]
+85         return _path.convert_path_to_polygons(self, transform, width, height, closed_only)
+86     _unit_rectangle = None
+87     _unit_regular_polygons = WeakValueDictionary()
+88     _unit_regular_stars = WeakValueDictionary()
+89     _unit_circle = None
+90     _unit_circle_righthalf = None
+91

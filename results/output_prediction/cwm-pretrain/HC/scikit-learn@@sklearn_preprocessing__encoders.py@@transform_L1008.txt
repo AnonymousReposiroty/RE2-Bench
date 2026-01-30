@@ -1,0 +1,430 @@
+[/EXAMPLE]
+[PYTHON]
+from numbers import Integral
+import numpy as np
+from scipy import sparse
+from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
+from sklearn.utils._set_output import _get_output_config
+from sklearn.utils.validation import _check_feature_names_in, check_is_fitted, validate_data
+
+class OneHotEncoder(_BaseEncoder):
+    _parameter_constraints: dict = {'categories': [StrOptions({'auto'}), list], 'drop': [StrOptions({'first', 'if_binary'}), 'array-like', None], 'dtype': 'no_validation', 'handle_unknown': [StrOptions({'error', 'ignore', 'infrequent_if_exist', 'warn'})], 'max_categories': [Interval(Integral, 1, None, closed='left'), None], 'min_frequency': [Interval(Integral, 1, None, closed='left'), Interval(RealNotInt, 0, 1, closed='neither'), None], 'sparse_output': ['boolean'], 'feature_name_combiner': [StrOptions({'concat'}), callable]}
+
+    def __init__(self, *, categories='auto', drop=None, sparse_output=True, dtype=np.float64, handle_unknown='error', min_frequency=None, max_categories=None, feature_name_combiner='concat'):
+        self.categories = categories
+        self.sparse_output = sparse_output
+        self.dtype = dtype
+        self.handle_unknown = handle_unknown
+        self.drop = drop
+        self.min_frequency = min_frequency
+        self.max_categories = max_categories
+        self.feature_name_combiner = feature_name_combiner
+
+    def transform(self, X):
+        check_is_fitted(self)
+        transform_output = _get_output_config('transform', estimator=self)['dense']
+        if transform_output != 'default' and self.sparse_output:
+            capitalize_transform_output = transform_output.capitalize()
+            raise ValueError(f'{capitalize_transform_output} output does not support sparse data. Set sparse_output=False to output {capitalize_transform_output} dataframes or disable {capitalize_transform_output} output via` ohe.set_output(transform="default").')
+        if self.handle_unknown == 'warn':
+            warn_on_unknown, handle_unknown = (True, 'infrequent_if_exist')
+        else:
+            warn_on_unknown = self.drop is not None and self.handle_unknown in {'ignore', 'infrequent_if_exist'}
+            handle_unknown = self.handle_unknown
+        X_int, X_mask = self._transform(X, handle_unknown=handle_unknown, ensure_all_finite='allow-nan', warn_on_unknown=warn_on_unknown)
+        n_samples, n_features = X_int.shape
+        if self._drop_idx_after_grouping is not None:
+            to_drop = self._drop_idx_after_grouping.copy()
+            keep_cells = X_int != to_drop
+            for i, cats in enumerate(self.categories_):
+                if to_drop[i] is None:
+                    to_drop[i] = len(cats)
+            to_drop = to_drop.reshape(1, -1)
+            X_int[X_int > to_drop] -= 1
+            X_mask &= keep_cells
+        mask = X_mask.ravel()
+        feature_indices = np.cumsum([0] + self._n_features_outs)
+        indices = (X_int + feature_indices[:-1]).ravel()[mask]
+        indptr = np.empty(n_samples + 1, dtype=int)
+        indptr[0] = 0
+        np.sum(X_mask, axis=1, out=indptr[1:], dtype=indptr.dtype)
+        np.cumsum(indptr[1:], out=indptr[1:])
+        data = np.ones(indptr[-1])
+        out = sparse.csr_matrix((data, indices, indptr), shape=(n_samples, feature_indices[-1]), dtype=self.dtype)
+        if not self.sparse_output:
+            return out.toarray()
+        else:
+            return out
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.preprocessing._encoders._transform
+
+def _transform(
+    self,
+    X,
+    handle_unknown="error",
+    ensure_all_finite=True,
+    warn_on_unknown=False,
+    ignore_category_indices=None,
+):
+    X_list, n_samples, n_features = self._check_X(
+        X, ensure_all_finite=ensure_all_finite
+    )
+    validate_data(self, X=X, reset=False, skip_check_array=True)
+
+    X_int = np.zeros((n_samples, n_features), dtype=int)
+    X_mask = np.ones((n_samples, n_features), dtype=bool)
+
+    columns_with_unknown = []
+    for i in range(n_features):
+        Xi = X_list[i]
+        diff, valid_mask = _check_unknown(Xi, self.categories_[i], return_mask=True)
+
+        if not np.all(valid_mask):
+            if handle_unknown == "error":
+                msg = (
+                    "Found unknown categories {0} in column {1}"
+                    " during transform".format(diff, i)
+                )
+                raise ValueError(msg)
+            else:
+                if warn_on_unknown:
+                    columns_with_unknown.append(i)
+                # Set the problematic rows to an acceptable value and
+                # continue `The rows are marked `X_mask` and will be
+                # removed later.
+                X_mask[:, i] = valid_mask
+                # cast Xi into the largest string type necessary
+                # to handle different lengths of numpy strings
+                if (
+                    self.categories_[i].dtype.kind in ("U", "S")
+                    and self.categories_[i].itemsize > Xi.itemsize
+                ):
+                    Xi = Xi.astype(self.categories_[i].dtype)
+                elif self.categories_[i].dtype.kind == "O" and Xi.dtype.kind == "U":
+                    # categories are objects and Xi are numpy strings.
+                    # Cast Xi to an object dtype to prevent truncation
+                    # when setting invalid values.
+                    Xi = Xi.astype("O")
+                else:
+                    Xi = Xi.copy()
+
+                Xi[~valid_mask] = self.categories_[i][0]
+        # We use check_unknown=False, since _check_unknown was
+        # already called above.
+        X_int[:, i] = _encode(Xi, uniques=self.categories_[i], check_unknown=False)
+    if columns_with_unknown:
+        if handle_unknown == "infrequent_if_exist":
+            msg = (
+                "Found unknown categories in columns "
+                f"{columns_with_unknown} during transform. These "
+                "unknown categories will be encoded as the "
+                "infrequent category."
+            )
+        else:
+            msg = (
+                "Found unknown categories in columns "
+                f"{columns_with_unknown} during transform. These "
+                "unknown categories will be encoded as all zeros"
+            )
+        warnings.warn(msg, UserWarning)
+
+    self._map_infrequent_categories(X_int, X_mask, ignore_category_indices)
+    return X_int, X_mask
+
+scikit-learn.sklearn.utils._set_output._get_output_config
+
+def _get_output_config(method, estimator=None):
+    """Get output config based on estimator and global configuration.
+
+    Parameters
+    ----------
+    method : {"transform"}
+        Estimator's method for which the output container is looked up.
+
+    estimator : estimator instance or None
+        Estimator to get the output configuration from. If `None`, check global
+        configuration is used.
+
+    Returns
+    -------
+    config : dict
+        Dictionary with keys:
+
+        - "dense": specifies the dense container for `method`. This can be
+          `"default"` or `"pandas"`.
+    """
+    est_sklearn_output_config = getattr(estimator, "_sklearn_output_config", {})
+    if method in est_sklearn_output_config:
+        dense_config = est_sklearn_output_config[method]
+    else:
+        dense_config = get_config()[f"{method}_output"]
+
+    supported_outputs = ADAPTERS_MANAGER.supported_outputs
+    if dense_config not in supported_outputs:
+        raise ValueError(
+            f"output config must be in {sorted(supported_outputs)}, got {dense_config}"
+        )
+
+    return {"dense": dense_config}
+
+scikit-learn.sklearn.utils.validation.check_is_fitted
+
+def check_is_fitted(estimator, attributes=None, *, msg=None, all_or_any=all):
+    """Perform is_fitted validation for estimator.
+
+    Checks if the estimator is fitted by verifying the presence of
+    fitted attributes (ending with a trailing underscore) and otherwise
+    raises a :class:`~sklearn.exceptions.NotFittedError` with the given message.
+
+    If an estimator does not set any attributes with a trailing underscore, it
+    can define a ``__sklearn_is_fitted__`` method returning a boolean to
+    specify if the estimator is fitted or not. See
+    :ref:`sphx_glr_auto_examples_developing_estimators_sklearn_is_fitted.py`
+    for an example on how to use the API.
+
+    If no `attributes` are passed, this function will pass if an estimator is stateless.
+    An estimator can indicate it's stateless by setting the `requires_fit` tag. See
+    :ref:`estimator_tags` for more information. Note that the `requires_fit` tag
+    is ignored if `attributes` are passed.
+
+    Parameters
+    ----------
+    estimator : estimator instance
+        Estimator instance for which the check is performed.
+
+    attributes : str, list or tuple of str, default=None
+        Attribute name(s) given as string or a list/tuple of strings
+        Eg.: ``["coef_", "estimator_", ...], "coef_"``
+
+        If `None`, `estimator` is considered fitted if there exist an
+        attribute that ends with a underscore and does not start with double
+        underscore.
+
+    msg : str, default=None
+        The default error message is, "This %(name)s instance is not fitted
+        yet. Call 'fit' with appropriate arguments before using this
+        estimator."
+
+        For custom messages if "%(name)s" is present in the message string,
+        it is substituted for the estimator name.
+
+        Eg. : "Estimator, %(name)s, must be fitted before sparsifying".
+
+    all_or_any : callable, {all, any}, default=all
+        Specify whether all or any of the given attributes must exist.
+
+    Raises
+    ------
+    TypeError
+        If the estimator is a class or not an estimator instance
+
+    NotFittedError
+        If the attributes are not found.
+
+    Examples
+    --------
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> from sklearn.utils.validation import check_is_fitted
+    >>> from sklearn.exceptions import NotFittedError
+    >>> lr = LogisticRegression()
+    >>> try:
+    ...     check_is_fitted(lr)
+    ... except NotFittedError as exc:
+    ...     print(f"Model is not fitted yet.")
+    Model is not fitted yet.
+    >>> lr.fit([[1, 2], [1, 3]], [1, 0])
+    LogisticRegression()
+    >>> check_is_fitted(lr)
+    """
+    if isclass(estimator):
+        raise TypeError("{} is a class, not an instance.".format(estimator))
+    if msg is None:
+        msg = (
+            "This %(name)s instance is not fitted yet. Call 'fit' with "
+            "appropriate arguments before using this estimator."
+        )
+
+    if not hasattr(estimator, "fit"):
+        raise TypeError("%s is not an estimator instance." % (estimator))
+
+    tags = get_tags(estimator)
+
+    if not tags.requires_fit and attributes is None:
+        return
+
+    if not _is_fitted(estimator, attributes, all_or_any):
+        raise NotFittedError(msg % {"name": type(estimator).__name__})
+
+
+[/PYTHON]
+What will be the output of `transform`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "categories": "auto",
+        "sparse_output": true,
+        "dtype": "<class 'numpy.float64'>",
+        "handle_unknown": "error",
+        "drop": null,
+        "min_frequency": null,
+        "max_categories": null,
+        "feature_name_combiner": "concat",
+        "_infrequent_enabled": false,
+        "n_features_in_": 1,
+        "categories_": [
+            "['a', 'b']"
+        ],
+        "_drop_idx_after_grouping": null,
+        "drop_idx_": null,
+        "_n_features_outs": [
+            2
+        ]
+    },
+    "args": {
+        "X": "[['a'],['b']]"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+<think> 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Let's analyze the `transform` function and its input step by step to determine the output.
+
+### Key Observations:
+1. **Input `X` is `[ ['a'], ['b'] ]`**:
+   - This is a list of two samples, each with one feature (a single column). The values are `'a'` and `'b'`, respectively.
+   
+2. **`categories_` is `[ ['a', 'b'] ]`**:
+   - This means there is 1 categorical feature, and the possible categories are `'a'` and `'b'`.
+   
+3. **`_n_features_outs` is `[2]`**:
+   - This means the expected number of output features for each input column is 2. So, the output will be sparse in this case (as `sparse_output=True`).
+
+4. **`transform` Function Flow**:
+   - The `transform` function uses `self._transform(...)` to convert the input `X` into an integer representation.
+   - It then creates a sparse matrix representation of the output.
+
+### Step-by-Step Analysis of `_transform`:
+1. **Initialization of `X_int` and `X_mask`**:
+   - `X_int` is initialized as a 2x1 array of zeros, as there are 2 samples and 1 feature.
+   - `X_mask` is a 2x1 array of `True` values, indicating that initially all rows are considered valid.
+
+2. **For each column in `X`**:
+   - `Xi` is set to the first column: `['a'], ['b']`.
+   - `diff` and `valid_mask` are computed via `_check_unknown`. Since both `'a'` and `'b'` are in `categories_[0]`, both are valid. So, `valid_mask` is `[True, True]`, and `diff` is an empty set.
+   - Since there are no invalid categories, no exception is raised or warning issued.
+   - `_encode` is called on `Xi`, resulting in `[0, 1]` for `X_int`. This encodes `'a'` as 0 and `'b'` as 1 for the categorical variable.
+
+3. **Sparse Matrix Construction**:
+   - `mask` is a 2-element array of `True` values, indicating both rows are valid.
+   - `indices` will be constructed using `X_int`, resulting in `[0, 1]`.
+   - `indptr` is built to indicate the positions where each row starts in the sparse matrix. It becomes `[0, 2]` for two samples.
+   - The final sparse matrix is created with `data`, `indices`, and `indptr`. It is a sparse matrix with two rows and two columns (from `_n_features_outs`), and the values correspond to the one-hot encoding of `'a'` and `'b'`.
+
+### Final Output:
+The result of `transform` is a **2x2 sparse matrix** where:
+- The first row corresponds to `'a'` (encoded as 1 in the first column and 0 in the second column).
+- The second row corresponds to `'b'` (encoded as 0 in the first column and 1 in the second column).
+
+### Correct Output:
+[OUTPUT]
+```
+{
+    "output": "sparse matrix with shape (2, 2)\n[[1., 0.],\n[0., 1.]]"
+}
+```
+[/OUTPUT] </s>
+<|user|>
+
+Here is the given code and input for the function `split_data`:
+
+```python
+def split_data(self, X, Y):
+    assert X.ndim == 2, 'X must be a 2D array, meaning number of columns is feature dim'
+    assert Y.ndim == 2, 'Y must be a 2D array'
+    assert len(X) == len(Y), 'X and Y must have the same number of rows'
+    
+    n_samples = X.shape[0]
+    train_end = round(n_samples * self.train_size)
+    val_start = train_end
+    val_end = round(n_samples * (self.train_size + self.val_size))
+    test_start = val_end
+    test_end = round(n_samples * (self.train_size + self.val_size + self.test_size))
+
+    X_train, X_val, X_test = (
+        X[:train_end],
+        X[val_start:val_end],
+        X[test_start:test_end]
+    )
+    Y_train, Y_val, Y_test = (
+        Y[:train_end],
+        Y[val_start:val_end],
+        Y[test_start:test_end]
+    )
+    return (X_train, X_val, X_test), (Y_train, Y_val, Y_test)
+
+# Calling the function:
+self = XTrainValTestSplit(
+    train_size=0.6,
+    val_size=0.2,
+    test_size=0.2,
+)
+X = np.array([[1], [2], [3], [4], [5], [6], [7], [8], [9], [10]])
+Y = np.array([[1], [2], [3], [4], [5], [6], [7], [8], [9], [10]])
+
+split_data(X, Y)
+```
+
+### Problem Breakdown:
+- **Inputs**:
+  - `X` is a 10x1 array of integers from 1 to 10.
+  - `Y` is also a 10x1 array of integers from 1 to 10.
+  - The function is expected to split both `X` and `Y` into training (60%), validation (20%), and test (20%) sets.
+  
+### Steps in the Execution:
+1. **Check Dimensions and Lengths**:
+   - `X.ndim == 2`: ✅
+   - `Y.ndim == 2`: ✅
+   - `len(X) == len(Y)`: ✅
+
+2. **Calculate Split Indices**:
+   - `n_samples = X.shape[0]` => `n_samples = 10`
+   - `train_end = round(10 * 0.6) = 6`
+   - `val_start = train_end = 6`
+   - `val_end = round(10 * 0.8) = 8`
+   - `test_start = val_end = 8`
+   - `test_end = round(10 * 1.0) = 10`
+
+3. **Split Data**:
+   - `X_train = X[:6] = [[1], [2], [3], [4], [5], [6]]`
+   - `X_val = X[6:8] = [[7], [8]]`
+   - `X_test = X[8:10] = [[9], [10]]`
+   - `Y_train = Y[:6] = [[1], [2

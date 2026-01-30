@@ -1,0 +1,340 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from abc import ABCMeta, abstractmethod
+from numbers import Integral, Real
+from warnings import catch_warnings, simplefilter, warn
+import numpy as np
+from scipy.sparse import issparse
+from sklearn.base import ClassifierMixin, MultiOutputMixin, RegressorMixin, TransformerMixin, _fit_context, is_classifier
+from sklearn.ensemble._base import BaseEnsemble, _partition_estimators
+from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
+
+class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
+    _parameter_constraints: dict = {'n_estimators': [Interval(Integral, 1, None, closed='left')], 'bootstrap': ['boolean'], 'oob_score': ['boolean', callable], 'n_jobs': [Integral, None], 'random_state': ['random_state'], 'verbose': ['verbose'], 'warm_start': ['boolean'], 'max_samples': [None, Interval(RealNotInt, 0.0, 1.0, closed='right'), Interval(Integral, 1, None, closed='left')]}
+
+    @abstractmethod
+    def __init__(self, estimator, n_estimators=100, *, estimator_params=tuple(), bootstrap=False, oob_score=False, n_jobs=None, random_state=None, verbose=0, warm_start=False, class_weight=None, max_samples=None):
+        super().__init__(estimator=estimator, n_estimators=n_estimators, estimator_params=estimator_params)
+        self.bootstrap = bootstrap
+        self.oob_score = oob_score
+        self.n_jobs = n_jobs
+        self.random_state = random_state
+        self.verbose = verbose
+        self.warm_start = warm_start
+        self.class_weight = class_weight
+        self.max_samples = max_samples
+
+    def _compute_oob_predictions(self, X, y):
+        if issparse(X):
+            X = X.tocsr()
+        n_samples = y.shape[0]
+        n_outputs = self.n_outputs_
+        if is_classifier(self) and hasattr(self, 'n_classes_'):
+            oob_pred_shape = (n_samples, self.n_classes_[0], n_outputs)
+        else:
+            oob_pred_shape = (n_samples, 1, n_outputs)
+        oob_pred = np.zeros(shape=oob_pred_shape, dtype=np.float64)
+        n_oob_pred = np.zeros((n_samples, n_outputs), dtype=np.int64)
+        n_samples_bootstrap = _get_n_samples_bootstrap(n_samples, self.max_samples)
+        for estimator in self.estimators_:
+            unsampled_indices = _generate_unsampled_indices(estimator.random_state, n_samples, n_samples_bootstrap)
+            y_pred = self._get_oob_predictions(estimator, X[unsampled_indices, :])
+            oob_pred[unsampled_indices, ...] += y_pred
+            n_oob_pred[unsampled_indices, :] += 1
+        for k in range(n_outputs):
+            if (n_oob_pred == 0).any():
+                warn('Some inputs do not have OOB scores. This probably means too few trees were used to compute any reliable OOB estimates.', UserWarning)
+                n_oob_pred[n_oob_pred == 0] = 1
+            oob_pred[..., k] /= n_oob_pred[..., [k]]
+        return oob_pred
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.base.is_classifier
+
+def is_classifier(estimator):
+    """Return True if the given estimator is (probably) a classifier.
+
+    Parameters
+    ----------
+    estimator : estimator instance
+        Estimator object to test.
+
+    Returns
+    -------
+    out : bool
+        True if estimator is a classifier and False otherwise.
+
+    Examples
+    --------
+    >>> from sklearn.base import is_classifier
+    >>> from sklearn.cluster import KMeans
+    >>> from sklearn.svm import SVC, SVR
+    >>> classifier = SVC()
+    >>> regressor = SVR()
+    >>> kmeans = KMeans()
+    >>> is_classifier(classifier)
+    True
+    >>> is_classifier(regressor)
+    False
+    >>> is_classifier(kmeans)
+    False
+    """
+    return get_tags(estimator).estimator_type == "classifier"
+
+scikit-learn.sklearn.ensemble._forest._get_oob_predictions
+
+@staticmethod
+def _get_oob_predictions(tree, X):
+    """Compute the OOB predictions for an individual tree.
+
+    Parameters
+    ----------
+    tree : DecisionTreeClassifier object
+        A single decision tree classifier.
+    X : ndarray of shape (n_samples, n_features)
+        The OOB samples.
+
+    Returns
+    -------
+    y_pred : ndarray of shape (n_samples, n_classes, n_outputs)
+        The OOB associated predictions.
+    """
+    y_pred = tree.predict_proba(X, check_input=False)
+    y_pred = np.asarray(y_pred)
+    if y_pred.ndim == 2:
+        # binary and multiclass
+        y_pred = y_pred[..., np.newaxis]
+    else:
+        # Roll the first `n_outputs` axis to the last axis. We will reshape
+        # from a shape of (n_outputs, n_samples, n_classes) to a shape of
+        # (n_samples, n_classes, n_outputs).
+        y_pred = np.rollaxis(y_pred, axis=0, start=3)
+    return y_pred
+
+scikit-learn.sklearn.ensemble._forest._generate_unsampled_indices
+
+def _generate_unsampled_indices(random_state, n_samples, n_samples_bootstrap):
+    """
+    Private function used to forest._set_oob_score function."""
+    sample_indices = _generate_sample_indices(
+        random_state, n_samples, n_samples_bootstrap
+    )
+    sample_counts = np.bincount(sample_indices, minlength=n_samples)
+    unsampled_mask = sample_counts == 0
+    indices_range = np.arange(n_samples)
+    unsampled_indices = indices_range[unsampled_mask]
+
+    return unsampled_indices
+
+scikit-learn.sklearn.ensemble._forest._get_n_samples_bootstrap
+
+def _get_n_samples_bootstrap(n_samples, max_samples):
+    """
+    Get the number of samples in a bootstrap sample.
+
+    Parameters
+    ----------
+    n_samples : int
+        Number of samples in the dataset.
+    max_samples : int or float
+        The maximum number of samples to draw from the total available:
+            - if float, this indicates a fraction of the total and should be
+              the interval `(0.0, 1.0]`;
+            - if int, this indicates the exact number of samples;
+            - if None, this indicates the total number of samples.
+
+    Returns
+    -------
+    n_samples_bootstrap : int
+        The total number of samples to draw for the bootstrap sample.
+    """
+    if max_samples is None:
+        return n_samples
+
+    if isinstance(max_samples, Integral):
+        if max_samples > n_samples:
+            msg = "`max_samples` must be <= n_samples={} but got value {}"
+            raise ValueError(msg.format(n_samples, max_samples))
+        return max_samples
+
+    if isinstance(max_samples, Real):
+        return max(round(n_samples * max_samples), 1)
+
+
+[/PYTHON]
+What will be the input of `_compute_oob_predictions`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "array([[[0.93333333],\n        [0.06666667]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.2       ],\n        [0.8       ]],\n\n       [[0.82352941],\n        [0.17647059]],\n\n       [[0.94444444],\n        [0.05555556]],\n\n       [[0.88888889],\n        [0.11111111]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.81818182],\n        [0.18181818]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.92857143],\n        [0.07142857]],\n\n       [[0.92857143],\n        [0.07142857]],\n\n       [[0.16666667],\n        [0.83333333]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.23076923],\n        [0.76923077]],\n\n       [[0.9047619 ],\n        [0.0952381 ]],\n\n       [[0.9375    ],\n        [0.0625    ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.84615385],\n        [0.15384615]],\n\n       [[0.1       ],\n        [0.9       ]],\n\n       [[0.94117647],\n        [0.05882353]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.18181818],\n        [0.81818182]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.95238095],\n        [0.04761905]],\n\n       [[0.27777778],\n        [0.72222222]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.0625    ],\n        [0.9375    ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.05882353],\n        [0.94117647]],\n\n       [[0.92857143],\n        [0.07142857]],\n\n       [[0.82352941],\n        [0.17647059]],\n\n       [[0.0625    ],\n        [0.9375    ]],\n\n       [[0.06666667],\n        [0.93333333]],\n\n       [[0.13333333],\n        [0.86666667]],\n\n       [[0.06666667],\n        [0.93333333]],\n\n       [[0.05555556],\n        [0.94444444]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.16666667],\n        [0.83333333]],\n\n       [[0.4       ],\n        [0.6       ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.9375    ],\n        [0.0625    ]],\n\n       [[0.33333333],\n        [0.66666667]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.375     ],\n        [0.625     ]],\n\n       [[0.14285714],\n        [0.85714286]],\n\n       [[0.29411765],\n        [0.70588235]],\n\n       [[0.10526316],\n        [0.89473684]],\n\n       [[0.8       ],\n        [0.2       ]],\n\n       [[0.14285714],\n        [0.85714286]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.23076923],\n        [0.76923077]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.94736842],\n        [0.05263158]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.9       ],\n        [0.1       ]],\n\n       [[0.08333333],\n        [0.91666667]],\n\n       [[0.83333333],\n        [0.16666667]],\n\n       [[0.07692308],\n        [0.92307692]],\n\n       [[0.05882353],\n        [0.94117647]],\n\n       [[0.16666667],\n        [0.83333333]],\n\n       [[0.26666667],\n        [0.73333333]],\n\n       [[0.08333333],\n        [0.91666667]],\n\n       [[0.1       ],\n        [0.9       ]],\n\n       [[0.23529412],\n        [0.76470588]],\n\n       [[0.46153846],\n        [0.53846154]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.04347826],\n        [0.95652174]],\n\n       [[0.46666667],\n        [0.53333333]],\n\n       [[0.07692308],\n        [0.92307692]],\n\n       [[0.95      ],\n        [0.05      ]],\n\n       [[0.14285714],\n        [0.85714286]],\n\n       [[0.27272727],\n        [0.72727273]],\n\n       [[0.25      ],\n        [0.75      ]],\n\n       [[0.85714286],\n        [0.14285714]],\n\n       [[0.94736842],\n        [0.05263158]],\n\n       [[0.4       ],\n        [0.6       ]],\n\n       [[0.0625    ],\n        [0.9375    ]],\n\n       [[0.16666667],\n        [0.83333333]],\n\n       [[0.14285714],\n        [0.85714286]],\n\n       [[0.3       ],\n        [0.7       ]],\n\n       [[0.88235294],\n        [0.11764706]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.05555556],\n        [0.94444444]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.94444444],\n        [0.05555556]],\n\n       [[0.0625    ],\n        [0.9375    ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.28571429],\n        [0.71428571]],\n\n       [[0.18181818],\n        [0.81818182]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.06666667],\n        [0.93333333]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.13333333],\n        [0.86666667]],\n\n       [[0.23809524],\n        [0.76190476]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.9375    ],\n        [0.0625    ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.21428571],\n        [0.78571429]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.2       ],\n        [0.8       ]],\n\n       [[0.92307692],\n        [0.07692308]],\n\n       [[0.15384615],\n        [0.84615385]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.0952381 ],\n        [0.9047619 ]],\n\n       [[0.92857143],\n        [0.07142857]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.75      ],\n        [0.25      ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.09090909],\n        [0.90909091]],\n\n       [[0.10526316],\n        [0.89473684]],\n\n       [[0.92857143],\n        [0.07142857]],\n\n       [[0.9375    ],\n        [0.0625    ]],\n\n       [[0.16666667],\n        [0.83333333]],\n\n       [[0.0952381 ],\n        [0.9047619 ]],\n\n       [[0.25      ],\n        [0.75      ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.        ],\n        [1.        ]],\n\n       [[1.        ],\n        [0.        ]],\n\n       [[0.29411765],\n        [0.70588235]],\n\n       [[0.36842105],\n        [0.63157895]],\n\n       [[0.76923077],\n        [0.23076923]]])"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "estimator": XXX,
+        "n_estimators": XXX,
+        "estimator_params": XXX,
+        "bootstrap": XXX,
+        "oob_score": XXX,
+        "n_jobs": XXX,
+        "random_state": XXX,
+        "verbose": XXX,
+        "warm_start": XXX,
+        "class_weight": XXX,
+        "max_samples": XXX,
+        "criterion": XXX,
+        "max_depth": XXX,
+        "min_samples_split": XXX,
+        "min_samples_leaf": XXX,
+        "min_weight_fraction_leaf": XXX,
+        "max_features": XXX,
+        "max_leaf_nodes": XXX,
+        "min_impurity_decrease": XXX,
+        "monotonic_cst": XXX,
+        "ccp_alpha": XXX,
+        "n_features_in_": XXX,
+        "_n_samples": XXX,
+        "n_outputs_": XXX,
+        "classes_": XXX,
+        "n_classes_": XXX,
+        "_n_samples_bootstrap": XXX,
+        "estimator_": XXX,
+        "estimators_": XXX
+    },
+    "args": {
+        "X": XXX,
+        "y": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

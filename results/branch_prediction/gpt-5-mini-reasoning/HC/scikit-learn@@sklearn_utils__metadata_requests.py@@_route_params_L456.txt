@@ -1,0 +1,59 @@
+[THOUGHT]
+We start with self._requests = {"sample_weight": True, "metadata": True}. params contains both keys with non-None values, so args becomes the same dict. The loop over self._requests.items() iterates twice in insertion order: first ('sample_weight', True), then ('metadata', True).
+
+For each iteration:
+- The check "if alias is False or alias == WARN" is False (alias is True) => 'N' for both iterations.
+- The "elif alias is True and prop in args" is True for both iterations because alias is True and both props are present in args => 'Y' for both iterations.
+- The subsequent elifs ("alias is None ..." and "alias in args") are not reached in either iteration, and would be False if evaluated: record 'N' for each iteration for those branch points.
+After the loop, unrequested is empty, so "if unrequested:" is False (only encountered once) => 'N'.
+
+So the branch outcomes are:
+- line 24 (alias is False or alias == WARN): ['N', 'N']
+- line 26 (alias is True and prop in args): ['Y', 'Y']
+- line 28 (alias is None and prop in args): ['N', 'N']
+- line 30 (alias in args): ['N', 'N']
+- line 32 (if unrequested): ['N']
+[/THOUGHT]
+
+[ANSWER]
+1 from warnings import warn
+2 from sklearn.exceptions import UnsetMetadataPassedError
+3 from sklearn.utils._bunch import Bunch
+4 
+5 class MethodMetadataRequest:
+6 
+7     def __init__(self, owner, method, requests=None):
+8         self._requests = requests or dict()
+9         self.owner = owner
+10         self.method = method
+11 
+12     def _check_warnings(self, *, params):
+13         params = {} if params is None else params
+14         warn_params = {prop for prop, alias in self._requests.items() if alias == WARN and prop in params}
+15         for param in warn_params:
+16             warn(f'Support for {param} has recently been added to {self.owner} class. To maintain backward compatibility, it is ignored now. Using `set_{self.method}_request({param}={{True, False}})` on this method of the class, you can set the request value to False to silence this warning, or to True to consume and use the metadata.')
+17 
+18     def _route_params(self, params, parent, caller):
+19         self._check_warnings(params=params)
+20         unrequested = dict()
+21         args = {arg: value for arg, value in params.items() if value is not None}
+22         res = Bunch()
+23         for prop, alias in self._requests.items():
+24             if alias is False or alias == WARN: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+25                 continue
+26             elif alias is True and prop in args: ## [BRANCH]taken=['Y', 'Y'][/BRANCH]
+27                 res[prop] = args[prop]
+28             elif alias is None and prop in args: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+29                 unrequested[prop] = args[prop]
+30             elif alias in args: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+31                 res[prop] = args[alias]
+32         if unrequested: ## [BRANCH]taken=['N'][/BRANCH]
+33             if self.method in COMPOSITE_METHODS:
+34                 callee_methods = COMPOSITE_METHODS[self.method]
+35             else:
+36                 callee_methods = [self.method]
+37             set_requests_on = ''.join([f'.set_{method}_request({{metadata}}=True/False)' for method in callee_methods])
+38             message = f"[{', '.join([key for key in unrequested])}] are passed but are not explicitly set as requested or not requested for {_routing_repr(self.owner)}.{self.method}, which is used within {_routing_repr(parent)}.{caller}. Call `{_routing_repr(self.owner)}" + set_requests_on + '` for each metadata you want to request/ignore. See the Metadata Routing User guide <https://scikit-learn.org/stable/metadata_routing.html> for more information.'
+39             raise UnsetMetadataPassedError(message=message, unrequested_params=unrequested, routed_params=res)
+40         return res
+41 [/ANSWER]

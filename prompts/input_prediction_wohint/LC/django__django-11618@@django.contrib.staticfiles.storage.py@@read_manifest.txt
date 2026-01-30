@@ -1,0 +1,227 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import hashlib
+import json
+import os
+import posixpath
+import re
+import warnings
+from urllib.parse import unquote, urldefrag, urlsplit, urlunsplit
+from django.conf import settings
+from django.contrib.staticfiles.utils import check_settings, matches_patterns
+from django.core.cache import InvalidCacheBackendError, cache as default_cache, caches
+from django.core.exceptions import ImproperlyConfigured
+from django.core.files.base import ContentFile
+from django.core.files.storage import FileSystemStorage, get_storage_class
+from django.utils.deprecation import RemovedInDjango31Warning
+from django.utils.functional import LazyObject
+staticfiles_storage = ConfiguredStorage()
+
+class ManifestFilesMixin(HashedFilesMixin):
+    manifest_version = '1.0'
+    manifest_name = 'staticfiles.json'
+    manifest_strict = True
+    keep_intermediate_files = False
+
+    def read_manifest(self):
+        try:
+            with self.open(self.manifest_name) as manifest:
+                return manifest.read().decode()
+        except FileNotFoundError:
+            return None
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.django.core.files.storage.Storage.open
+
+def open(self, name, mode='rb'):
+    return self._open(name, mode)
+
+.django.core.files.storage.FileSystemStorage._open
+
+def _open(self, name, mode='rb'):
+    return File(open(self.path(name), mode))
+
+.django.contrib.staticfiles.storage.StaticFilesStorage.path
+
+def path(self, name):
+    if not self.location:
+        raise ImproperlyConfigured("You're using the staticfiles app without having set the STATIC_ROOT setting to a filesystem path.")
+    return super().path(name)
+
+.django.utils.functional.cached_property.__get__
+
+def __get__(self, instance, cls=None):
+    if instance is None:
+        return self
+    res = instance.__dict__[self.name] = self.func(instance)
+    return res
+
+.django.core.files.storage.FileSystemStorage.location
+
+def location(self):
+    return os.path.abspath(self.base_location)
+
+.django.core.files.storage.FileSystemStorage.base_location
+
+def base_location(self):
+    return self._value_or_setting(self._location, settings.MEDIA_ROOT)
+
+.django.core.files.storage.FileSystemStorage._value_or_setting
+
+def _value_or_setting(self, value, setting):
+    return setting if value is None else value
+
+.django.core.files.storage.FileSystemStorage.path
+
+def path(self, name):
+    return safe_join(self.location, name)
+
+.django.utils._os.safe_join
+
+def safe_join(base, *paths):
+    final_path = abspath(join(base, *paths))
+    base_path = abspath(base)
+    if not normcase(final_path).startswith(normcase(base_path + sep)) and normcase(final_path) != normcase(base_path) and (dirname(normcase(base_path)) != normcase(base_path)):
+        raise SuspiciousFileOperation('The joined path ({}) is located outside of the base path component ({})'.format(final_path, base_path))
+    return final_path
+
+.django.core.files.base.File.__init__
+
+def __init__(self, file, name=None):
+    self.file = file
+    if name is None:
+        name = getattr(file, 'name', None)
+    self.name = name
+    if hasattr(file, 'mode'):
+        self.mode = file.mode
+
+.django.core.files.base.File.__enter__
+
+def __enter__(self):
+    return self
+
+
+[/PYTHON]
+What will be the input of `read_manifest`, given the following input:
+[OUTPUT]
+```
+{
+    "output": "{\"paths\": {\"cached/css/img/window.png\": \"cached/css/img/window.acae32e4532b.png\", \"cached/css/fonts/font.svg\": \"cached/css/fonts/font.b8d603e42714.svg\", \"cached/css/fonts/font.eot\": \"cached/css/fonts/font.b9b105392eb8.eot\", \"cached/img/relative.png\": \"cached/img/relative.acae32e4532b.png\", \"cached/css/ignored.css\": \"cached/css/ignored.554da52152af.css\", \"cached/css/window.css\": \"cached/css/window.5d5c10836967.css\", \"cached/css/fragments.css\": \"cached/css/fragments.a60c0e74834f.css\", \"test/vendor/module.js\": \"test/vendor/module.d41d8cd98f00.js\", \"cached/styles_insensitive.css\": \"cached/styles_insensitive.3fa427592a53.css\", \"cached/import.css\": \"cached/import.f53576679e5a.css\", \"cached/absolute.css\": \"cached/absolute.eb04def9f9a4.css\", \"cached/other.css\": \"cached/other.d41d8cd98f00.css\", \"cached/url.css\": \"cached/url.902310b73412.css\", \"cached/styles.css\": \"cached/styles.5e0040571e1a.css\", \"cached/relative.css\": \"cached/relative.c3e9e1ea6f2e.css\", \"cached/test.js\": \"cached/test.62789ffcd280.js\", \"test/file.txt\": \"test/file.dad0999e4f8f.txt\", \"test/camelCase.txt\": \"test/camelCase.dcc960fbf12d.txt\", \"subdir/test.txt\": \"subdir/test.b3eff404e5bb.txt\", \"prefix/test.txt\": \"prefix/test.131f0ab129ae.txt\", \"test/file1.txt\": \"test/file1.6c0403df55de.txt\", \"test/\\u2297.txt\": \"test/\\u2297.8a3dda0dff20.txt\", \"test/window.png\": \"test/window.9224bd75b323.png\", \"test/nonascii.css\": \"test/nonascii.a5155db9d7cc.css\", \"test/%2F.txt\": \"test/.txt.fd1cb434fc14\", \"absolute_root.css\": \"absolute_root.f821df1b64f7.css\", \"styles_root.css\": \"styles_root.401f2509a628.css\", \"test.txt\": \"test.b3eff404e5bb.txt\", \"file2.txt\": \"file2.ae652b5c514c.txt\", \"media-file.txt\": \"media-file.65b17f937dfa.txt\"}, \"version\": \"1.0\"}"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

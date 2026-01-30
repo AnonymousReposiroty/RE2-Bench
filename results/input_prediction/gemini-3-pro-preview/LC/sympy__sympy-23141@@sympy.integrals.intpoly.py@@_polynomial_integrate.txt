@@ -1,0 +1,518 @@
+To reverse-engineer the input for `_polynomial_integrate` that yields an output of `-1/8`, we can construct a simple scenario. The function integrates a polynomial over a 2D polygon using the method of integration reduction on the boundary facets.
+
+Let's assume the simplest case: integrating the polynomial $P(x, y) = -1/8$ over a unit square. The area of a unit square is 1. If we integrate a constant $C$ over area $A$, the result is $C \times A$.
+If $A=1$, then $C = -1/8$ gives the result. Alternatively, integrate $P(x, y) = x$ or $y$ over a triangle, or a simple monomial over a simple shape.
+
+However, the structure suggests `polynomials` is a dictionary where keys are degrees. A constant is degree 0. A linear term is degree 1.
+Let's try a constant polynomial first since it's the simplest.
+Polynomial: $f(x, y) = C$. Degree 0.
+Shape: Unit square $[0, 1] \times [0, 1]$. Vertices: $(0,0), (1,0), (1,1), (0,1)$.
+Area = 1.
+Integral = $C \times 1 = -1/8$. So $C = -1/8$.
+
+Let's verify what `_polynomial_integrate` does.
+`polynomials` is a dict {degree: expression}.
+`facets` is a list of segments forming the polygon boundary.
+`hp_params` is a list of hyperplane parameters (normal vector `a` and constant `b` such that $a \cdot x = b$).
+
+Let's deduce the arguments for a unit square with polynomial = -1/8.
+
+**1. Polynomials:**
+`polynomials = {0: -S(1)/8}` or just `-1/8` via sympify.
+However, usually, this function is called with homogeneous polynomials separated by degree. If we just pass a constant, it's degree 0.
+
+**2. Facets:**
+A unit square has 4 segments.
+Points: $P_0=(0,0), P_1=(1,0), P_2=(1,1), P_3=(0,1)$.
+Segments (counter-clockwise):
+$S_0: (0,0) \to (1,0)$
+$S_1: (1,0) \to (1,1)$
+$S_2: (1,1) \to (0,1)$
+$S_3: (0,1) \to (0,0)$
+
+**3. Hyperplane parameters (hp_params):**
+For each facet, we need $(a, b)$ such that $a \cdot x = b$ defines the line, and usually, the normal points outwards or is normalized. The code calculates `value_over_boundary * (hp[1] / norm(hp[0]))`. `hp[1]` is $b$, `hp[0]` is $a$.
+For $S_0$: Line $y=0$. Normal $a=(0, -1)$ implies $0x - 1y = 0$. $b=0$. (Outward normal for bottom edge). Wait, let's check standard representation.
+Actually, the integral formula often relies on $a \cdot x < b$ or similar. The term `hp[1] / norm(hp[0])` suggests distance from origin. `hp[1]` is the scalar distance parameter if `hp[0]` is normalized normal.
+If the polygon contains the origin, usually $a \cdot x = b$ with $b > 0$.
+Here $(0,0)$ is a vertex. Let's shift the square to avoid vertices at origin if that simplifies logic, or stick with it. If a facet passes through origin, $b=0$.
+$S_0$ (bottom): $y=0$. dist=0.
+$S_3$ (left): $x=0$. dist=0.
+The logic inside `_polynomial_integrate`:
+`poly_contribute += value_over_boundary * (hp[1] / norm(hp[0]))`
+If `hp[1]` (the constant term $b$) is 0, the contribution is 0.
+For a square at origin, the bottom and left edges contribute 0.
+Top edge ($y=1$): normal $(0, 1)$, equation $0x + 1y = 1 \implies b=1$.
+Right edge ($x=1$): normal $(1, 0)$, equation $1x + 0y = 1 \implies b=1$.
+
+Let's simulate with `polynomials={0: -1/8}`.
+Loop `deg` in `polynomials`: `deg=0`. `poly = -1/8`.
+`facet_count=0`.
+Facet 0 ($S_0$, $y=0$): hp=( (0, -1), 0 ). `hp[1]=0` -> contrib=0.
+Facet 1 ($S_1$, $x=1$): hp=( (1, 0), 1 ). `hp[1]=1`. `norm=1`.
+  `value_over_boundary = integration_reduction(..., expr=-1/8, dims=(x,y), degree=0)`
+  Inside `integration_reduction`: expr is constant (-1/8). Returns expr.
+  Value = -1/8.
+  Contrib += (-1/8) * (1/1) = -1/8.
+Facet 2 ($S_2$, $y=1$): hp=( (0, 1), 1 ). `hp[1]=1`.
+  `value_over_boundary` = -1/8.
+  Contrib += (-1/8) * 1 = -1/8.
+Facet 3 ($S_3$, $x=0$): hp=( (-1, 0), 0 ). `hp[1]=0` -> contrib=0.
+
+Total `poly_contribute` = -1/8 - 1/8 = -2/8 = -1/4.
+Final line: `poly_contribute /= dim_length + deg`. `dim_length` for 2D is 2. `deg` is 0.
+Integral = (-1/4) / 2 = -1/8.
+This works perfectly! A unit square $[0,1]^2$ and polynomial -1/8 gives an integral of -1/8.
+
+Wait, I should check the logic of "integration_reduction" on the constant.
+Is it simply returning the expression multiplied by length?
+The function `integration_reduction` returns `value / (len(dims) + degree - 1)`.
+Here dims is 2D (projected to 1D boundary? No, `dims` is global (x,y)).
+Inside `integration_reduction` for `degree=0`:
+`expr=-1/8`.
+`inner_product` calculation: `diff(-1/8) ...` is 0.
+Recursive call skipped.
+`left_integral2D`:
+  Iterates $j$ adjacent.
+  For a constant expr, `left_integral2D` computes length * constant?
+  Actually `left_integral2D`: `value += distance_origin * expr`.
+  For $S_1$ (side $x=1$, from 1,0 to 1,1):
+    Line containing $S_1$ is $x=1$. $S_1$ has vertices $(1,0)$ and $(1,1)$.
+    `left_integral2D` calculates integral over the facet (segment).
+    If expr is constant $C$.
+    For facet $S_1$ (index 1), neighbors are $S_0$ (0) and $S_2$ (2).
+    Intersect 1 & 0: $(1,0)$. Distance from origin $x_0=(1,0)$ (start point of $S_1$). Distance is 0.
+    Intersect 1 & 2: $(1,1)$. Distance from $x_0=(1,0)$. Dist is 1.
+    Wait, `left_integral2D` logic is specific.
+    `x0 = facets[index].points[0]`. For $S_1$, $x0=(1,0)$.
+    Neighbors $j=0$: intersect $S_1, S_0$ is $(1,0)$. $intersect - x0 = (0,0)$. norm=0.
+    Neighbors $j=2$: intersect $S_1, S_2$ is $(1,1)$. $intersect - x0 = (0,1)$. norm=1.
+    Value += $1 * (-1/8) = -1/8$.
+    Returns $-1/8$.
+
+Back to `integration_reduction`: `value = -1/8`.
+Returns `value / (2 + 0 - 1)` = `-1/8 / 1` = `-1/8`.
+
+Back to loop:
+Facet 1 contrib: `-1/8`.
+Facet 2 ($y=1$, from $1,1$ to $0,1$). $x_0 = (1,1)$.
+  Neighbor 1 ($S_1$): intersect $(1,1)$. $x0=(1,1)$. dist=0.
+  Neighbor 3 ($S_3$): intersect $(0,1)$. $x0=(1,1)$. dist=1.
+  Value += $1 * (-1/8) = -1/8$.
+  Returns $-1/8$.
+Facet 2 contrib: `-1/8` * hp_factor(1) = `-1/8`.
+
+Total `poly_contribute` = -1/4.
+Final division by 2. Result -1/8.
+
+Match confirmed.
+
+**Inputs construction:**
+`polynomials`: `{0: -1/8}`. (Using raw numbers is implicit sympification, but structure usually expects SymPy objects. However, JSON input suggests simple representations. The example outputs show strings for paths, etc., but here mathematical objects are involved. The structure provided has XXX for `polynomials`, `facets`, `hp_params`. I will use simple representations where possible, e.g., strings or dictionaries for polys).
+Based on typical SymPy tests/usage:
+`polynomials = {0: -S(1)/8}`
+In JSON/simulated input:
+`polynomials` dict key "0" is string in JSON? The python dict uses integer keys. The provided structure uses string keys for dictionary, e.g. `"2": XXX`. So I will provide `{"0": -0.125}` or fractional string "-1/8".
+`facets`: A list of `Segment2D` objects.
+`hp_params`: A list of tuples `(normal_vector, distance)`.
+
+Points:
+p0 = (0, 0)
+p1 = (1, 0)
+p2 = (1, 1)
+p3 = (0, 1)
+
+Facets (Segments):
+f0 = Segment2D(p0, p1)
+f1 = Segment2D(p1, p2)
+f2 = Segment2D(p2, p3)
+f3 = Segment2D(p3, p0)
+
+hp_params:
+h0 = ((0, -1), 0)  # y=0
+h1 = ((1, 0), 1)   # x=1
+h2 = ((0, 1), 1)   # y=1
+h3 = ((-1, 0), 0)  # x=0
+
+Polynomial:
+Looking at the structure:
+```
+    "args": {
+        "polynomials": {
+            "2": XXX
+        },
+```
+The key is "2". This implies the example wants a degree 2 polynomial result? Or is the "2" just a placeholder in the prompt structure? The prompt says `_polynomial_integrate(polynomials, facets, hp_params)`, and in the structure it explicitly has `"polynomials": { "2": XXX }`. This suggests I must find a degree 2 polynomial that integrates to -1/8.
+
+Let's re-evaluate.
+The structure says `polynomials` has a key `"2"`.
+This means `deg=2`.
+Formula: $\frac{1}{2+2} \sum (val \times b)$.
+$\frac{1}{4} \sum (val \times b) = -1/8$.
+$\sum (val \times b) = -1/2$.
+
+Let's maintain the unit square geometry.
+$b$ values are $0, 1, 1, 0$.
+So we need $val_1 + val_2 = -1/2$.
+
+Let's pick a simple monomial $P(x,y) = k x^2$ or $k xy$ or $k y^2$.
+Let's try $P = x^2 - y^2$. Integral over square is $\int_0^1 \int_0^1 (x^2 - y^2) dy dx = [x^2 y - y^3/3]_0^1 = x^2 - 1/3$. $\int (x^2 - 1/3) dx = [x^3/3 - x/3]_0^1 = 1/3 - 1/3 = 0$. Not useful.
+
+Try $P = xy$. Integral $\int_0^1 x dx \int_0^1 y dy = (1/2)(1/2) = 1/4$.
+If we want -1/8, we need $P = -1/2 xy$.
+Let's check using the function logic.
+`deg=2`.
+Expr $P = -1/2 \cdot x \cdot y$.
+
+Facet 1 ($x=1$): $b=1$.
+`integration_reduction(..., expr=-1/2 xy, deg=2)`.
+`inner_product`: diff(expr, x)*x0[0] + diff(expr, y)*x0[1].
+$x0 = (1, 0)$.
+diff(x) = -1/2 y. diff(y) = -1/2 x.
+Inner = $(-1/2 y) * 1 + (-1/2 x) * 0 = -1/2 y$.
+Recursive call: `integration_reduction(..., expr=-1/2 y, deg=1)`.
+  Inner: $x0=(1,0)$. diff(-1/2 y, x)=0. diff(-1/2 y, y)=-1/2.
+  Inner = $-1/2 * 0 = 0$.
+  Recursion stops.
+  `left_integral2D`: expr = -1/2 y.
+  Facet 1: from (1,0) to (1,1).
+  Neighbor 0: dist=0.
+  Neighbor 2 ($y=1$): intersect (1,1). dist=1.
+  Evaluate expr at mid/dist? No, `left_integral2D` logic:
+  `value += distance * expr.subs(...)`.
+  At intersect (1,1): expr = -1/2(1) = -1/2.
+  Val = 1 * (-1/2) = -1/2.
+  Return -1/2 / (2+1-1) = -1/4.
+Back to deg 2 call:
+Recursive part returned -1/4.
+`left_integral2D` for expr $=-1/2 xy$.
+At intersect (1,1): $-1/2(1)(1) = -1/2$.
+Val = -1/2.
+Sum = -1/4 + (-1/2) = -3/4.
+Return -3/4 / (2+2-1) = -3/4 / 3 = -1/4.
+
+Facet 2 ($y=1$): $b=1$.
+Expr = $-1/2 xy$.
+$x0 = (1, 1)$.
+Inner: $x\cdot(-1/2 y) + y\cdot(-1/2 x)$ at $(1,1)$ leads to $-1/2 y - 1/2 x$.
+This gets complex.
+
+Let's try a polynomial that depends only on x? $P = k x^2$.
+Integral $\int x^2 = 1/3$. To get -1/8? Hard.
+
+What if we change the geometry?
+A triangle. Vertices (0,0), (1,0), (0,1). Area 1/2.
+Centroid (1/3, 1/3).
+Integral of constant $C$: $C/2 = -1/8 \implies C=-1/4$.
+Integral of linear $x$: Area * centroid_x = $1/2 * 1/3 = 1/6$.
+Integral of $x^2$: $\int_0^1 x^2 (1-x) dx = x^3/3 - x^4/4 = 1/12$.
+Integral of $xy$: $\int_0^1 x ( (1-x)^2/2 ) dx = 1/2 \int (x - 2x^2 + x^3) = 1/2 (1/2 - 2/3 + 1/4) = 1/2 (6/12 - 8/12 + 3/12) = 1/24$.
+
+We need a result of -1/8.
+If we use the triangle and polynomial $P = -3 x^2$: Result $-3/12 = -1/4$. No.
+If we use $P = -3 xy$: Result $-3/24 = -1/8$.
+This looks promising.
+Polynomial: $P = -3 xy$ (Degree 2).
+Shape: Triangle (0,0), (1,0), (0,1).
+Facets:
+f0: (0,0) -> (1,0). $y=0$. hp=((0, -1), 0).
+f1: (1,0) -> (0,1). Line $x+y=1$. Normal $(1,1)$. Distance?
+   Equation $1x + 1y = 1$. normalized normal $(1/\sqrt{2}, 1/\sqrt{2})$. dist $1/\sqrt{2}$.
+   Or unnormalized: Sympy's logic usually handles unnormalized if handled consistently, but `hp[1]/norm(hp[0])` uses norm. So $b=1$, norm=$\sqrt{2}$. Factor $1/\sqrt{2}$.
+f2: (0,1) -> (0,0). $x=0$. hp=((-1, 0), 0)
+
+Check logic with $P = -3xy$, Triangle.
+Deg = 2.
+Divisor = 2+2 = 4.
+Target sum = $-1/8 \times 4 = -1/2$.
+Only facet 1 contributes (others have b=0).
+Ref facet 1: $x+y=1$. $x0 = (1,0)$.
+Hp param index 1. $a=(1,1)$. $b=1$. factor $1/\sqrt{2}$.
+
+Compute `value_over_boundary` for facet 1.
+Expr = $-3xy$.
+Inner product at $x0=(1,0)$:
+diff_x = -3y. diff_y = -3x.
+Inner = $(-3y)*1 + (-3x)*0 = -3y$.
+Recursive call `integration_reduction(-3y, deg=1)`.
+  Inner at $x0=(1,0)$: diff_x=0, diff_y=-3. Inner = -3*0 = 0.
+  Rec call 0.
+  `left_integral2D`: expr=-3y. Facet 1: (1,0)->(0,1).
+  Intersect neighbours:
+    Neighbor 0 ($y=0$): Intersect (1,0). dist=0.
+    Neighbor 2 ($x=0$): Intersect (0,1). Dist=$\sqrt{(1-0)^2 + (0-1)^2} = \sqrt{2}$.
+    Value at (0,1): $-3(1) = -3$.
+    Contrib: $\sqrt{2} * (-3) = -3 \sqrt{2}$.
+  Return: $-3\sqrt{2} / (2+1-1) = -1.5 \sqrt{2}$.
+
+Back to deg 2.
+Recursive contrib: $-1.5 \sqrt{2}$.
+`left_integral2D` for $-3xy$.
+  At (0,1): $-3(0)(1) = 0$.
+  Contrib 0.
+Sum = $-1.5 \sqrt{2}$.
+Return $-1.5 \sqrt{2} / (2+2-1) = -1.5 \sqrt{2} / 3 = -0.5 \sqrt{2}$.
+
+`value_over_boundary` = $-0.5 \sqrt{2}$.
+Outer loop contrib: value * ($hp[1] / norm(hp[0])$).
+hp[1] = 1. norm(1,1) = $\sqrt{2}$.
+Factor = $1/\sqrt{2}$.
+Contrib = $(-0.5 \sqrt{2}) * (1/\sqrt{2}) = -0.5$.
+Total sum = -0.5.
+Final Integral = Sum / 4 = -0.5 / 4 = -1/8.
+
+This works.
+**Inputs:**
+facets: [Segment2D((0, 0), (1, 0)), Segment2D((1, 0), (0, 1)), Segment2D((0, 1), (0, 0))]
+hp_params: [((0, -1), 0), ((1, 1), 1), ((-1, 0), 0)]
+polynomials: {"2": -3*x*y}
+
+JSON formatting:
+The Input block expects valid python code representation for the objects.
+`polys` key needs to be `"2"`.
+`hp_params` items are tuples.
+`facets` items are `Segment2D`.
+
+```
+{
+    "self": {},
+    "args": {
+        "polynomials": {
+            "2": "-3*x*y"
+        },
+        "facets": [
+            "Segment2D(Point(0, 0), Point(1, 0))",
+            "Segment2D(Point(1, 0), Point(0, 1))",
+            "Segment2D(Point(0, 1), Point(0, 0))"
+        ],
+        "hp_params": [
+            [[0, -1], 0],
+            [[1, 1], 1],
+            [[-1, 0], 0]
+        ]
+    },
+    "kwargs": {}
+}
+```
+Wait, the [STRUCTURE] in the prompt defines fields with placeholder XXX. I should use the python objects in the final print block, formatted as the structure requests. The example output used strings for paths, I will use strings/lists that represent the Python objects clearly or the actual repr of the objects if applicable. The prompt asks to "print input between [INPUT]".
+Usually `structure` dictates the JSON keys.
+Values should be Python literals or strings that evaluate to the objects?
+The example input block:
+`"_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0"`
+This is a string.
+For `facets`, it's a list of `Segment2D`. I cannot put raw objects in JSON.
+However, the prompt says "predict input variable values ... and print input".
+If I look at `[PYTHON]`, it imports `Segment2D`, `Point`, `x`, `y`.
+The input section in the example contains a string for a path, which is a valid input for that function (which converts it using `Path(...)`).
+For `_polynomial_integrate`, `facets` expects a list of `Segment2D`. `polynomials` expects a dict.
+I will represent complex objects as their Python repr strings or constructed lists/dicts if possible.
+In the previous turn's example, the input was specific values.
+Here, I will provide the constructed values.
+
+I'll use specific SymPy objects in the input string representation assuming the environment can interpret them or they are just representations.
+Actually, looking at input block of example:
+`"_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0"`
+This was the value for `_given_basetemp`.
+So I will write the python code expression for the values.
+
+Polynomials: `{2: -3*x*y}`. Note: The structure has `"2": XXX` which implies the key is the string "2". The function iterates `for deg in polynomials`, so the keys should resolve to integers or be usable as degrees. JSON keys are strings. Python dicts can have ints. I'll stick to the structure's hint of `"2"` but use the python object for the value.
+Actually, let's verify if `polynomials` can be a dict with int keys in the JSON representation of the SOLUTION. The solution JSON is essentially Python code representation.
+Input:
+```
+{
+    "self": {},
+    "args": {
+        "polynomials": {
+            2: -3*x*y
+        },
+        "facets": [
+            Segment2D(Point(0, 0), Point(1, 0)),
+            Segment2D(Point(1, 0), Point(0, 1)),
+            Segment2D(Point(0, 1), Point(0, 0))
+        ],
+        "hp_params": [
+            ((0, -1), 0),
+            ((1, 1), 1),
+            ((-1, 0), 0)
+        ]
+    },
+    "kwargs": {}
+}
+```
+Wait, `hp_params` logic in standard `intpoly`.
+Usually `hp_params` is generated via `hyperplane_parameters`.
+For a polygon `(0,0), (1,0), (0,1)`, the lines are:
+1. (0,0)-(1,0): $y=0$. Normal $(0,-1)$. Dis 0.
+2. (1,0)-(0,1): $y = 1-x \implies x+y-1=0$. Normal $(1,1)$. Distance 1. (using $a \cdot x = b$).
+3. (0,1)-(0,0): $x=0$. Normal (-1,0). Dis 0.
+
+This matches my manual derivation.
+
+One detail: `Segment2D` args.
+`facets` must be a list of `Segment2D`.
+The input should look like Python code.
+Construction:
+`x, y` are symbols.
+`Segment2D` and `Point` are imported.
+
+I'll output the values filling the structure.
+
+Structure:
+```
+{
+    "self": {},
+    "args": {
+        "polynomials": {
+            "2": XXX
+        },
+        "facets": XXX,
+        "hp_params": XXX
+    },
+    "kwargs": {}
+}
+```
+The key in `polynomials` is `"2"`. I will use `2` (int) if possible because `deg` is used in arithmetic. If JSON requires string keys, the parser (if it were real JSON) would fail with int keys. But this is "PYTHON input format within JSON structure". Python dicts allow int keys. The structure provided has `"2"`, which is a string key. I will assume the prompt implies the key is the integer 2, but represented as `"2"` in the JSON template for compatibility or just convention. However, inside the PYTHON function, it calculates `dim_length + deg`. If deg is a string "2", this crashes. So it must be an integer 2. I will write `2` in the input block.
+
+Wait, looking at the EXAMPLE again.
+Structure: `"_given_basetemp": XXX`
+Input: `"_given_basetemp": "/tmp/..."`
+The structure keys are strings.
+In `polynomials`, if the code iterates `for deg in polynomials`:
+and uses `deg` in `integral_value += poly_contribute / (dim_length + deg)`, then `deg` MUST be an integer.
+Consequently, the key in the input dictionary must be an integer `2`, not string `"2"`.
+I will adjust the key to `2`.
+
+Final confirmation of calculation:
+Poly: $-3xy$.
+Triangle: $(0,0), (1,0), (0,1)$.
+Area 1/2.
+$\iint -3xy dA = -3 \int_0^1 x (1/2 (1-x)^2) dx = -3/2 \int (x - 2x^2 + x^3) dx = -3/2 (1/2 - 2/3 + 1/4) = -3/2 (6-8+3)/12 = -3/2 (1/12) = -1/8$.
+Correct.
+
+Input:
+`polynomials`: `{2: -3*x*y}`
+`facets`: `[Segment2D(Point(0, 0), Point(1, 0)), Segment2D(Point(1, 0), Point(0, 1)), Segment2D(Point(0, 1), Point(0, 0))]`
+`hp_params`: `[((0, -1), 0), ((1, 1), 1), ((-1, 0), 0)]`
+
+I'll format this into the structure.
+
+```json
+{
+    "self": {},
+    "args": {
+        "polynomials": {
+            2: -3*x*y
+        },
+        "facets": [
+            Segment2D(Point(0, 0), Point(1, 0)),
+            Segment2D(Point(1, 0), Point(0, 1)),
+            Segment2D(Point(0, 1), Point(0, 0))
+        ],
+        "hp_params": [
+            ((0, -1), 0),
+            ((1, 1), 1),
+            ((-1, 0), 0)
+        ]
+    },
+    "kwargs": {}
+}
+```
+
+Wait, `hp_params` normals might be normalized in `intpoly` internal logic usually?
+The code snippet: `integral_value += poly_contribute * (hp[1] / norm(hp[0]))`
+My manual trace assumed `b=1` and `norm=sqrt(2)` for the hypotenuse, yielding factor `1/sqrt(2)`.
+This factor cancels the `sqrt(2)` coming from the segment length (dist in `left_integral`).
+If `hp_params` had normalized normal `(1/sqrt(2), 1/sqrt(2))` and `b=1/sqrt(2)`:
+Factor would be `(1/sqrt(2)) / 1 = 1/sqrt(2)`. Same factor.
+Logic holds regardless of normalization as long as `b` and `a` are consistent.
+The provided list is consistent $x+y=1$.
+
+The structure requests the input.
+One stylistic point: `hp_params` tuples usually come from `hyperplane_parameters`.
+For `(0, -1), 0`: correct.
+For `(1, 1), 1`: correct.
+For `(-1, 0), 0`: correct.
+
+Everything seems consistent.
+
+Input print:
+
+```
+{
+    "self": {},
+    "args": {
+        "polynomials": {
+            2: -3*x*y
+        },
+        "facets": [
+            Segment2D(Point(0, 0), Point(1, 0)),
+            Segment2D(Point(1, 0), Point(0, 1)),
+            Segment2D(Point(0, 1), Point(0, 0))
+        ],
+        "hp_params": [
+            ((0, -1), 0),
+            ((1, 1), 1),
+            ((-1, 0), 0)
+        ]
+    },
+    "kwargs": {}
+}
+```
+
+Double check the structure provided in prompt:
+```
+    "args": {
+        "polynomials": {
+            "2": XXX
+        },
+```
+The prompt has `"2"` (string key). I should probably output the integer key `2` in my block, and if the prompt implies "fill the placeholder XXX corresponding to key '2', but the key itself might be wrong in structure", I correct it. Or maybe it's just a visual representation. Given the code executes `deg + dim_length`, it MUST be int. I will use int.
+
+One last check. `x` and `y` must be defined. The import list includes `from sympy.abc import x, y, z`. So `x` and `y` are available.
+
+Final check on the integral result sign.
+My calculation:
+$\iint -3xy = -1/8$.
+Code returns `-1/8`.
+Matches.
+
+One more alternative: $P = -3/2 y^2$.
+$\iint y^2$ on triangle.
+$\int_0^1 \int_0^{1-x} y^2 dy dx = \int_0^1 1/3 (1-x)^3 dx = [-1/12 (1-x)^4]_0^1 = 0 - (-1/12) = 1/12$.
+So $-3/2 * 1/12 = -1/8$.
+Is this simpler? $P = -3/2 y^2$.
+My trace for $-3xy$:
+Facet 1 contribution was nonzero.
+If $P = -3/2 y^2$.
+Same facet 1. $x0=(1,0)$.
+Inner: $0 + (-3y) \cdot 0 = 0$.
+Recursion value 0.
+Left integral: expr = $-3/2 y^2$.
+At (0,1), val = $-3/2$.
+Contrib $\sqrt{2} (-3/2) = -1.5 \sqrt{2}$.
+Return $-1.5 \sqrt{2} / (2+2-1) = -0.5 \sqrt{2}$.
+Same result!
+Any quadratic $Q$ such that $\iint Q = -1/8$ works. $-3xy$ is symmetric and fine.
+I'll stick with $-3*x*y$.
+
+```json
+{
+    "self": {},
+    "args": {
+        "polynomials": {
+            2: -3*x*y
+        },
+        "facets": [
+            Segment2D(Point(0, 0), Point(1, 0)),
+            Segment2D(Point(1, 0), Point(0, 1)),
+            Segment2D(Point(0, 1), Point(0, 0))
+        ],
+        "hp_params": [
+            ((0, -1), 0),
+            ((1, 1), 1),
+            ((-1, 0), 0)
+        ]
+    },
+    "kwargs": {}
+}
+```

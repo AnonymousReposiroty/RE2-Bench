@@ -1,0 +1,507 @@
+<think>
+Input is a = 1, b = "2,3". Let's step through:
+
+1. temp_a, temp_b = a, b
+   temp_a is 1 (float), temp_b is "2,3" (string)
+
+2. isinstance(temp_a, str) is False → branch not taken
+   So temp_a remains 1
+
+3. isinstance(temp_b, str) is True → branch taken
+   temp_b is converted from "2,3" to "2.3"
+
+4. Now compare float(1) == float(2.3) → 1 == 2.3 → False → branch not taken
+
+5. Then return a if 1 > 2.3 else b
+   1 is not > 2.3, so returns b
+   Result is "2.3"
+
+</think>
+
+[ANSWER]
+2 def compare_one(a, b):
+3 
+4     temp_a, temp_b = a, b
+5     if isinstance(temp_a, str): temp_a = temp_a.replace(',','.') ## [BRANCH]taken=[N][/BRANCH]
+6     if isinstance(temp_b, str): temp_b = temp_b.replace(',','.') ## [BRANCH]taken=[Y][/BRANCH]
+7     if float(temp_a) == float(temp_b): return None ## [BRANCH]taken=[N][/BRANCH]
+8     return a if float(temp_a) > float(temp_b) else b
+9 
+
+Output from the function would be "2.3" for the given inputs.
+[/ANSWER]
+
+[FILEPATH] gh0575-BRANCH-8c3b1f2/code2tree/benchmark/openai/bp_v1_with_few_shot_examples_.py [/FILEPATH]
+from typing import Dict, List, Optional, Union
+import json
+import re
+import random
+from openai import OpenAI
+from pprint import pprint
+import os
+from dotenv import load_dotenv
+import tiktoken
+from tqdm import tqdm
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+
+load_dotenv()
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+SYSTEM_PROMPT = """You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You will be given:
+1. A Python code snippet wrapped in [PYTHON] ... [/PYTHON]. The code includes branch markers in comments of the form # [BRANCH]taken=??[/BRANCH].
+2. A method input wrapped in [INPUT] ... [/INPUT].
+Your task is to replace every "??" in "taken=??" with your prediction of whether the branches are taken during execution for the given input.
+
+Detailed Instructions:
+* Replace ?? with a list (e.g., ['Y', 'N', ...]).
+* For each time that branch point is encountered during execution:
+   ** Append 'Y' if that branch is taken.
+   ** Append 'N' if that branch is not taken.
+* Determine branch outcomes by tracing the code step by step, paying special attention to conditionals and loop iterations. Wrap your reasoning in <think> ... </think>
+* Output the fully annotated code (with ?? replaced) wrapped in [ANSWER] ... [/ANSWER]
+* Do not remove, reorder, or add any code lines. 
+* Preserve the original line numbers exactly as they appear in the [PYTHON] ... [/PYTHON] block.
+
+Please follow the format in the example below:
+
+[EXAMPLE]
+[PYTHON]
+1 def func(t):
+2     count = 0 
+3     for c in t:
+4         if not c.isnumeric(): ## [BRANCH]taken=??[/BRANCH]
+5             count += 1
+6     return count
+[/PYTHON]
+The input to the method ```func``` is :
+[INPUT]
+{
+    "self": {},
+    "args": {
+        "t": "#284"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+Complete the branch annotation in the code with "Y" and "N".
+
+<think>
+t = "#284" so the loop sees characters in order: '#', '2', '8', '4'.
+At line 4, the condition is if not c.isnumeric():
+c = '#': '#'.isnumeric() is False → not False is True → branch taken
+c = '2': '2'.isnumeric() is True → not True is False → branch not taken
+c = '8': branch not taken
+c = '4':  branch not taken
+</think>
+
+[ANSWER]
+1 def func(t):
+2     count = 0 
+3     for c in t:
+4         if not c.isnumeric(): ## [BRANCH]taken=[Y,N,N,N][/BRANCH]
+5             count += 1
+6     return count
+[/ANSWER]
+[/EXAMPLE]
+
+"""
+
+
+# match_tool = openai.UserInputTimeoutError | openai.ServiceUnavailableError
+match_tool = Exception
+
+
+@retry(
+    wait=wait_fixed(10),
+    stop=stop_after_attempt(3),
+    reraise=True,
+    retry=match_tool,
+)
+def few_shot_completion(prompt: str):
+    # response = client.completions.create(model="gpt-3.5-turbo-1106", prompt=prompt, n=1, max_tokens=150, temperature=0.0, stop=["<s>"])
+    # pprint(response)
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo-1106", messages=[{"role": "user", "content": prompt}]
+    )
+    return response
+
+
+def process_file_with_openai(input_file: str, output_file: str):
+    """
+    Process a file with OpenAI API to annotate code branches.
+
+    Args:
+        input_file (str): Path to the input JSON file containing code.
+        output_file (str): Path to save the output with annotated code.
+    """
+
+    # Constants
+    EXAMPLE_LINES_TO_TAKE = 20
+    MIN_SCORE = 0.5
+    MAX_TOKENS = 1024
+
+    # Load the input JSON file
+    with open(input_file, "r") as file:
+        data = json.load(file)
+
+    examples_dir = os.path.join(os.path.dirname(__file__), "examples")
+    # load the example files from the examples directory into a list of dictionaries
+    example_files = [
+        f for f in os.listdir(examples_dir) if f.endswith(".json") and "run3" in f
+    ]
+    example_dics = []
+    for example_file in example_files:
+        with open(os.path.join(examples_dir, example_file), "r") as file:
+            example_dics.append(json.load(file))
+
+    # load the examples into a list
+    examples = []
+    for example_dic in example_dics:
+        examples.append(
+            "\n".join(
+                [
+                    "PYTHON CODE",
+                    "\n".join(
+                        line.replace("##", "#").split(" # ")[0].split("##")[0]
+                        for line in example_dic["trace"].split("\n")
+                    ),
+                    "END PYTHON CODE",
+                    "INPUT",
+                    example_dic["inputs"],
+                    "END INPUT",
+                    "PREDICTIONS",
+                    example_dic["predictions"],
+                    "END PREDICTIONS",
+                ]
+            )
+        )
+
+    # Create output data
+    output_data = {"samples": []}
+
+    for sample in tqdm(data["samples"], desc="Processing Samples"):
+        try:
+            success = False
+            for _ in range(5):
+                text_tokens = len(sample["text"].split(" "))
+                if text_tokens < 3000:
+                    random_example = random.choice(examples)
+                    few_shot_messages = (
+                        f"{SYSTEM_PROMPT}\n{random_example}\n{sample['text']}"
+                    )
+                    encoding = tiktoken.encoding_for_model("gpt-4")
+                    num_tokens = len(encoding.encode(few_shot_messages))
+                    if num_tokens < MAX_TOKENS:
+                        response = few_shot_completion(few_shot_messages)
+                        result = extract_python_code(response.choices[0].message.content)
+                        print(f"Initial response: {result}")
+                        if result is not None:
+                            success = True
+                            break
+
+            if not success:
+                result = "Error: Unable to process sample"
+            else:
+                result = result.replace("\n", "\\n")
+            output_data["samples"].append(
+                {
+                    "func_name": sample["func_name"],
+                    "inputs": sample["inputs"],
+                    "predictions": sample["predictions"],
+                    "result": result,
+                    "success": success,
+                }
+            )
+        except match_tool as e:
+            # Log the error message
+            print(f"Error: {e}")
+            # Append the sample to the output data with an error message
+            output_data["samples"].append(
+                {
+                    "func_name": sample["func_name"],
+                    "inputs": sample["inputs"],
+                    "predictions": sample["predictions"],
+                    "result": "Error: API rate limit exceeded",
+                    "success": False,
+                }
+            )
+
+    # Write output to file
+    with open(output_file, "w") as file:
+        json.dump(output_data, file, indent=2)
+
+
+# Function to extract python code
+def extract_python_code(text):
+    # Match python code using code block delimiter or markdown format
+    pattern = r"(?s)(?P<code>`{3}python\n.*?\n`{3}|```python\n(.*?)\n```|```(.*?)\n```|```python\n(.*?)```|```(.*?)```)"
+    matches = re.finditer(pattern, text)
+    for match in matches:
+        yield match.group("code").strip().strip("```").strip("`")
+
+
+def calculate_score(result, target):
+    # Initialize variables to count matching and total branches
+    matching_branches = 0
+    total_branches = 0
+
+    # Regex pattern to find branch annotations with lists
+    branch_pattern = re.compile(r"## \[BRANCH\]taken=\[.*?\]")
+
+    # Function to extract the list of values from a match object
+    def extract_list(match):
+        # Extract the list part from the matched text
+        list_str = match.group()[len("## [BRANCH]taken=") : -len("[/BRANCH]")]
+        # Remove single quotes and spaces, then split by commas
+        items = list_str.replace("'", "").replace(" ", "").split(",")
+        # Remove any empty strings from the list
+        return [item for item in items if item]
+
+    # Find all branch annotations in the result
+    result_branches = branch_pattern.findall(result)
+    result_values = [extract_list(branch) for branch in result_branches]
+
+    # Find all branch annotations in the target
+    target_branches = branch_pattern.findall(target)
+    target_values = [extract_list(branch) for branch in target_branches]
+
+    # Print for debugging
+    print("Result branches:", result_branches)
+    print("Result values:", result_values)
+    print("Target branches:", target_branches)
+    print("Target values:", target_values)
+
+    # Check if the number of branches matches
+    if len(result_values) != len(target_values):
+        print("Number of branches does not match!")
+        return 0
+
+    # Compare each branch
+    for result_branch, target_branch in zip(result_values, target_values):
+        # Print the branches being compared
+        print("Comparing branches:")
+        print("Result branch:", result_branch)
+        print("Target branch:", target_branch)
+
+        # Check if the lists have the same length
+        if len(result_branch) != len(target_branch):
+            print("List lengths do not match for this branch!")
+            return 0
+
+        # Compare the values in each list
+        for result_value, target_value in zip(result_branch, target_branch):
+            # Print the values being compared
+            print("Comparing values:")
+            print("Result value:", result_value)
+            print("Target value:", target_value)
+
+            # Normalize values to 'Y' and 'N'
+            normalized_result = "Y" if result_value.lower() == "y" else "N"
+            normalized_target = "Y" if target_value.lower() == "y" else "N"
+
+            # Update the counters
+            if normalized_result == normalized_target:
+                matching_branches += 1
+            total_branches += 1
+
+    # Calculate and return the score
+    score = matching_branches / total_branches if total_branches > 0 else 0
+    return score
+
+
+# Example usage
+input_file = "code2tree/benchmark/openai/benchmark_with_branches_100.json"
+output_file = "code2tree/benchmark/openai/benchmark_with_branches_openai_responses_with_examples_test100.json"
+# python -m benchmark.openai.bp_v1_with_few_shot_examples_
+process_file_with_openai(input_file, output_file)
+
+[FILEPATH] gh0575-BRANCH-8c3b1f2/code2tree/benchmark/openai/openai_ann.py [/FILEPATH]
+import openai
+import json
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+
+def process_file_with_openai(input_file: str, output_file: str):
+    # Load the input JSON file
+    with open(input_file, "r") as file:
+        data = json.load(file)
+
+    # Create output data
+    output_data = {"samples": []}
+
+    for sample in data["samples"]:
+        try:
+            response = client.completions.create(
+                model="gpt-3.5-turbo-instruct",
+                prompt=f"{sample['text']}",
+                max_tokens=1024,
+                n=1,
+                stop=None,
+                temperature=0.0,
+            )
+            result = extract_python_code(response.choices[0].text)
+            output_data["samples"].append(
+                {
+                    "func_name": sample["func_name"],
+                    "inputs": sample["inputs"],
+                    "predictions": sample["predictions"],
+                    "result": result,
+                }
+            )
+        except openai.error.RateLimitError as e:
+            # Log the error message
+            print(f"Error: {e}")
+            # Append the sample to the output data with an error message
+            output_data["samples"].append(
+                {
+                    "func_name": sample["func_name"],
+                    "inputs": sample["inputs"],
+                    "predictions": sample["predictions"],
+                    "result": "Error: API rate limit exceeded",
+                }
+            )
+
+    # Write output to file
+    with open(output_file, "w") as file:
+        json.dump(output_data, file, indent=2)
+
+
+# Function to extract python code
+def extract_python_code(text):
+    lines = text.strip().split("\n")
+    extracted_code = []
+    for line in lines:
+        if (
+            line.startswith("1 ") and lines.index(line) == 0
+        ):  # Handle the first line specially
+            extracted_code.append(line[2:])
+        elif line.startswith("1 "):
+            extracted_code.append(line[2:])
+        elif lines.index(line) > 0 and not line.startswith(
+            "1 "
+        ):  # Handle lines after the first
+            extracted_code.append(line)
+    return "\n".join(extracted_code)
+
+
+# Example usage
+input_file = "code2tree/benchmark/openai/benchmark_with_branches.json"
+output_file = "code2tree/benchmark/openai/benchmark_with_branches_openai_responses.json"
+
+process_file_with_openai(input_file, output_file)
+
+[FILEPATH] gh0575-BRANCH-8c3b1f2/code2tree/benchmark/openai/openai_ann_v2.py [/FILEPATH]
+import openai
+import json
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+
+def process_file_with_openai(input_file: str, output_file: str):
+    # Load the input JSON file
+    with open(input_file, "r") as file:
+        data = json.load(file)
+
+    # Create output data
+    output_data = {"samples": []}
+
+    for sample in data["samples"]:
+        try:
+            response = client.completions.create(
+                model="gpt-3.5-turbo-instruct",
+                prompt=f"{sample['text']}",
+                max_tokens=1024,
+                n=1,
+                stop=None,
+                temperature=0.0,
+            )
+            result = extract_python_code(response.choices[0].text)
+            output_data["samples"].append(
+                {
+                    "func_name": sample["func_name"],
+                    "inputs": sample["inputs"],
+                    "predictions": sample["predictions"],
+                    "result": result,
+                }
+            )
+        except openai.error.RateLimitError as e:
+            # Log the error message
+            print(f"Error: {e}")
+            # Append the sample to the output data with an error message
+            output_data["samples"].append(
+                {
+                    "func_name": sample["func_name"],
+                    "inputs": sample["inputs"],
+                    "predictions": sample["predictions"],
+                    "result": "Error: API rate limit exceeded",
+                }
+            )
+
+    # Write output to file
+    with open(output_file, "w") as file:
+        json.dump(output_data, file, indent=2)
+
+
+# Function to extract python code
+def extract_python_code(text):
+    # Match python code using code block delimiter or markdown format
+    import re
+
+    pattern = r"(?s)(?P<code>`{3}python\n.*?\n`{3}|```python\n(.*?)\n```|```(.*?)\n```)"
+    matches = re.finditer(pattern, text)
+    for match in matches:
+        yield match.group("code").strip().strip("```").strip("`")
+
+
+# Example usage
+input_file = "code2tree/benchmark/openai/benchmark_with_branches_10.json"
+output_file = "code2tree/benchmark/openai/benchmark_with_branches_openai_responses_v2_10.json"
+# python -m benchmark.openai.openai_ann_v2
+process_file_with_openai(input_file, output_file)
+
+[FILEPATH] gh0575-BRANCH-8c3b1f2/code2tree/benchmark/openai/evaluate_with_openai.py [/FILEPATH]
+from typing import Dict, List, Optional, Union
+import json
+import re
+from tenacity import retry, stop_after_attempt, wait_fixed
+import math
+
+match_tool = Exception
+
+
+@retry(
+    wait=wait_fixed(10),
+    stop=stop_after_attempt(3),
+    reraise=True,
+    retry=match_tool,
+)
+def evaluate_with_openai(result, target):
+    # Initialize variables to count matching and total branches
+    matching_branches = 0
+    total_branches = 0
+
+    # Regex pattern to find branch annotations with lists
+    branch_pattern = re.compile(r"## \[BRANCH\]taken=\[.*?\]")
+
+    # Function to extract the list of values from a match object
+    def extract_list(match):
+        # Extract the list part from the matched text
+        list_str = match.group()[len("## [BRANCH]taken=") : -len("[/BRANCH]")]
+        # Remove single quotes and spaces, then split by commas
+        items = list_str.replace("'",

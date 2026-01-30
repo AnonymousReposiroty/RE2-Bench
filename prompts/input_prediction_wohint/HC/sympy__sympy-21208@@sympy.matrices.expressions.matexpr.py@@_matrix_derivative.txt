@@ -1,0 +1,1583 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from typing import Tuple as tTuple
+from sympy.core.logic import FuzzyBool
+from functools import wraps, reduce
+import collections
+from sympy.core import S, Symbol, Integer, Basic, Expr, Mul, Add
+from sympy.core.decorators import call_highest_priority
+from sympy.core.compatibility import SYMPY_INTS, default_sort_key
+from sympy.core.symbol import Str
+from sympy.core.sympify import SympifyError, _sympify
+from sympy.functions import conjugate, adjoint
+from sympy.functions.special.tensor_functions import KroneckerDelta
+from sympy.matrices.common import NonSquareMatrixError
+from sympy.simplify import simplify
+from sympy.matrices.matrices import MatrixKind
+from sympy.utilities.misc import filldedent
+from sympy.multipledispatch import dispatch
+from .matmul import MatMul
+from .matadd import MatAdd
+from .matpow import MatPow
+from .transpose import Transpose
+from .inverse import Inverse
+from .special import ZeroMatrix, Identity
+from sympy.tensor.array.array_derivatives import ArrayDerivative
+from sympy.tensor.array.expressions.conv_array_to_matrix import convert_array_to_matrix
+from sympy import ImmutableDenseMatrix
+from sympy.matrices.expressions.adjoint import Adjoint
+from sympy.matrices.expressions.transpose import Transpose
+from sympy import I
+from sympy.matrices.expressions.inverse import Inverse
+from sympy.matrices.expressions.adjoint import Adjoint
+from sympy.core.assumptions import check_assumptions
+from sympy.matrices.expressions.transpose import transpose
+from sympy.matrices.immutable import ImmutableDenseMatrix
+from numpy import empty
+from sympy import Sum, Mul, Add, MatMul, transpose, trace
+from sympy.strategies.traverse import bottom_up
+from .applyfunc import ElementwiseApplyFunction
+from sympy import MatrixBase
+from sympy import Sum, symbols, Dummy
+from sympy.core.expr import ExprBuilder
+from sympy.core.expr import ExprBuilder
+from ...tensor.array.expressions.array_expressions import ArrayTensorProduct
+from ...tensor.array.expressions.array_expressions import ArrayContraction
+from sympy.matrices.expressions.slice import MatrixSlice
+from sympy import MatrixBase
+from sympy.matrices.expressions.slice import MatrixSlice
+Basic._constructor_postprocessor_mapping[MatrixExpr] = {'Mul': [get_postprocessor(Mul)], 'Add': [get_postprocessor(Add)]}
+
+def _matrix_derivative(expr, x):
+    from sympy.tensor.array.array_derivatives import ArrayDerivative
+    lines = expr._eval_derivative_matrix_lines(x)
+    parts = [i.build() for i in lines]
+    from sympy.tensor.array.expressions.conv_array_to_matrix import convert_array_to_matrix
+    parts = [[convert_array_to_matrix(j) for j in i] for i in parts]
+
+    def _get_shape(elem):
+        if isinstance(elem, MatrixExpr):
+            return elem.shape
+        return (1, 1)
+
+    def get_rank(parts):
+        return sum([j not in (1, None) for i in parts for j in _get_shape(i)])
+    ranks = [get_rank(i) for i in parts]
+    rank = ranks[0]
+
+    def contract_one_dims(parts):
+        if len(parts) == 1:
+            return parts[0]
+        else:
+            p1, p2 = parts[:2]
+            if p2.is_Matrix:
+                p2 = p2.T
+            if p1 == Identity(1):
+                pbase = p2
+            elif p2 == Identity(1):
+                pbase = p1
+            else:
+                pbase = p1 * p2
+            if len(parts) == 2:
+                return pbase
+            else:
+                if pbase.is_Matrix:
+                    raise ValueError('')
+                return pbase * Mul.fromiter(parts[2:])
+    if rank <= 2:
+        return Add.fromiter([contract_one_dims(i) for i in parts])
+    return ArrayDerivative(expr, x)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.sympy.core.expr.Expr._eval_derivative_matrix_lines
+
+def _eval_derivative_matrix_lines(self, x):
+    from sympy.matrices.expressions.matexpr import _LeftRightArgs
+    return [_LeftRightArgs([S.One, S.One], higher=self._eval_derivative(x))]
+
+.sympy.matrices.matrices.MatrixCalculus._eval_derivative
+
+def _eval_derivative(self, arg):
+    return self.applyfunc(lambda x: x.diff(arg))
+
+.sympy.matrices.common.MatrixOperations.applyfunc
+
+def applyfunc(self, f):
+    if not callable(f):
+        raise TypeError('`f` must be callable.')
+    return self._eval_applyfunc(f)
+
+.sympy.matrices.common.MatrixOperations._eval_applyfunc
+
+def _eval_applyfunc(self, f):
+    out = self._new(self.rows, self.cols, [f(x) for x in self])
+    return out
+
+.sympy.matrices.immutable.ImmutableDenseMatrix.rows
+
+def rows(self):
+    return self._rows
+
+.sympy.matrices.immutable.ImmutableDenseMatrix.cols
+
+def cols(self):
+    return self._cols
+
+.sympy.matrices.dense.DenseMatrix.__getitem__
+
+def __getitem__(self, key):
+    if isinstance(key, tuple):
+        i, j = key
+        try:
+            i, j = self.key2ij(key)
+            return self._mat[i * self.cols + j]
+        except (TypeError, IndexError):
+            if isinstance(i, Expr) and (not i.is_number) or (isinstance(j, Expr) and (not j.is_number)):
+                if (j < 0) is True or (j >= self.shape[1]) is True or (i < 0) is True or ((i >= self.shape[0]) is True):
+                    raise ValueError('index out of boundary')
+                from sympy.matrices.expressions.matexpr import MatrixElement
+                return MatrixElement(self, i, j)
+            if isinstance(i, slice):
+                i = range(self.rows)[i]
+            elif is_sequence(i):
+                pass
+            else:
+                i = [i]
+            if isinstance(j, slice):
+                j = range(self.cols)[j]
+            elif is_sequence(j):
+                pass
+            else:
+                j = [j]
+            return self.extract(i, j)
+    else:
+        if isinstance(key, slice):
+            return self._mat[key]
+        return self._mat[a2idx(key)]
+
+.sympy.matrices.common.a2idx
+
+def a2idx(j, n=None):
+    if type(j) is not int:
+        jindex = getattr(j, '__index__', None)
+        if jindex is not None:
+            j = jindex()
+        else:
+            raise IndexError('Invalid index a[%r]' % (j,))
+    if n is not None:
+        if j < 0:
+            j += n
+        if not (j >= 0 and j < n):
+            raise IndexError('Index out of range: a[%s]' % (j,))
+    return int(j)
+
+.sympy.core.expr.Expr.diff
+
+def diff(self, *symbols, **assumptions):
+    assumptions.setdefault('evaluate', True)
+    return _derivative_dispatch(self, *symbols, **assumptions)
+
+.sympy.core.function._derivative_dispatch
+
+def _derivative_dispatch(expr, *variables, **kwargs):
+    from sympy.matrices.common import MatrixCommon
+    from sympy import MatrixExpr
+    from sympy import NDimArray
+    array_types = (MatrixCommon, MatrixExpr, NDimArray, list, tuple, Tuple)
+    if isinstance(expr, array_types) or any((isinstance(i[0], array_types) if isinstance(i, (tuple, list, Tuple)) else isinstance(i, array_types) for i in variables)):
+        from sympy.tensor.array.array_derivatives import ArrayDerivative
+        return ArrayDerivative(expr, *variables, **kwargs)
+    return Derivative(expr, *variables, **kwargs)
+
+.sympy.core.function.Derivative.__new__
+
+def __new__(cls, expr, *variables, **kwargs):
+    from sympy.matrices.common import MatrixCommon
+    from sympy import Integer, MatrixExpr
+    from sympy.tensor.array import Array, NDimArray
+    from sympy.utilities.misc import filldedent
+    expr = sympify(expr)
+    symbols_or_none = getattr(expr, 'free_symbols', None)
+    has_symbol_set = isinstance(symbols_or_none, set)
+    if not has_symbol_set:
+        raise ValueError(filldedent('\n            Since there are no variables in the expression %s,\n            it cannot be differentiated.' % expr))
+    if not variables:
+        variables = expr.free_symbols
+        if len(variables) != 1:
+            if expr.is_number:
+                return S.Zero
+            if len(variables) == 0:
+                raise ValueError(filldedent('\n                    Since there are no variables in the expression,\n                    the variable(s) of differentiation must be supplied\n                    to differentiate %s' % expr))
+            else:
+                raise ValueError(filldedent('\n                    Since there is more than one variable in the\n                    expression, the variable(s) of differentiation\n                    must be supplied to differentiate %s' % expr))
+    variables = list(sympify(variables))
+    variable_count = []
+    array_likes = (tuple, list, Tuple)
+    for i, v in enumerate(variables):
+        if isinstance(v, Integer):
+            if i == 0:
+                raise ValueError('First variable cannot be a number: %i' % v)
+            count = v
+            prev, prevcount = variable_count[-1]
+            if prevcount != 1:
+                raise TypeError('tuple {} followed by number {}'.format((prev, prevcount), v))
+            if count == 0:
+                variable_count.pop()
+            else:
+                variable_count[-1] = Tuple(prev, count)
+        else:
+            if isinstance(v, array_likes):
+                if len(v) == 0:
+                    continue
+                if isinstance(v[0], array_likes):
+                    if len(v) == 1:
+                        v = Array(v[0])
+                        count = 1
+                    else:
+                        v, count = v
+                        v = Array(v)
+                else:
+                    v, count = v
+                if count == 0:
+                    continue
+            elif isinstance(v, UndefinedFunction):
+                raise TypeError('cannot differentiate wrt UndefinedFunction: %s' % v)
+            else:
+                count = 1
+            variable_count.append(Tuple(v, count))
+    merged = []
+    for t in variable_count:
+        v, c = t
+        if c.is_negative:
+            raise ValueError('order of differentiation must be nonnegative')
+        if merged and merged[-1][0] == v:
+            c += merged[-1][1]
+            if not c:
+                merged.pop()
+            else:
+                merged[-1] = Tuple(v, c)
+        else:
+            merged.append(t)
+    variable_count = merged
+    for v, c in variable_count:
+        if not v._diff_wrt:
+            __ = ''
+            raise ValueError(filldedent("\n                Can't calculate derivative wrt %s.%s" % (v, __)))
+    if len(variable_count) == 0:
+        return expr
+    evaluate = kwargs.get('evaluate', False)
+    if evaluate:
+        if isinstance(expr, Derivative):
+            expr = expr.canonical
+        variable_count = [(v.canonical if isinstance(v, Derivative) else v, c) for v, c in variable_count]
+        zero = False
+        free = expr.free_symbols
+        for v, c in variable_count:
+            vfree = v.free_symbols
+            if c.is_positive and vfree:
+                if isinstance(v, AppliedUndef):
+                    D = Dummy()
+                    if not expr.xreplace({v: D}).has(D):
+                        zero = True
+                        break
+                elif isinstance(v, MatrixExpr):
+                    zero = False
+                    break
+                elif isinstance(v, Symbol) and v not in free:
+                    zero = True
+                    break
+                elif not free & vfree:
+                    zero = True
+                    break
+        if zero:
+            return cls._get_zero_with_shape_like(expr)
+        variable_count = cls._sort_variable_count(variable_count)
+    if isinstance(expr, Derivative):
+        variable_count = list(expr.variable_count) + variable_count
+        expr = expr.expr
+        return _derivative_dispatch(expr, *variable_count, **kwargs)
+    if not evaluate or not hasattr(expr, '_eval_derivative'):
+        if evaluate and variable_count == [(expr, 1)] and expr.is_scalar:
+            return S.One
+        return Expr.__new__(cls, expr, *variable_count)
+    nderivs = 0
+    unhandled = []
+    for i, (v, count) in enumerate(variable_count):
+        old_expr = expr
+        old_v = None
+        is_symbol = v.is_symbol or isinstance(v, (Iterable, Tuple, MatrixCommon, NDimArray))
+        if not is_symbol:
+            old_v = v
+            v = Dummy('xi')
+            expr = expr.xreplace({old_v: v})
+            clashing = not (isinstance(old_v, Derivative) or isinstance(old_v, AppliedUndef))
+            if not v in expr.free_symbols and (not clashing):
+                return expr.diff(v)
+            if not old_v.is_scalar and (not hasattr(old_v, '_eval_derivative')):
+                expr *= old_v.diff(old_v)
+        obj = cls._dispatch_eval_derivative_n_times(expr, v, count)
+        if obj is not None and obj.is_zero:
+            return obj
+        nderivs += count
+        if old_v is not None:
+            if obj is not None:
+                obj = obj.subs(v, old_v)
+            expr = old_expr
+        if obj is None:
+            unhandled = variable_count[i:]
+            break
+        expr = obj
+    expr = expr.replace(lambda x: isinstance(x, Derivative), lambda x: x.canonical)
+    if unhandled:
+        if isinstance(expr, Derivative):
+            unhandled = list(expr.variable_count) + unhandled
+            expr = expr.expr
+        expr = Expr.__new__(cls, expr, *unhandled)
+    if (nderivs > 1) == True and kwargs.get('simplify', True):
+        from sympy.core.exprtools import factor_terms
+        from sympy.simplify.simplify import signsimp
+        expr = factor_terms(signsimp(expr))
+    return expr
+
+.sympy.core.sympify.sympify
+
+def sympify(a, locals=None, convert_xor=True, strict=False, rational=False, evaluate=None):
+    is_sympy = getattr(a, '__sympy__', None)
+    if is_sympy is True:
+        return a
+    elif is_sympy is not None:
+        if not strict:
+            return a
+        else:
+            raise SympifyError(a)
+    if isinstance(a, CantSympify):
+        raise SympifyError(a)
+    cls = getattr(a, '__class__', None)
+    if cls is None:
+        cls = type(a)
+    conv = converter.get(cls, None)
+    if conv is not None:
+        return conv(a)
+    for superclass in getmro(cls):
+        try:
+            return converter[superclass](a)
+        except KeyError:
+            continue
+    if cls is type(None):
+        if strict:
+            raise SympifyError(a)
+        else:
+            return a
+    if evaluate is None:
+        evaluate = global_parameters.evaluate
+    if _is_numpy_instance(a):
+        import numpy as np
+        if np.isscalar(a):
+            return _convert_numpy_types(a, locals=locals, convert_xor=convert_xor, strict=strict, rational=rational, evaluate=evaluate)
+    _sympy_ = getattr(a, '_sympy_', None)
+    if _sympy_ is not None:
+        try:
+            return a._sympy_()
+        except AttributeError:
+            pass
+    if not strict:
+        flat = getattr(a, 'flat', None)
+        if flat is not None:
+            shape = getattr(a, 'shape', None)
+            if shape is not None:
+                from ..tensor.array import Array
+                return Array(a.flat, a.shape)
+    if not isinstance(a, str):
+        if _is_numpy_instance(a):
+            import numpy as np
+            assert not isinstance(a, np.number)
+            if isinstance(a, np.ndarray):
+                if a.ndim == 0:
+                    try:
+                        return sympify(a.item(), locals=locals, convert_xor=convert_xor, strict=strict, rational=rational, evaluate=evaluate)
+                    except SympifyError:
+                        pass
+        else:
+            for coerce in (float, int):
+                try:
+                    return sympify(coerce(a))
+                except (TypeError, ValueError, AttributeError, SympifyError):
+                    continue
+    if strict:
+        raise SympifyError(a)
+    if iterable(a):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor, rational=rational) for x in a])
+        except TypeError:
+            pass
+    if isinstance(a, dict):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor, rational=rational) for x in a.items()])
+        except TypeError:
+            pass
+    if not isinstance(a, str):
+        try:
+            a = str(a)
+        except Exception as exc:
+            raise SympifyError(a, exc)
+        from sympy.utilities.exceptions import SymPyDeprecationWarning
+        SymPyDeprecationWarning(feature='String fallback in sympify', useinstead='sympify(str(obj)) or ' + 'sympy.core.sympify.converter or obj._sympy_', issue=18066, deprecated_since_version='1.6').warn()
+    from sympy.parsing.sympy_parser import parse_expr, TokenError, standard_transformations
+    from sympy.parsing.sympy_parser import convert_xor as t_convert_xor
+    from sympy.parsing.sympy_parser import rationalize as t_rationalize
+    transformations = standard_transformations
+    if rational:
+        transformations += (t_rationalize,)
+    if convert_xor:
+        transformations += (t_convert_xor,)
+    try:
+        a = a.replace('\n', '')
+        expr = parse_expr(a, local_dict=locals, transformations=transformations, evaluate=evaluate)
+    except (TokenError, SyntaxError) as exc:
+        raise SympifyError('could not parse %r' % a, exc)
+    return expr
+
+.sympy.core.symbol.Symbol.free_symbols
+
+def free_symbols(self):
+    return {self}
+
+.sympy.core.expr.Expr.__hash__
+
+def __hash__(self) -> int:
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+.sympy.core.containers.Tuple.__new__
+
+def __new__(cls, *args, **kwargs):
+    if kwargs.get('sympify', True):
+        args = (sympify(arg) for arg in args)
+    obj = Basic.__new__(cls, *args)
+    return obj
+
+.sympy.core.basic.Basic.__new__
+
+def __new__(cls, *args):
+    obj = object.__new__(cls)
+    obj._assumptions = cls.default_assumptions
+    obj._mhash = None
+    obj._args = args
+    return obj
+
+.sympy.core.containers.Tuple.__len__
+
+def __len__(self):
+    return len(self.args)
+
+.sympy.core.basic.Basic.args
+
+def args(self):
+    return self._args
+
+.sympy.core.containers.Tuple.__iter__
+
+def __iter__(self):
+    return iter(self.args)
+
+.sympy.core.numbers.Integer.__new__
+
+def __new__(cls, i):
+    if isinstance(i, str):
+        i = i.replace(' ', '')
+    try:
+        ival = int(i)
+    except TypeError:
+        raise TypeError('Argument of Integer should be of numeric type, got %s.' % i)
+    if ival == 1:
+        return S.One
+    if ival == -1:
+        return S.NegativeOne
+    if ival == 0:
+        return S.Zero
+    obj = Expr.__new__(cls)
+    obj.p = ival
+    return obj
+
+.sympy.core.assumptions.getit
+
+def getit(self):
+    try:
+        return self._assumptions[fact]
+    except KeyError:
+        if self._assumptions is self.default_assumptions:
+            self._assumptions = self.default_assumptions.copy()
+        return _ask(fact, self)
+
+.sympy.core.symbol.Symbol._diff_wrt
+
+def _diff_wrt(self):
+    return True
+
+.sympy.core.function.Derivative._sort_variable_count
+
+def _sort_variable_count(cls, vc):
+    from sympy.utilities.iterables import uniq, topological_sort
+    if not vc:
+        return []
+    vc = list(vc)
+    if len(vc) == 1:
+        return [Tuple(*vc[0])]
+    V = list(range(len(vc)))
+    E = []
+    v = lambda i: vc[i][0]
+    D = Dummy()
+
+    def _block(d, v, wrt=False):
+        if d == v:
+            return wrt
+        if d.is_Symbol:
+            return False
+        if isinstance(d, Derivative):
+            if any((_block(k, v, wrt=True) for k in d._wrt_variables)):
+                return True
+            return False
+        if not wrt and isinstance(d, AppliedUndef):
+            return False
+        if v.is_Symbol:
+            return v in d.free_symbols
+        if isinstance(v, AppliedUndef):
+            return _block(d.xreplace({v: D}), D)
+        return d.free_symbols & v.free_symbols
+    for i in range(len(vc)):
+        for j in range(i):
+            if _block(v(j), v(i)):
+                E.append((j, i))
+    O = dict(zip(ordered(uniq([i for i, c in vc])), range(len(vc))))
+    ix = topological_sort((V, E), key=lambda i: O[v(i)])
+    merged = []
+    for v, c in [vc[i] for i in ix]:
+        if merged and merged[-1][0] == v:
+            merged[-1][1] += c
+        else:
+            merged.append([v, c])
+    return [Tuple(*i) for i in merged]
+
+.sympy.core.function.Derivative._dispatch_eval_derivative_n_times
+
+def _dispatch_eval_derivative_n_times(cls, expr, v, count):
+    return expr._eval_derivative_n_times(v, count)
+
+.sympy.core.expr.AtomicExpr._eval_derivative_n_times
+
+def _eval_derivative_n_times(self, s, n):
+    from sympy import Piecewise, Eq
+    from sympy import Tuple, MatrixExpr
+    from sympy.matrices.common import MatrixCommon
+    if isinstance(s, (MatrixCommon, Tuple, Iterable, MatrixExpr)):
+        return super()._eval_derivative_n_times(s, n)
+    if self == s:
+        return Piecewise((self, Eq(n, 0)), (1, Eq(n, 1)), (0, True))
+    else:
+        return Piecewise((self, Eq(n, 0)), (0, True))
+
+.sympy.core.expr.Expr.__eq__
+
+def __eq__(self, other):
+    try:
+        other = _sympify(other)
+        if not isinstance(other, Expr):
+            return False
+    except (SympifyError, SyntaxError):
+        return False
+    if not (self.is_Number and other.is_Number) and type(self) != type(other):
+        return False
+    a, b = (self._hashable_content(), other._hashable_content())
+    if a != b:
+        return False
+    for a, b in zip(a, b):
+        if not isinstance(a, Expr):
+            continue
+        if a.is_Number and type(a) != type(b):
+            return False
+    return True
+
+.sympy.core.sympify._sympify
+
+def _sympify(a):
+    return sympify(a, strict=True)
+
+.sympy.core.symbol.Symbol._hashable_content
+
+def _hashable_content(self):
+    return (self.name,) + tuple(sorted(self.assumptions0.items()))
+
+.sympy.core.symbol.Symbol.assumptions0
+
+def assumptions0(self):
+    return {key: value for key, value in self._assumptions.items() if value is not None}
+
+.sympy.core.relational.Equality.__new__
+
+def __new__(cls, lhs, rhs=None, **options):
+    if rhs is None:
+        SymPyDeprecationWarning(feature='Eq(expr) with rhs default to 0', useinstead='Eq(expr, 0)', issue=16587, deprecated_since_version='1.5').warn()
+        rhs = 0
+    evaluate = options.pop('evaluate', global_parameters.evaluate)
+    lhs = _sympify(lhs)
+    rhs = _sympify(rhs)
+    if evaluate:
+        val = is_eq(lhs, rhs)
+        if val is None:
+            return cls(lhs, rhs, evaluate=False)
+        else:
+            return _sympify(val)
+    return Relational.__new__(cls, lhs, rhs)
+
+.sympy.core.relational.is_eq
+
+def is_eq(lhs, rhs):
+    from sympy.core.add import Add
+    from sympy.functions.elementary.complexes import arg
+    from sympy.simplify.simplify import clear_coefficients
+    from sympy.utilities.iterables import sift
+    for side1, side2 in ((lhs, rhs), (rhs, lhs)):
+        eval_func = getattr(side1, '_eval_Eq', None)
+        if eval_func is not None:
+            retval = eval_func(side2)
+            if retval is not None:
+                return retval
+    retval = _eval_is_eq(lhs, rhs)
+    if retval is not None:
+        return retval
+    if dispatch(type(lhs), type(rhs)) != dispatch(type(rhs), type(lhs)):
+        retval = _eval_is_eq(rhs, lhs)
+        if retval is not None:
+            return retval
+    if lhs == rhs:
+        return True
+    elif all((isinstance(i, BooleanAtom) for i in (rhs, lhs))):
+        return False
+    elif not (lhs.is_Symbol or rhs.is_Symbol) and isinstance(lhs, Boolean) != isinstance(rhs, Boolean):
+        return False
+    if lhs.is_infinite or rhs.is_infinite:
+        if fuzzy_xor([lhs.is_infinite, rhs.is_infinite]):
+            return False
+        if fuzzy_xor([lhs.is_extended_real, rhs.is_extended_real]):
+            return False
+        if fuzzy_and([lhs.is_extended_real, rhs.is_extended_real]):
+            return fuzzy_xor([lhs.is_extended_positive, fuzzy_not(rhs.is_extended_positive)])
+        I = S.ImaginaryUnit
+
+        def split_real_imag(expr):
+            real_imag = lambda t: 'real' if t.is_extended_real else 'imag' if (I * t).is_extended_real else None
+            return sift(Add.make_args(expr), real_imag)
+        lhs_ri = split_real_imag(lhs)
+        if not lhs_ri[None]:
+            rhs_ri = split_real_imag(rhs)
+            if not rhs_ri[None]:
+                eq_real = Eq(Add(*lhs_ri['real']), Add(*rhs_ri['real']))
+                eq_imag = Eq(I * Add(*lhs_ri['imag']), I * Add(*rhs_ri['imag']))
+                return fuzzy_and(map(fuzzy_bool, [eq_real, eq_imag]))
+        arglhs = arg(lhs)
+        argrhs = arg(rhs)
+        if not (arglhs == S.NaN and argrhs == S.NaN):
+            return fuzzy_bool(Eq(arglhs, argrhs))
+    if all((isinstance(i, Expr) for i in (lhs, rhs))):
+        dif = lhs - rhs
+        z = dif.is_zero
+        if z is not None:
+            if z is False and dif.is_commutative:
+                return False
+            if z:
+                return True
+        n2 = _n2(lhs, rhs)
+        if n2 is not None:
+            return _sympify(n2 == 0)
+        n, d = dif.as_numer_denom()
+        rv = None
+        if n.is_zero:
+            rv = d.is_nonzero
+        elif n.is_finite:
+            if d.is_infinite:
+                rv = True
+            elif n.is_zero is False:
+                rv = d.is_infinite
+                if rv is None:
+                    l, r = clear_coefficients(d, S.Infinity)
+                    args = [_.subs(l, r) for _ in (lhs, rhs)]
+                    if args != [lhs, rhs]:
+                        rv = fuzzy_bool(Eq(*args))
+                        if rv is True:
+                            rv = None
+        elif any((a.is_infinite for a in Add.make_args(n))):
+            rv = False
+        if rv is not None:
+            return rv
+
+.sympy.multipledispatch.dispatcher.Dispatcher.__call__
+
+def __call__(self, *args, **kwargs):
+    types = tuple([type(arg) for arg in args])
+    try:
+        func = self._cache[types]
+    except KeyError:
+        func = self.dispatch(*types)
+        if not func:
+            raise NotImplementedError('Could not find signature for %s: <%s>' % (self.name, str_signature(types)))
+        self._cache[types] = func
+    try:
+        return func(*args, **kwargs)
+    except MDNotImplementedError:
+        funcs = self.dispatch_iter(*types)
+        next(funcs)
+        for func in funcs:
+            try:
+                return func(*args, **kwargs)
+            except MDNotImplementedError:
+                pass
+        raise NotImplementedError('Matching functions for %s: <%s> found, but none completed successfully' % (self.name, str_signature(types)))
+
+.sympy.core.relational._eval_is_eq
+
+def _eval_is_eq(lhs, rhs):
+    return None
+
+.sympy.multipledispatch.core.dispatch
+
+def dispatch(*types, namespace=global_namespace, on_ambiguity=ambiguity_warn):
+    types = tuple(types)
+
+    def _(func):
+        name = func.__name__
+        if ismethod(func):
+            dispatcher = inspect.currentframe().f_back.f_locals.get(name, MethodDispatcher(name))
+        else:
+            if name not in namespace:
+                namespace[name] = Dispatcher(name)
+            dispatcher = namespace[name]
+        dispatcher.add(types, func, on_ambiguity=on_ambiguity)
+        return dispatcher
+    return _
+
+.sympy.core.numbers.Integer.__eq__
+
+def __eq__(self, other):
+    if isinstance(other, int):
+        return self.p == other
+    elif isinstance(other, Integer):
+        return self.p == other.p
+    return Rational.__eq__(self, other)
+
+.sympy.core.numbers.Integer.__sub__
+
+def __sub__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p - other)
+        elif isinstance(other, Integer):
+            return Integer(self.p - other.p)
+        elif isinstance(other, Rational):
+            return Rational(self.p * other.q - other.p, other.q, 1)
+        return Rational.__sub__(self, other)
+    return Rational.__sub__(self, other)
+
+.sympy.functions.elementary.piecewise.Piecewise.__new__
+
+def __new__(cls, *args, **options):
+    if len(args) == 0:
+        raise TypeError('At least one (expr, cond) pair expected.')
+    newargs = []
+    for ec in args:
+        pair = ExprCondPair(*getattr(ec, 'args', ec))
+        cond = pair.cond
+        if cond is false:
+            continue
+        newargs.append(pair)
+        if cond is true:
+            break
+    if options.pop('evaluate', True):
+        r = cls.eval(*newargs)
+    else:
+        r = None
+    if r is None:
+        return Basic.__new__(cls, *newargs, **options)
+    else:
+        return r
+
+.sympy.functions.elementary.piecewise.ExprCondPair.__new__
+
+def __new__(cls, expr, cond):
+    expr = as_Basic(expr)
+    if cond == True:
+        return Tuple.__new__(cls, expr, true)
+    elif cond == False:
+        return Tuple.__new__(cls, expr, false)
+    elif isinstance(cond, Basic) and cond.has(Piecewise):
+        cond = piecewise_fold(cond)
+        if isinstance(cond, Piecewise):
+            cond = cond.rewrite(ITE)
+    if not isinstance(cond, Boolean):
+        raise TypeError(filldedent('\n            Second argument must be a Boolean,\n            not `%s`' % func_name(cond)))
+    return Tuple.__new__(cls, expr, cond)
+
+.sympy.core.basic.as_Basic
+
+def as_Basic(expr):
+    from sympy.utilities.misc import func_name
+    try:
+        return _sympify(expr)
+    except SympifyError:
+        raise TypeError('Argument must be a Basic object, not `%s`' % func_name(expr))
+
+.sympy.core.basic.Basic.__eq__
+
+def __eq__(self, other):
+    if self is other:
+        return True
+    tself = type(self)
+    tother = type(other)
+    if tself is not tother:
+        try:
+            other = _sympify(other)
+            tother = type(other)
+        except SympifyError:
+            return NotImplemented
+        if type(tself).__ne__ is not type.__ne__:
+            if tself != tother:
+                return False
+        elif tself is not tother:
+            return False
+    return self._hashable_content() == other._hashable_content()
+
+.sympy.core.basic.Basic._hashable_content
+
+def _hashable_content(self):
+    return self._args
+
+.sympy.functions.elementary.piecewise.ExprCondPair.cond
+
+def cond(self):
+    return self.args[1]
+
+.sympy.functions.elementary.piecewise.Piecewise.eval
+
+def eval(cls, *_args):
+    from sympy.functions.elementary.complexes import im, re
+    if not _args:
+        return Undefined
+    if len(_args) == 1 and _args[0][-1] == True:
+        return _args[0][0]
+    newargs = []
+    current_cond = set()
+    args = []
+    for e, c in _args:
+        if not c.is_Atom and (not isinstance(c, Relational)) and (not c.has(im, re)):
+            free = c.free_symbols
+            if len(free) == 1:
+                funcs = [i for i in c.atoms(Function) if not isinstance(i, Boolean)]
+                if len(funcs) == 1 and len(c.xreplace({list(funcs)[0]: Dummy()}).free_symbols) == 1:
+                    free = funcs
+                _c = c
+                x = free.pop()
+                try:
+                    c = c.as_set().as_relational(x)
+                except NotImplementedError:
+                    pass
+                else:
+                    reps = {}
+                    for i in c.atoms(Relational):
+                        ic = i.canonical
+                        if ic.rhs in (S.Infinity, S.NegativeInfinity):
+                            if not _c.has(ic.rhs):
+                                reps[i] = S.true
+                            elif '=' not in ic.rel_op and c.xreplace({x: i.rhs}) != _c.xreplace({x: i.rhs}):
+                                reps[i] = Relational(i.lhs, i.rhs, i.rel_op + '=')
+                    c = c.xreplace(reps)
+        args.append((e, _canonical(c)))
+    for expr, cond in args:
+        if isinstance(expr, Piecewise):
+            unmatching = []
+            for i, (e, c) in enumerate(expr.args):
+                if c in current_cond:
+                    continue
+                if c == cond:
+                    if c != True:
+                        if unmatching:
+                            expr = Piecewise(*unmatching + [(e, c)])
+                        else:
+                            expr = e
+                    break
+                else:
+                    unmatching.append((e, c))
+        got = False
+        for i in [cond] + (list(cond.args) if isinstance(cond, And) else []):
+            if i in current_cond:
+                got = True
+                break
+        if got:
+            continue
+        if isinstance(cond, And):
+            nonredundant = []
+            for c in cond.args:
+                if isinstance(c, Relational) and c.negated.canonical in current_cond:
+                    continue
+                nonredundant.append(c)
+            cond = cond.func(*nonredundant)
+        elif isinstance(cond, Relational):
+            if cond.negated.canonical in current_cond:
+                cond = S.true
+        current_cond.add(cond)
+        if newargs:
+            if newargs[-1].expr == expr:
+                orcond = Or(cond, newargs[-1].cond)
+                if isinstance(orcond, (And, Or)):
+                    orcond = distribute_and_over_or(orcond)
+                newargs[-1] = ExprCondPair(expr, orcond)
+                continue
+            elif newargs[-1].cond == cond:
+                newargs[-1] = ExprCondPair(expr, cond)
+                continue
+        newargs.append(ExprCondPair(expr, cond))
+    missing = len(newargs) != len(_args)
+    same = all((a == b for a, b in zip(newargs, _args)))
+    if not newargs:
+        raise ValueError(filldedent('\n            There are no conditions (or none that\n            are not trivially false) to define an\n            expression.'))
+    if missing or not same:
+        return cls(*newargs)
+
+.sympy.core.containers.Tuple.__getitem__
+
+def __getitem__(self, i):
+    if isinstance(i, slice):
+        indices = i.indices(len(self))
+        return Tuple(*(self.args[j] for j in range(*indices)))
+    return self.args[i]
+
+.sympy.core.numbers.Integer.__radd__
+
+def __radd__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(other + self.p)
+        elif isinstance(other, Rational):
+            return Rational(other.p + self.p * other.q, other.q, 1)
+        return Rational.__radd__(self, other)
+    return Rational.__radd__(self, other)
+
+.sympy.core.basic.Basic.replace
+
+def replace(self, query, value, map=False, simultaneous=True, exact=None):
+    from sympy.core.symbol import Wild
+    try:
+        query = _sympify(query)
+    except SympifyError:
+        pass
+    try:
+        value = _sympify(value)
+    except SympifyError:
+        pass
+    if isinstance(query, type):
+        _query = lambda expr: isinstance(expr, query)
+        if isinstance(value, type):
+            _value = lambda expr, result: value(*expr.args)
+        elif callable(value):
+            _value = lambda expr, result: value(*expr.args)
+        else:
+            raise TypeError('given a type, replace() expects another type or a callable')
+    elif isinstance(query, Basic):
+        _query = lambda expr: expr.match(query)
+        if exact is None:
+            exact = len(query.atoms(Wild)) > 1
+        if isinstance(value, Basic):
+            if exact:
+                _value = lambda expr, result: value.subs(result) if all(result.values()) else expr
+            else:
+                _value = lambda expr, result: value.subs(result)
+        elif callable(value):
+            if exact:
+                _value = lambda expr, result: value(**{str(k)[:-1]: v for k, v in result.items()}) if all((val for val in result.values())) else expr
+            else:
+                _value = lambda expr, result: value(**{str(k)[:-1]: v for k, v in result.items()})
+        else:
+            raise TypeError('given an expression, replace() expects another expression or a callable')
+    elif callable(query):
+        _query = query
+        if callable(value):
+            _value = lambda expr, result: value(expr)
+        else:
+            raise TypeError('given a callable, replace() expects another callable')
+    else:
+        raise TypeError('first argument to replace() must be a type, an expression or a callable')
+
+    def walk(rv, F):
+        args = getattr(rv, 'args', None)
+        if args is not None:
+            if args:
+                newargs = tuple([walk(a, F) for a in args])
+                if args != newargs:
+                    rv = rv.func(*newargs)
+                    if simultaneous:
+                        for i, e in enumerate(args):
+                            if rv == e and e != newargs[i]:
+                                return rv
+            rv = F(rv)
+        return rv
+    mapping = {}
+
+    def rec_replace(expr):
+        result = _query(expr)
+        if result or result == {}:
+            v = _value(expr, result)
+            if v is not None and v != expr:
+                if map:
+                    mapping[expr] = v
+                expr = v
+        return expr
+    rv = walk(self, rec_replace)
+    return (rv, mapping) if map else rv
+
+.sympy.core.sympify._is_numpy_instance
+
+def _is_numpy_instance(a):
+    return any((type_.__module__ == 'numpy' for type_ in type(a).__mro__))
+
+.sympy.core.sympify.SympifyError.__init__
+
+def __init__(self, expr, base_exc=None):
+    self.expr = expr
+    self.base_exc = base_exc
+
+.sympy.core.basic.Basic.walk
+
+def walk(rv, F):
+    args = getattr(rv, 'args', None)
+    if args is not None:
+        if args:
+            newargs = tuple([walk(a, F) for a in args])
+            if args != newargs:
+                rv = rv.func(*newargs)
+                if simultaneous:
+                    for i, e in enumerate(args):
+                        if rv == e and e != newargs[i]:
+                            return rv
+        rv = F(rv)
+    return rv
+
+.sympy.core.basic.Basic.rec_replace
+
+def rec_replace(expr):
+    result = _query(expr)
+    if result or result == {}:
+        v = _value(expr, result)
+        if v is not None and v != expr:
+            if map:
+                mapping[expr] = v
+            expr = v
+    return expr
+
+.sympy.core.numbers.Integer.__gt__
+
+def __gt__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p > other.p)
+    return Rational.__gt__(self, other)
+
+.sympy.core.function.Derivative._get_zero_with_shape_like
+
+def _get_zero_with_shape_like(cls, expr):
+    return S.Zero
+
+.sympy.matrices.immutable.ImmutableDenseMatrix._new
+
+def _new(cls, *args, **kwargs):
+    if len(args) == 1 and isinstance(args[0], ImmutableDenseMatrix):
+        return args[0]
+    if kwargs.get('copy', True) is False:
+        if len(args) != 3:
+            raise TypeError("'copy=False' requires a matrix be initialized as rows,cols,[list]")
+        rows, cols, flat_list = args
+    else:
+        rows, cols, flat_list = cls._handle_creation_inputs(*args, **kwargs)
+        flat_list = list(flat_list)
+    obj = Basic.__new__(cls, Integer(rows), Integer(cols), Tuple(*flat_list))
+    obj._rows = rows
+    obj._cols = cols
+    obj._mat = flat_list
+    return obj
+
+.sympy.matrices.matrices.MatrixBase._handle_creation_inputs
+
+def _handle_creation_inputs(cls, *args, **kwargs):
+    from sympy.matrices.sparse import SparseMatrix
+    from sympy.matrices.expressions.matexpr import MatrixSymbol
+    from sympy.matrices.expressions.blockmatrix import BlockMatrix
+    from sympy.utilities.iterables import reshape
+    flat_list = None
+    if len(args) == 1:
+        if isinstance(args[0], SparseMatrix):
+            return (args[0].rows, args[0].cols, flatten(args[0].tolist()))
+        elif isinstance(args[0], MatrixBase):
+            return (args[0].rows, args[0].cols, args[0]._mat)
+        elif isinstance(args[0], Basic) and args[0].is_Matrix:
+            return (args[0].rows, args[0].cols, args[0].as_explicit()._mat)
+        elif isinstance(args[0], mp.matrix):
+            M = args[0]
+            flat_list = [cls._sympify(x) for x in M]
+            return (M.rows, M.cols, flat_list)
+        elif hasattr(args[0], '__array__'):
+            return cls._handle_ndarray(args[0])
+        elif is_sequence(args[0]) and (not isinstance(args[0], DeferredVector)):
+            dat = list(args[0])
+            ismat = lambda i: isinstance(i, MatrixBase) and (evaluate or isinstance(i, BlockMatrix) or isinstance(i, MatrixSymbol))
+            raw = lambda i: is_sequence(i) and (not ismat(i))
+            evaluate = kwargs.get('evaluate', True)
+            if evaluate:
+
+                def do(x):
+                    if isinstance(x, (list, tuple)):
+                        return type(x)([do(i) for i in x])
+                    if isinstance(x, BlockMatrix) or (isinstance(x, MatrixSymbol) and all((_.is_Integer for _ in x.shape))):
+                        return x.as_explicit()
+                    return x
+                dat = do(dat)
+            if dat == [] or dat == [[]]:
+                rows = cols = 0
+                flat_list = []
+            elif not any((raw(i) or ismat(i) for i in dat)):
+                flat_list = [cls._sympify(i) for i in dat]
+                rows = len(flat_list)
+                cols = 1 if rows else 0
+            elif evaluate and all((ismat(i) for i in dat)):
+                ncol = {i.cols for i in dat if any(i.shape)}
+                if ncol:
+                    if len(ncol) != 1:
+                        raise ValueError('mismatched dimensions')
+                    flat_list = [_ for i in dat for r in i.tolist() for _ in r]
+                    cols = ncol.pop()
+                    rows = len(flat_list) // cols
+                else:
+                    rows = cols = 0
+                    flat_list = []
+            elif evaluate and any((ismat(i) for i in dat)):
+                ncol = set()
+                flat_list = []
+                for i in dat:
+                    if ismat(i):
+                        flat_list.extend([k for j in i.tolist() for k in j])
+                        if any(i.shape):
+                            ncol.add(i.cols)
+                    elif raw(i):
+                        if i:
+                            ncol.add(len(i))
+                            flat_list.extend(i)
+                    else:
+                        ncol.add(1)
+                        flat_list.append(i)
+                    if len(ncol) > 1:
+                        raise ValueError('mismatched dimensions')
+                cols = ncol.pop()
+                rows = len(flat_list) // cols
+            else:
+                flat_list = []
+                ncol = set()
+                rows = cols = 0
+                for row in dat:
+                    if not is_sequence(row) and (not getattr(row, 'is_Matrix', False)):
+                        raise ValueError('expecting list of lists')
+                    if hasattr(row, '__array__'):
+                        if 0 in row.shape:
+                            continue
+                    elif not row:
+                        continue
+                    if evaluate and all((ismat(i) for i in row)):
+                        r, c, flatT = cls._handle_creation_inputs([i.T for i in row])
+                        T = reshape(flatT, [c])
+                        flat = [T[i][j] for j in range(c) for i in range(r)]
+                        r, c = (c, r)
+                    else:
+                        r = 1
+                        if getattr(row, 'is_Matrix', False):
+                            c = 1
+                            flat = [row]
+                        else:
+                            c = len(row)
+                            flat = [cls._sympify(i) for i in row]
+                    ncol.add(c)
+                    if len(ncol) > 1:
+                        raise ValueError('mismatched dimensions')
+                    flat_list.extend(flat)
+                    rows += r
+                cols = ncol.pop() if ncol else 0
+    elif len(args) == 3:
+        rows = as_int(args[0])
+        cols = as_int(args[1])
+        if rows < 0 or cols < 0:
+            raise ValueError('Cannot create a {} x {} matrix. Both dimensions must be positive'.format(rows, cols))
+        if len(args) == 3 and isinstance(args[2], Callable):
+            op = args[2]
+            flat_list = []
+            for i in range(rows):
+                flat_list.extend([cls._sympify(op(cls._sympify(i), cls._sympify(j))) for j in range(cols)])
+        elif len(args) == 3 and is_sequence(args[2]):
+            flat_list = args[2]
+            if len(flat_list) != rows * cols:
+                raise ValueError('List length should be equal to rows*columns')
+            flat_list = [cls._sympify(i) for i in flat_list]
+    elif len(args) == 0:
+        rows = cols = 0
+        flat_list = []
+    if flat_list is None:
+        raise TypeError(filldedent('\n            Data type not understood; expecting list of lists\n            or lists of values.'))
+    return (rows, cols, flat_list)
+
+.sympy.core.compatibility.as_int
+
+def as_int(n, strict=True):
+    if strict:
+        try:
+            if type(n) is bool:
+                raise TypeError
+            return operator.index(n)
+        except TypeError:
+            raise ValueError('%s is not an integer' % (n,))
+    else:
+        try:
+            result = int(n)
+        except TypeError:
+            raise ValueError('%s is not an integer' % (n,))
+        if n != result:
+            raise ValueError('%s is not an integer' % (n,))
+        return result
+
+.sympy.core.compatibility.is_sequence
+
+def is_sequence(i, include=None):
+    return hasattr(i, '__getitem__') and iterable(i) or (bool(include) and isinstance(i, include))
+
+.sympy.core.compatibility.iterable
+
+def iterable(i, exclude=(str, dict, NotIterable)):
+    if hasattr(i, '_iterable'):
+        return i._iterable
+    try:
+        iter(i)
+    except TypeError:
+        return False
+    if exclude:
+        return not isinstance(i, exclude)
+    return True
+
+.sympy.matrices.expressions.matexpr._LeftRightArgs.__init__
+
+def __init__(self, lines, higher=S.One):
+    self._lines = [i for i in lines]
+    self._first_pointer_parent = self._lines
+    self._first_pointer_index = 0
+    self._first_line_index = 0
+    self._second_pointer_parent = self._lines
+    self._second_pointer_index = 1
+    self._second_line_index = 1
+    self.higher = higher
+
+.sympy.matrices.expressions.matexpr._LeftRightArgs.build
+
+def build(self):
+    data = [self._build(i) for i in self._lines]
+    if self.higher != 1:
+        data += [self._build(self.higher)]
+    data = [i for i in data]
+    return data
+
+.sympy.matrices.expressions.matexpr._LeftRightArgs._build
+
+def _build(expr):
+    from sympy.core.expr import ExprBuilder
+    if isinstance(expr, ExprBuilder):
+        return expr.build()
+    if isinstance(expr, list):
+        if len(expr) == 1:
+            return expr[0]
+        else:
+            return expr[0](*[_LeftRightArgs._build(i) for i in expr[1]])
+    else:
+        return expr
+
+.sympy.core.basic.Basic.__ne__
+
+def __ne__(self, other):
+    return not self == other
+
+.sympy.matrices.dense.DenseMatrix.__eq__
+
+def __eq__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    self_shape = getattr(self, 'shape', None)
+    other_shape = getattr(other, 'shape', None)
+    if None in (self_shape, other_shape):
+        return False
+    if self_shape != other_shape:
+        return False
+    if isinstance(other, Matrix):
+        return _compare_sequence(self._mat, other._mat)
+    elif isinstance(other, MatrixBase):
+        return _compare_sequence(self._mat, Matrix(other)._mat)
+
+.sympy.matrices.immutable.ImmutableDenseMatrix.shape
+
+def shape(self):
+    return (self._rows, self._cols)
+
+.sympy.core.assumptions.ManagedProperties.__init__
+
+def __init__(cls, *args, **kws):
+    BasicMeta.__init__(cls, *args, **kws)
+    local_defs = {}
+    for k in _assume_defined:
+        attrname = as_property(k)
+        v = cls.__dict__.get(attrname, '')
+        if isinstance(v, (bool, int, type(None))):
+            if v is not None:
+                v = bool(v)
+            local_defs[k] = v
+    defs = {}
+    for base in reversed(cls.__bases__):
+        assumptions = getattr(base, '_explicit_class_assumptions', None)
+        if assumptions is not None:
+            defs.update(assumptions)
+    defs.update(local_defs)
+    cls._explicit_class_assumptions = defs
+    cls.default_assumptions = StdFactKB(defs)
+    cls._prop_handler = {}
+    for k in _assume_defined:
+        eval_is_meth = getattr(cls, '_eval_is_%s' % k, None)
+        if eval_is_meth is not None:
+            cls._prop_handler[k] = eval_is_meth
+    for k, v in cls.default_assumptions.items():
+        setattr(cls, as_property(k), v)
+    derived_from_bases = set()
+    for base in cls.__bases__:
+        default_assumptions = getattr(base, 'default_assumptions', None)
+        if default_assumptions is not None:
+            derived_from_bases.update(default_assumptions)
+    for fact in derived_from_bases - set(cls.default_assumptions):
+        pname = as_property(fact)
+        if pname not in cls.__dict__:
+            setattr(cls, pname, make_property(fact))
+    for fact in _assume_defined:
+        pname = as_property(fact)
+        if not hasattr(cls, pname):
+            setattr(cls, pname, make_property(fact))
+
+.sympy.core.core.BasicMeta.__init__
+
+def __init__(cls, *args, **kws):
+    all_classes.add(cls)
+    cls.__sympy__ = property(lambda self: True)
+
+.sympy.core.assumptions.as_property
+
+def as_property(fact):
+    return 'is_%s' % fact
+
+.sympy.core.assumptions.StdFactKB.__init__
+
+def __init__(self, facts=None):
+    super().__init__(_assume_rules)
+    if not facts:
+        self._generator = {}
+    elif not isinstance(facts, FactKB):
+        self._generator = facts.copy()
+    else:
+        self._generator = facts.generator
+    if facts:
+        self.deduce_all_facts(facts)
+
+.sympy.core.facts.FactKB.__init__
+
+def __init__(self, rules):
+    self.rules = rules
+
+.sympy.core.facts.FactKB.deduce_all_facts
+
+def deduce_all_facts(self, facts):
+    full_implications = self.rules.full_implications
+    beta_triggers = self.rules.beta_triggers
+    beta_rules = self.rules.beta_rules
+    if isinstance(facts, dict):
+        facts = facts.items()
+    while facts:
+        beta_maytrigger = set()
+        for k, v in facts:
+            if not self._tell(k, v) or v is None:
+                continue
+            for key, value in full_implications[k, v]:
+                self._tell(key, value)
+            beta_maytrigger.update(beta_triggers[k, v])
+        facts = []
+        for bidx in beta_maytrigger:
+            bcond, bimpl = beta_rules[bidx]
+            if all((self.get(k) is v for k, v in bcond)):
+                facts.append(bimpl)
+
+.sympy.core.facts.FactKB._tell
+
+def _tell(self, k, v):
+    if k in self and self[k] is not None:
+        if self[k] == v:
+            return False
+        else:
+            raise InconsistentAssumptions(self, k, v)
+    else:
+        self[k] = v
+        return True
+
+.sympy.tensor.array.expressions.conv_array_to_matrix.convert_array_to_matrix
+
+def convert_array_to_matrix(expr):
+    rec = _array2matrix(expr)
+    rec, removed = _remove_trivial_dims(rec)
+    return rec
+
+.sympy.tensor.array.expressions.conv_array_to_matrix._array2matrix
+
+def _array2matrix(expr):
+    return expr
+
+.sympy.tensor.array.expressions.conv_array_to_matrix._remove_trivial_dims
+
+def _remove_trivial_dims(expr):
+    return (expr, [])
+
+
+[/PYTHON]
+What will be the input of `_matrix_derivative`, given the following input:
+[OUTPUT]
+```
+{
+    "_rows": 2,
+    "_cols": 2,
+    "_mat": null
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

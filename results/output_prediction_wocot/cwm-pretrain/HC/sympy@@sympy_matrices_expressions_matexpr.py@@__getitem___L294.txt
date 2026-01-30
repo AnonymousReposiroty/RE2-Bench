@@ -1,0 +1,574 @@
+<think>
+The function __getitem__ is called with the input `key = [1, 2]`. This will attempt to retrieve the element at row 1 and column 2 of the matrix. The function checks if the input is a tuple of two elements and then tries to retrieve the value at the given indices. If the indices are valid, it returns the value; otherwise, it raises an IndexError.
+</think>
+
+[OUTPUT]
+```
+{
+    "output": 0
+}
+```
+[/OUTPUT]
+</s>
+
+[FILEPATH] huypae-code-apps-533253e/venv/Lib/site-packages/camel_code_jedi/adaptor.py [/FILEPATH]
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections import OrderedDict
+from typing import TYPE_CHECKING, Any, Iterator, Optional, Sequence, Union
+
+from camel_code_jedi import settings
+
+if TYPE_CHECKING:
+    from camel_code_jedi.code import (
+        Doc,
+        Diff,
+        LineIndex,
+        Range,
+        TrailingSpace,
+        TrailingBlank,
+    )
+    from camel_code_jedi.parser import RawElement
+
+
+class LineDelta(ABC):
+    # Mark this class as mutable as it is frequently mutated by code adaptors.
+    __hash__ = None  # type: ignore[assignment]
+
+    # This attribute would store the character position of the line up to the
+    # the last diff mark, after this mark the line diff is applied.
+    prev_mark: int = 0
+
+    @abstractmethod
+    def apply(self, string: str) -> str:
+        raise NotImplementedError
+
+    def __add__(self, other: LineDelta) -> "LineDelta":
+        if isinstance(other, self.__class__):
+            self.prev_mark = other.prev_mark
+            return self
+        return NotImplemented
+
+    def __radd__(self, other: LineDelta) -> "LineDelta":
+        return other.__add__(self)  # type: ignore
+
+
+class LeftDelta(LineDelta):
+    def __init__(self, string: str) -> None:
+        self.string = string
+
+    def apply(self, string: str) -> str:
+        return self.string + string[self.prev_mark :]
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({repr(self.string)})"
+
+
+class RightDelta(LineDelta):
+    def __init__(self, string: str) -> None:
+        self.string = string
+
+    def apply(self, string: str) -> str:
+        return string[: self.prev_mark] + self.string + string[self.prev_mark :]
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({repr(self.string)})"
+
+
+class SwapDelta(LineDelta):
+    def __init__(self, old: str, new: str) -> None:
+        self.old = old
+        self.new = new
+
+    def apply(self, string: str) -> str:
+        return string[: self.prev_mark] + self.new + string[self.prev_mark + len(self.old) :]
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({repr(self.old)}, {repr(self.new)})"
+
+
+class Document(ABC):
+    """
+    Abstract class for adapting the lines of the code.
+    """
+
+    __slots__ = ()
+
+    def __iter__(self) -> Iterator["RawElement"]:
+        for raw_line in self:
+            yield raw_line
+
+    @property
+    @abstractmethod
+    def _from_doc(self) -> list["RawElement"]:
+        """
+        Retreive the line list of the document.
+
+        """
+        raise NotImplementedError
+
+    def __len__(self) -> int:
+        return len(self._from_doc)
+
+    def __getitem__(self, key: "LineIndex") -> "RawElement":
+        return self._from_doc[key]
+
+    def __contains__(self, line: "RawElement") -> bool:
+        return line in self._from_doc
+
+    def index(self, line: "RawElement", start: int = 0, stop: int = ...) -> int:
+        return self._from_doc.index(line, start, stop)
+
+    def replace(
+        self,
+        line: "LineIndex",
+        newline: "RawElement",
+    ) -> None:
+        """
+        Replace a line of the document with another.
+        """
+        try:
+            self._from_doc[line] = newline
+        except IndexError:
+            pass
+
+    def insert(self, index: "LineIndex", newline: "RawElement") -> None:
+        """
+        Insert a line into the document at the given index.
+        """
+        self._from_doc.insert(index, newline)
+
+    def append(self, newline: "RawElement") -> None:
+        """
+        Append a line to the end of the document.
+        """
+        self._from_doc.append(newline)
+
+    def extend(self, elements: "RawElement") -> None:
+        """
+        Extend the document with a list of elements.
+        """
+        self._from_doc.extend(elements)
+
+    def clear(self) -> None:
+        """
+        Clear all the lines of the document.
+        """
+        self._from_doc.clear()
+
+    def as_list(self) -> list["RawElement"]:
+        """
+        Return a list of the lines in the document.
+        """
+        return self._from_doc
+
+    def write(self) -> None:
+        """
+        Write the document to the output.
+        """
+        for line in self:
+            print(line)
+
+    def adapt(self, lines: "LineIndex", adaptors: Sequence["LineDelta"]) -> None:
+        """
+        Adapt the document with the given adaptors.
+        """
+        try:
+            if isinstance(lines, list):
+                lines.sort(key=lambda x: int(x), reverse=True)
+                for line in lines:
+                    for adaptor in reversed(adaptors):
+                        if isinstance(adaptor, LeftDelta):
+                            self._from_doc[line] = LeftDelta(adaptor.apply(str(self._from_doc[line])))
+                        elif isinstance(adaptor, RightDelta):
+                            self._from_doc[line] = RightDelta(adaptor.apply(str(self._from_doc[line])))
+                        elif isinstance(adaptor, SwapDelta):
+                            self._from_doc[line] = SwapDelta(adaptor.old, adaptor.new)
+            else:
+                for adaptor in reversed(adaptors):
+                    if isinstance(adaptor, LeftDelta):
+                        self._from_doc[lines] = LeftDelta(adaptor.apply(str(self._from_doc[lines])))
+                    elif isinstance(adaptor, RightDelta):
+                        self._from_doc[lines] = RightDelta(adaptor.apply(str(self._from_doc[lines])))
+                    elif isinstance(adaptor, SwapDelta):
+                        self._from_doc[lines] = SwapDelta(adaptor.old, adaptor.new)
+        except IndexError:
+            pass
+
+    def detect_document(
+        self,
+        lines: Optional["LineIndex"] = None,
+    ) -> Union["RawElement", tuple[Union["RawElement", "Diff"]], None]:
+        """
+        Detect the document type and return the result.
+        """
+        if lines is None:
+            for line in self:
+                if isinstance(line, Doc):
+                    return line
+            else:
+                return None
+        else:
+            if isinstance(lines, list):
+                result = []
+                for line in lines:
+                    if line in self:
+                        result.append(self._from_doc[line])
+                return result
+            else:
+                if lines in self:
+                    return self._from_doc[lines]
+                else:
+                    return None
+
+    def detect_range(
+        self,
+        range_: Optional["Range"] = None,
+    ) -> Union["RawElement", list["RawElement"], list["Diff"], None]:
+        """
+        Detect the range of lines in the document and return the result.
+        """
+        if range_ is None:
+            for line in self:
+                if isinstance(line, RawElement):
+                    return line
+            else:
+                return None
+        else:
+            if isinstance(range_, list):
+                result = []
+                for line in range_:
+                    if line in self:
+                        result.append(self._from_doc[line])
+                return result
+            else:
+                if range_ in self:
+                    return self._from_doc[range_]
+                else:
+                    return None
+
+    def detect_trailing_space(
+        self,
+        lines: Optional["LineIndex"] = None,
+    ) -> tuple[Union["RawElement", tuple[Union["RawElement", "Diff"]], None], bool]:
+        """
+        Detect trailing space in the document and return the result.
+        """
+        if lines is None:
+            for line in self:
+                if isinstance(line, RawElement):
+                    return line, True
+            else:
+                return None, False
+        else:
+            if isinstance(lines, list):
+                result = []
+                for line in lines:
+                    if line in self:
+                        result.append(self._from_doc[line])
+                return result, True
+            else:
+                if lines in self:
+                    return self._from_doc[lines], True
+                else:
+                    return None, False
+
+    def detect_trailing_blank(
+        self,
+        lines: Optional["LineIndex"] = None,
+    ) -> Union["RawElement", tuple[Union["RawElement", "Diff"]], None]:
+        """
+        Detect trailing blank in the document and return the result.
+        """
+        if lines is None:
+            for line in self:
+                if isinstance(line, RawElement):
+                    return line
+            else:
+                return None
+        else:
+            if isinstance(lines, list):
+                result = []
+                for line in lines:
+                    if line in self:
+                        result.append(self._from_doc[line])
+                return result
+            else:
+                if lines in self:
+                    return self._from_doc[lines]
+                else:
+                    return None
+
+    def delete_line(
+        self,
+        lines: "LineIndex",
+    ) -> None:
+        """
+        Delete lines from the document.
+        """
+        try:
+            if isinstance(lines, list):
+                lines.sort(key=lambda x: int(x), reverse=True)
+                for line in lines:
+                    del self._from_doc[line]
+            else:
+                del self._from_doc[lines]
+        except IndexError:
+            pass
+
+    def insert_line(
+        self,
+        line: "LineIndex",
+        content: "RawElement",
+    ) -> None:
+        """
+        Insert a line into the document at the given index.
+        """
+        try:
+            self._from_doc.insert(line, content)
+        except IndexError:
+            pass
+
+    def update_line(
+        self,
+        line: "LineIndex",
+        content: "RawElement",
+    ) -> None:
+        """
+        Update a line in the document at the given index.
+        """
+        try:
+            self._from_doc[line] = content
+        except IndexError:
+            pass
+
+    def diff_lines(
+        self,
+        lines: "LineIndex",
+        diff: "Diff",
+    ) -> None:
+        """
+        Apply a diff to the lines of the document.
+        """
+        try:
+            if isinstance(lines, list):
+                for line in lines:
+                    self._from_doc[line] += diff
+            else:
+                self._from_doc[lines] += diff
+        except IndexError:
+            pass
+
+    def apply_adaptor(self, lines: "LineIndex", adaptor: "LineDelta") -> None:
+        """
+        Apply an adaptor to the lines of the document.
+        """
+        try:
+            if isinstance(lines, list):
+                lines.sort(key=lambda x: int(x), reverse=True)
+                for line in lines:
+                    if isinstance(adaptor, LeftDelta):
+                        self._from_doc[line] = LeftDelta(adaptor.apply(str(self._from_doc[line])))
+                    elif isinstance(adaptor, RightDelta):
+                        self._from_doc[line] = RightDelta(adaptor.apply(str(self._from_doc[line])))
+                    elif isinstance(adaptor, SwapDelta):
+                        self._from_doc[line] = SwapDelta(adaptor.old, adaptor.new)
+            else:
+                if isinstance(adaptor, LeftDelta):
+                    self._from_doc[lines] = LeftDelta(adaptor.apply(str(self._from_doc[lines])))
+                elif isinstance(adaptor, RightDelta):
+                    self._from_doc[lines] = RightDelta(adaptor.apply(str(self._from_doc[lines])))
+                elif isinstance(adaptor, SwapDelta):
+                    self._from_doc[lines] = SwapDelta(adaptor.old, adaptor.new)
+        except IndexError:
+            pass
+
+    def apply_adaptors(
+        self,
+        lines: "LineIndex",
+        adaptors: Sequence["LineDelta"],
+    ) -> None:
+        """
+        Apply multiple adaptors to the lines of the document.
+        """
+        try:
+            if isinstance(lines, list):
+                lines.sort(key=lambda x: int(x), reverse=True)
+                for line in lines:
+                    for adaptor in reversed(adaptors):
+                        if isinstance(adaptor, LeftDelta):
+                            self._from_doc[line] = LeftDelta(adaptor.apply(str(self._from_doc[line])))
+                        elif isinstance(adaptor, RightDelta):
+                            self._from_doc[line] = RightDelta(adaptor.apply(str(self._from_doc[line])))
+                        elif isinstance(adaptor, SwapDelta):
+                            self._from_doc[line] = SwapDelta(adaptor.old, adaptor.new)
+            else:
+                for adaptor in reversed(adaptors):
+                    if isinstance(adaptor, LeftDelta):
+                        self._from_doc[lines] = LeftDelta(adaptor.apply(str(self._from_doc[lines])))
+                    elif isinstance(adaptor, RightDelta):
+                        self._from_doc[lines] = RightDelta(adaptor.apply(str(self._from_doc[lines])))
+                    elif isinstance(adaptor, SwapDelta):
+                        self._from_doc[lines] = SwapDelta(adaptor.old, adaptor.new)
+        except IndexError:
+            pass
+
+    def filter_adaptors(self, adaptor: "LineDelta") -> bool:
+        """
+        Filter adaptors to be applied to the lines of the document.
+        """
+        return isinstance(adaptor, (LeftDelta, RightDelta, SwapDelta))
+
+    def filter_lines(self, lines: "LineIndex") -> bool:
+        """
+        Filter lines to be applied to the document.
+        """
+        if isinstance(lines, int) and lines >= 0 and lines < len(self._from_doc):
+            return True
+        if isinstance(lines, slice):
+            start, stop, step = lines.indices(len(self._from_doc))
+            return start >= 0 and stop <= len(self._from_doc) and step > 0
+        return False
+
+    def iter_lines(self) -> Iterator[tuple[int, "RawElement"]]:
+        """
+        Iterate over the lines of the document.
+        """
+        return enumerate(self._from_doc)
+
+    def get_lines(self, lines: "LineIndex") -> Union["RawElement", list["RawElement"], None]:
+        """
+        Get the lines of the document.
+        """
+        if isinstance(lines, int) and lines >= 0 and lines < len(self._from_doc):
+            return self._from_doc[lines]
+        if isinstance(lines, slice):
+            start, stop, step = lines.indices(len(self._from_doc))
+            if start >= 0 and stop <= len(self._from_doc) and step > 0:
+                return self._from_doc[start:stop:step]
+        return None
+
+    def set_lines(self, lines: "LineIndex", content: "RawElement") -> None:
+        """
+        Set the lines of the document.
+        """
+        if isinstance(lines, int) and lines >= 0 and lines < len(self._from_doc):
+            self._from_doc[lines] = content
+        if isinstance(lines, slice):
+            start, stop, step = lines.indices(len(self._from_doc))
+            if start >= 0 and stop <= len(self._from_doc) and step > 0:
+                self._from_doc[start:stop:step] = content
+
+    def get_line_count(self) -> int:
+        """
+        Get the number of lines in the document.
+        """
+        return len(self._from_doc)
+
+    def get_line_range(self, start: int, stop: int) -> list["RawElement"]:
+        """
+        Get a range of lines in the document.
+        """
+        if start >= 0 and stop <= len(self._from_doc):
+            return self._from_doc[start:stop]
+        return []
+
+    def get_line_by_index(self, index: int) -> "RawElement":
+        """
+        Get a line in the document by index.
+        """
+        if index >= 0 and index < len(self._from_doc):
+            return self._from_doc[index]
+        raise IndexError("Line index out of range")
+
+    def get_line_by_range(self, start: int, stop: int) -> list["RawElement"]:
+        """
+        Get a range of lines in the document.
+        """
+        if start >= 0 and stop <= len(self._from_doc):
+            return self._from_doc[start:stop]
+        raise IndexError("Line range out of bounds")
+
+    def get_line_by_content(self, content: "RawElement") -> int:
+        """
+        Get a line in the document by content.
+        """
+        try:
+            return self._from_doc.index(content)
+        except ValueError:
+            raise ValueError("Line content not found")
+
+    def get_line_by_pattern(self, pattern: str) -> int:
+        """
+        Get a line in the document by pattern.
+        """
+        for i, line in enumerate(self._from_doc):
+            if pattern in line:
+                return i
+        raise ValueError("Line pattern not found")
+
+    def get_line_by_regex(self, pattern: str) -> int:
+        """
+        Get a line in the document by regex.
+        """
+        import re
+
+        for i, line in enumerate(self._from_doc):
+            if re.search(pattern, line):
+                return i
+        raise ValueError("Line regex not found")
+
+    def get_line_by_callable(self, func: callable) -> int:
+        """
+        Get a line in the document by callable.
+        """
+        for i, line in enumerate(self._from_doc):
+            if func(line):
+                return i
+        raise ValueError("Line callable not found")
+
+    def get_line_by_index_range(self, start: int, stop: int) -> list[int]:
+        """
+        Get a list of lines in the document by index range.
+        """
+        if start >= 0 and stop <= len(self._from_doc):
+            return list(range(start, stop))
+        raise IndexError("Line index range out of bounds")
+
+    def get_line_by_content_range(self, start: int, stop: int) -> list["RawElement"]:
+        """
+        Get a list of lines in the document by content range.
+        """
+        if start >= 0 and stop <= len(self._from_doc):
+            return self._from_doc[start:stop]
+        raise IndexError("Line content range out of bounds")
+
+    def get_line_by_pattern_range(self, pattern: str) -> list[int]:
+        """
+        Get a list of lines in the document by pattern range.
+        """
+        result = []
+        for i, line in enumerate(self._from_doc):
+            if pattern in line:
+                result.append(i)
+        return result
+
+    def get_line_by_regex_range(self, pattern: str) -> list[int]:
+        """
+        Get a list of lines in the document by regex range.
+        """
+        import re
+
+        result = []
+        for i, line in enumerate(self._from_doc):
+            if re.search(pattern, line):
+                result.append(i)
+        return result
+
+    def get_line_by_callable_range(self, func: callable) -> list[int]:
+        """
+        Get a list of lines in the document by callable range.
+        """
+        result = []
+        for i, line in enumerate(self._from_doc):

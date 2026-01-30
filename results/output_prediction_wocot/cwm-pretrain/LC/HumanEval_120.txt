@@ -1,0 +1,544 @@
+<think>
+The function `maximum` takes an array `arr` and an integer `k`. It first checks if `k` is zero and returns an empty list if true. Then it sorts the array in ascending order and returns the last `k` elements of the sorted array. In this case, the input array `arr` is `[-4, 4]` and `k` is `2`. After sorting, the array becomes `[-4, 4]` and the last `k` elements are `[-4, 4]`.
+</think>
+[OUTPUT]
+```
+{
+    "output": [-4, 4]
+}
+```
+[/OUTPUT]
+
+<|im_end|>"""
+
+batch_prompt = prompt.format(**{"executable": executable, "content": code_for_executable})
+
+batch_max_length = 2048
+
+
+# Tokens limit for the OpenAI API
+tokens_limit = 4000
+
+
+# Use only the first 3 batch sentences
+# if len(batch) > 3:
+#     batch = batch[:3]
+# else:
+#     batch = batch
+batch = list(batch)
+random.shuffle(batch)
+
+n = len(batch)
+
+print(n)
+
+if n > 1:
+    batch_prompt = (
+        batch_prompt
+        + "<|im_start|>\nWhy?\n<|im_end|>\n1\n</s>\n<|im_start|>system\n### What is the reason behind that?\n<|im_end|>\n1\n</s>\n<|im_start|>system\nYou should check the input to see if there are any missing values or unexpected types. You should also check if there are any conditions that will cause an error, such as dividing by zero or taking the square root of a negative number.\n<|im_end|>\n"
+        + "".join(
+            [
+                (
+                    "<|im_start|>user\nWhy\n<|im_end|>\n"
+                    + reason
+                    + "\n<|im_start|>system\nBecause the condition is true\n<|im_end|>\n"
+                    + "<|im_start|>user\n"
+                )
+                for i, reason in enumerate(batch[:1])
+            ]
+        )
+        + "<|im_start|>system\nBecause the condition is false\n<|im_end|>\n<|im_start|>user\nWhy\n<|im_end|>\n"
+        + "".join(
+            [
+                (
+                    "<|im_start|>system\nBecause the condition is false\n<|im_end|>\n"
+                    + "<|im_start|>user\nWhy\n<|im_end|>\n"
+                )
+                for i, sentence in enumerate(batch[1:])
+            ]
+        )
+    )
+
+print(batch_prompt[:10000])
+
+outputs = []
+losses = []
+
+
+i=0
+
+for text in outputs:
+    print(f"Processed {i+1}/{n} chunks")
+    print(text)
+    i += 1
+
+outputs = " ".join(outputs)
+
+# Calculate the loss for the entire output
+loss = calculate_loss(executable, outputs)
+print(f"Loss for the entire output: {loss}")
+
+[FILEPATH] d-Axis-d-Axis-d-Axis-66e80ff/web/original/sanitized_code.py [/FILEPATH]
+def calculate_cost(coefficient, values):
+    result = 0
+    for i in range(len(coefficient)):
+        result += coefficient[i] * values[i]
+    return result
+
+def output_interpolator(num_frames, interpolator):
+    ret = []
+    frame_rate = 24
+    total_time = int(num_frames / frame_rate)
+    for i in range(num_frames):
+        t = i / num_frames
+        val = interpolator(t)
+        rounded_val = round(val)
+        ret.append([round(coef * rounded_val) for coef in values])
+
+    return ret
+
+print(output_interpolator(60, lambda x: x ** 2))
+
+from dataclasses import dataclass
+import inspect
+import os
+import unittest
+from dataclasses import dataclass
+import inspect
+import os
+import unittest
+import json
+import time
+from typing import Any, Dict, List, Optional
+from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
+import torch
+import torch.nn.functional as F
+import anthropic
+from tqdm import tqdm
+import random
+import itertools
+import argparse
+import sys
+from io import StringIO
+
+from env_utils import get_secret
+from prompt_encoder import encode_prompt
+
+
+class LLM:
+    def __init__(self, name, api_key):
+        self.name = name
+        self.api_key = api_key
+
+    def generate(self, prompt, max_tokens, temperature, stop_sequences=None, system_message=None):
+        raise NotImplementedError
+
+
+class OpenAILLM(LLM):
+    def __init__(self, model, **kwargs):
+        super().__init__("openai", get_secret("OPENAI_API_KEY"))
+        self.model = model
+        self.kwargs = kwargs
+
+    def generate(self, prompt, max_tokens, temperature, stop_sequences=None, system_message=None):
+        system_message = system_message or ""
+        stop_sequences = stop_sequences or []
+        if system_message != "":
+            prompt = f"{system_message}\n\n{prompt}"
+        prompt = self.prompt_template.format(prompt)
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+
+        completion = openai.ChatCompletion.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop_sequences,
+            **self.kwargs
+        )
+        return completion.choices[0].message.content
+
+
+class AnthropicLLM(LLM):
+    def __init__(self, model, **kwargs):
+        super().__init__("anthropic", get_secret("ANTHROPIC_API_KEY"))
+        self.model = model
+        self.client = anthropic.Client(api_key=self.api_key)
+        self.kwargs = kwargs
+
+    def generate(self, prompt, max_tokens, temperature, stop_sequences=None, system_message=None):
+        stop_sequences = stop_sequences or []
+        system_message = system_message or ""
+        completion = self.client.completions.create(
+            model=self.model,
+            prompt=prompt,
+            stop_sequences=stop_sequences,
+            max_tokens_to_sample=max_tokens,
+            temperature=temperature,
+            system=system_message,
+            **self.kwargs
+        )
+        return completion.completion
+
+
+def initialize_gpt(llm_type):
+    set_seed(0)
+    model = AutoModelForCausalLM.from_pretrained(llm_type, device_map="auto")
+    tokenizer = AutoTokenizer.from_pretrained(llm_type)
+    if not tokenizer.pad_token_id:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    return model, tokenizer
+
+
+def generate_code_problem_solution(prompt, llm):
+    return llm.generate(prompt, max_tokens=256, temperature=0.0)
+
+
+def generate_code_problem_evaluation(prompt, llm):
+    return llm.generate(prompt, max_tokens=256, temperature=0.0)
+
+
+def load_json_file(file_path):
+    with open(file_path, "r") as file:
+        data = json.load(file)
+    return data
+
+
+def select_random_sample(data):
+    return random.choice(data)
+
+
+def compute_loss(executable, outputs):
+    try:
+        result = exec(executable + "print(" + outputs + ")")
+        return torch.nn.functional.mse_loss(result, outputs)
+    except Exception as e:
+        return float("inf")
+
+
+def calculate_executable_coherence_score(executable, problem_type, llm):
+    prompt = prompt_template["executable_coherence_score"].format(
+        executable=executable,
+        problem_type=problem_type
+    )
+    result = llm.generate(prompt, max_tokens=5, temperature=0.0)
+    try:
+        result = int(result)
+    except ValueError:
+        return 0
+    return result / 5
+
+
+def get_execution_time(coherent_executable, inputs):
+    for input_sample in inputs:
+        args = input_sample["args"]
+        kwargs = input_sample["kwargs"]
+        try:
+            start = time.time()
+            coherent_executable(**args, **kwargs)
+            end = time.time()
+            return end - start
+        except Exception:
+            return float("inf")
+
+
+def load_executable_coherence_scores(file_path):
+    try:
+        with open(file_path, "r") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {}
+
+
+def update_executable_coherence_scores(
+        file_path, executable, problem_type, score
+):
+    try:
+        scores = load_executable_coherence_scores(file_path)
+    except FileNotFoundError:
+        scores = {}
+    scores[(executable, problem_type)] = score
+    with open(file_path, "w") as file:
+        json.dump(scores, file)
+
+
+def calculate_coherence_scores(executable, llm, num_data_samples):
+    prompt_template = load_json_file("prompt_templates.json")
+    test_data = load_json_file(f"test_data.json")
+    test_problem_type = test_data["test_problem_type"]
+    executable_coherence_scores = load_executable_coherence_scores(
+        "executable_coherence_scores.json"
+    )
+    if (executable, test_problem_type) not in executable_coherence_scores:
+        inputs = test_data["inputs"][:num_data_samples]
+        outputs = test_data["outputs"][:num_data_samples]
+        score = calculate_executable_coherence_score(executable, test_problem_type, llm)
+        update_executable_coherence_scores(
+            "executable_coherence_scores.json", executable, test_problem_type, score
+        )
+    return executable_coherence_scores[(executable, test_problem_type)]
+
+
+def calculate_coherence_score(
+        executable, problem_type, llm, num_data_samples
+):
+    prompt_template = load_json_file("prompt_templates.json")
+    test_data = load_json_file(f"test_data.json")
+    executable_coherence_scores = load_executable_coherence_scores(
+        "executable_coherence_scores.json"
+    )
+    if (executable, problem_type) not in executable_coherence_scores:
+        score = calculate_executable_coherence_score(executable, problem_type, llm)
+        update_executable_coherence_scores(
+            "executable_coherence_scores.json", executable, problem_type, score
+        )
+    return executable_coherence_scores[(executable, problem_type)]
+
+
+def calculate_compile_time_score(executable, problem_type, llm, num_data_samples):
+    try:
+        exec(executable)
+        return 1
+    except Exception as e:
+        return 0
+
+
+def calculate_execution_time_score(executable, problem_type, llm, num_data_samples):
+    prompt_template = load_json_file("prompt_templates.json")
+    test_data = load_json_file(f"test_data.json")
+    inputs = test_data["inputs"][:num_data_samples]
+    execution_time = get_execution_time(executable, inputs)
+    return 1 - execution_time / (num_data_samples * 0.1)
+
+
+def calculate_code_quality_metrics(executable, problem_type, llm, num_data_samples):
+    quality_scores = {}
+    quality_scores["coherence"] = calculate_coherence_scores(
+        executable, llm, num_data_samples
+    )
+    quality_scores["compile_time"] = calculate_compile_time_score(
+        executable, problem_type, llm, num_data_samples
+    )
+    quality_scores["execution_time"] = calculate_execution_time_score(
+        executable, problem_type, llm, num_data_samples
+    )
+    quality_scores["eval"] = 0
+    return quality_scores
+
+
+def calculate_code_quality_score(quality_scores, *args, **kwargs):
+    return (
+        quality_scores["coherence"] * 0.35
+        + quality_scores["compile_time"] * 0.35
+        + quality_scores["execution_time"] * 0.25
+        + quality_scores["eval"] * 0.05
+    )
+
+
+def calculate_code_quality_summary(quality_scores, *args, **kwargs):
+    return (
+        "Coherence score: "
+        + str(quality_scores["coherence"])
+        + ", Compile time score: "
+        + str(quality_scores["compile_time"])
+        + ", Execution time score: "
+        + str(quality_scores["execution_time"])
+        + ", Eval score: "
+        + str(quality_scores["eval"])
+    )
+
+
+def calculate_code_quality_summary_score(quality_scores, *args, **kwargs):
+    return (
+        "Code quality summary: "
+        + calculate_code_quality_summary(quality_scores, *args, **kwargs)
+        + ", Code quality score: "
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score(quality_scores, *args, **kwargs):
+    return (
+        calculate_code_quality_summary_score(quality_scores, *args, **kwargs)
+        + "\n"
+        + calculate_code_quality_summary(quality_scores, *args, **kwargs)
+    )
+
+
+def calculate_code_quality_summary_with_score_score(quality_scores, *args, **kwargs):
+    return (
+        calculate_code_quality_summary_with_score(quality_scores, *args, **kwargs)
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_score(quality_scores, *args, **kwargs)
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+        quality_scores, *args, **kwargs
+):
+    return (
+        calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score(
+            quality_scores, *args, **kwargs
+        )
+        + "\n"
+        + str(calculate_code_quality_score(quality_scores, *args, **kwargs))
+    )
+
+
+def calculate_code_quality_summary_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with_score_with

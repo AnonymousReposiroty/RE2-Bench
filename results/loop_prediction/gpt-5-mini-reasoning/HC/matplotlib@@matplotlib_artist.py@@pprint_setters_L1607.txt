@@ -1,0 +1,107 @@
+[THOUGHT]
+We only have the provided serialized "self" data, not the actual class object, so we must reason about likely loop behavior. The pprint_setters method iterates over sorted(self.get_setters()). get_setters() scans dir(self.o) for attributes starting with 'set_' and that are callable and valid setters. The provided self.aliasd is empty and no other information about the TestArtist class is given. The conservative prediction is that there are no valid 'set_' methods found in this context, so both the list comprehension in get_aliases and the loop over sorted(get_setters()) produce no items.
+
+Therefore:
+- The list comprehension that builds names yields an empty list (name never takes any value), and dir(self.o) is treated as producing no matching names here.
+- sorted(self.get_setters()) yields an empty list, so prop never takes any value.
+
+I annotate the loop-state variables with empty lists accordingly.
+[/THOUGHT]
+
+[ANSWER]
+1 from functools import cache, reduce, wraps
+2 import inspect
+3 import re
+4 import numpy as np
+5 
+6 class ArtistInspector:
+7 
+8     def __init__(self, o):
+9         if not isinstance(o, Artist):
+10             if np.iterable(o):
+11                 o = list(o)
+12                 if len(o):
+13                     o = o[0]
+14         self.oorig = o
+15         if not isinstance(o, type):
+16             o = type(o)
+17         self.o = o
+18         self.aliasd = self.get_aliases()
+19 
+20     def get_aliases(self):
+21         names = [name for name in dir(self.o) if name.startswith(('set_', 'get_')) and callable(getattr(self.o, name))]## [STATE]name=[][/STATE] [STATE]dir(self.o)=[][/STATE]
+22         aliases = {}
+23         for name in names:
+24             func = getattr(self.o, name)
+25             if not self.is_alias(func):
+26                 continue
+27             propname = re.search(f'`({name[:4]}.*)`', inspect.getdoc(func)).group(1)
+28             aliases.setdefault(propname[4:], set()).add(name[4:])
+29         return aliases
+30     _get_valid_values_regex = re.compile('\\n\\s*(?:\\.\\.\\s+)?ACCEPTS:\\s*((?:.|\\n)*?)(?:$|(?:\\n\\n))')
+31 
+32     def get_valid_values(self, attr):
+33         name = 'set_%s' % attr
+34         if not hasattr(self.o, name):
+35             raise AttributeError(f'{self.o} has no function {name}')
+36         func = getattr(self.o, name)
+37         if hasattr(func, '_kwarg_doc'):
+38             return func._kwarg_doc
+39         docstring = inspect.getdoc(func)
+40         if docstring is None:
+41             return 'unknown'
+42         if docstring.startswith('Alias for '):
+43             return None
+44         match = self._get_valid_values_regex.search(docstring)
+45         if match is not None:
+46             return re.sub('\n *', ' ', match.group(1))
+47         param_name = func.__code__.co_varnames[1]
+48         match = re.search(f'(?m)^ *\\*?{param_name} : (.+)', docstring)
+49         if match:
+50             return match.group(1)
+51         return 'unknown'
+52 
+53     def get_setters(self):
+54         setters = []
+55         for name in dir(self.o):
+56             if not name.startswith('set_'):
+57                 continue
+58             func = getattr(self.o, name)
+59             if not callable(func) or self.number_of_parameters(func) < 2 or self.is_alias(func):
+60                 continue
+61             setters.append(name[4:])
+62         return setters
+63 
+64     @staticmethod
+65     @cache
+66     def number_of_parameters(func):
+67         return len(inspect.signature(func).parameters)
+68 
+69     @staticmethod
+70     @cache
+71     def is_alias(method):
+72         ds = inspect.getdoc(method)
+73         if ds is None:
+74             return False
+75         return ds.startswith('Alias for ')
+76 
+77     def aliased_name(self, s):
+78         aliases = ''.join((' or %s' % x for x in sorted(self.aliasd.get(s, []))))
+79         return s + aliases
+80     _NOT_LINKABLE = {'matplotlib.image._ImageBase.set_alpha', 'matplotlib.image._ImageBase.set_array', 'matplotlib.image._ImageBase.set_data', 'matplotlib.image._ImageBase.set_filternorm', 'matplotlib.image._ImageBase.set_filterrad', 'matplotlib.image._ImageBase.set_interpolation', 'matplotlib.image._ImageBase.set_interpolation_stage', 'matplotlib.image._ImageBase.set_resample', 'matplotlib.text._AnnotationBase.set_annotation_clip'}
+81 
+82     def pprint_setters(self, prop=None, leadingspace=2):
+83         if leadingspace:
+84             pad = ' ' * leadingspace
+85         else:
+86             pad = ''
+87         if prop is not None:
+88             accepts = self.get_valid_values(prop)
+89             return f'{pad}{prop}: {accepts}'
+90         lines = []
+91         for prop in sorted(self.get_setters()):## [STATE]prop=[][/STATE] [STATE]sorted(self.get_setters())=[][/STATE]
+92             accepts = self.get_valid_values(prop)
+93             name = self.aliased_name(prop)
+94             lines.append(f'{pad}{name}: {accepts}')
+95         return lines
+[/ANSWER]

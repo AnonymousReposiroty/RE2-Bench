@@ -1,0 +1,270 @@
+from numbers import Integral, Real
+import numpy as np
+import scipy.sparse as sp
+from scipy.special import gammaln, logsumexp
+from sklearn.base import (
+    BaseEstimator,
+    ClassNamePrefixFeaturesOutMixin,
+    TransformerMixin,
+    _fit_context,
+)
+from sklearn.decomposition._online_lda_fast import _dirichlet_expectation_2d
+from sklearn.utils._param_validation import Interval, StrOptions
+
+class LatentDirichletAllocation(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEstimator):
+    """Latent Dirichlet Allocation with online variational Bayes algorithm.
+
+    The implementation is based on [1]_ and [2]_.
+
+    .. versionadded:: 0.17
+
+    Read more in the :ref:`User Guide <LatentDirichletAllocation>`.
+
+    Parameters
+    ----------
+    n_components : int, default=10
+        Number of topics.
+
+        .. versionchanged:: 0.19
+            ``n_topics`` was renamed to ``n_components``
+
+    doc_topic_prior : float, default=None
+        Prior of document topic distribution `theta`. If the value is None,
+        defaults to `1 / n_components`.
+        In [1]_, this is called `alpha`.
+
+    topic_word_prior : float, default=None
+        Prior of topic word distribution `beta`. If the value is None, defaults
+        to `1 / n_components`.
+        In [1]_, this is called `eta`.
+
+    learning_method : {'batch', 'online'}, default='batch'
+        Method used to update `_component`. Only used in :meth:`fit` method.
+        In general, if the data size is large, the online update will be much
+        faster than the batch update.
+
+        Valid options:
+
+        - 'batch': Batch variational Bayes method. Use all training data in each EM
+          update. Old `components_` will be overwritten in each iteration.
+        - 'online': Online variational Bayes method. In each EM update, use mini-batch
+          of training data to update the ``components_`` variable incrementally. The
+          learning rate is controlled by the ``learning_decay`` and the
+          ``learning_offset`` parameters.
+
+        .. versionchanged:: 0.20
+            The default learning method is now ``"batch"``.
+
+    learning_decay : float, default=0.7
+        It is a parameter that control learning rate in the online learning
+        method. The value should be set between (0.5, 1.0] to guarantee
+        asymptotic convergence. When the value is 0.0 and batch_size is
+        ``n_samples``, the update method is same as batch learning. In the
+        literature, this is called kappa.
+
+    learning_offset : float, default=10.0
+        A (positive) parameter that downweights early iterations in online
+        learning.  It should be greater than 1.0. In the literature, this is
+        called tau_0.
+
+    max_iter : int, default=10
+        The maximum number of passes over the training data (aka epochs).
+        It only impacts the behavior in the :meth:`fit` method, and not the
+        :meth:`partial_fit` method.
+
+    batch_size : int, default=128
+        Number of documents to use in each EM iteration. Only used in online
+        learning.
+
+    evaluate_every : int, default=-1
+        How often to evaluate perplexity. Only used in `fit` method.
+        set it to 0 or negative number to not evaluate perplexity in
+        training at all. Evaluating perplexity can help you check convergence
+        in training process, but it will also increase total training time.
+        Evaluating perplexity in every iteration might increase training time
+        up to two-fold.
+
+    total_samples : int, default=1e6
+        Total number of documents. Only used in the :meth:`partial_fit` method.
+
+    perp_tol : float, default=1e-1
+        Perplexity tolerance. Only used when ``evaluate_every`` is greater than 0.
+
+    mean_change_tol : float, default=1e-3
+        Stopping tolerance for updating document topic distribution in E-step.
+
+    max_doc_update_iter : int, default=100
+        Max number of iterations for updating document topic distribution in
+        the E-step.
+
+    n_jobs : int, default=None
+        The number of jobs to use in the E-step.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary <n_jobs>`
+        for more details.
+
+    verbose : int, default=0
+        Verbosity level.
+
+    random_state : int, RandomState instance or None, default=None
+        Pass an int for reproducible results across multiple function calls.
+        See :term:`Glossary <random_state>`.
+
+    Attributes
+    ----------
+    components_ : ndarray of shape (n_components, n_features)
+        Variational parameters for topic word distribution. Since the complete
+        conditional for topic word distribution is a Dirichlet,
+        ``components_[i, j]`` can be viewed as pseudocount that represents the
+        number of times word `j` was assigned to topic `i`.
+        It can also be viewed as distribution over the words for each topic
+        after normalization:
+        ``model.components_ / model.components_.sum(axis=1)[:, np.newaxis]``.
+
+    exp_dirichlet_component_ : ndarray of shape (n_components, n_features)
+        Exponential value of expectation of log topic word distribution.
+        In the literature, this is `exp(E[log(beta)])`.
+
+    n_batch_iter_ : int
+        Number of iterations of the EM step.
+
+    n_features_in_ : int
+        Number of features seen during :term:`fit`.
+
+        .. versionadded:: 0.24
+
+    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+        Names of features seen during :term:`fit`. Defined only when `X`
+        has feature names that are all strings.
+
+        .. versionadded:: 1.0
+
+    n_iter_ : int
+        Number of passes over the dataset.
+
+    bound_ : float
+        Final perplexity score on training set.
+
+    doc_topic_prior_ : float
+        Prior of document topic distribution `theta`. If the value is None,
+        it is `1 / n_components`.
+
+    random_state_ : RandomState instance
+        RandomState instance that is generated either from a seed, the random
+        number generator or by `np.random`.
+
+    topic_word_prior_ : float
+        Prior of topic word distribution `beta`. If the value is None, it is
+        `1 / n_components`.
+
+    See Also
+    --------
+    sklearn.discriminant_analysis.LinearDiscriminantAnalysis:
+        A classifier with a linear decision boundary, generated by fitting
+        class conditional densities to the data and using Bayes' rule.
+
+    References
+    ----------
+    .. [1] "Online Learning for Latent Dirichlet Allocation", Matthew D.
+           Hoffman, David M. Blei, Francis Bach, 2010.
+           https://github.com/blei-lab/onlineldavb
+
+    .. [2] "Stochastic Variational Inference", Matthew D. Hoffman,
+           David M. Blei, Chong Wang, John Paisley, 2013.
+           https://jmlr.org/papers/volume14/hoffman13a/hoffman13a.pdf
+
+    Examples
+    --------
+    >>> from sklearn.decomposition import LatentDirichletAllocation
+    >>> from sklearn.datasets import make_multilabel_classification
+    >>> # This produces a feature matrix of token counts, similar to what
+    >>> # CountVectorizer would produce on text.
+    >>> X, _ = make_multilabel_classification(random_state=0)
+    >>> lda = LatentDirichletAllocation(n_components=5,
+    ...     random_state=0)
+    >>> lda.fit(X)
+    LatentDirichletAllocation(...)
+    >>> # get topics for some given samples:
+    >>> lda.transform(X[-2:])
+    array([[0.00360392, 0.25499205, 0.0036211 , 0.64236448, 0.09541846],
+           [0.15297572, 0.00362644, 0.44412786, 0.39568399, 0.003586  ]])
+    """
+    _parameter_constraints: dict = {'n_components': [Interval(Integral, 0, None, closed='neither')], 'doc_topic_prior': [None, Interval(Real, 0, 1, closed='both')], 'topic_word_prior': [None, Interval(Real, 0, 1, closed='both')], 'learning_method': [StrOptions({'batch', 'online'})], 'learning_decay': [Interval(Real, 0, 1, closed='both')], 'learning_offset': [Interval(Real, 1.0, None, closed='left')], 'max_iter': [Interval(Integral, 0, None, closed='left')], 'batch_size': [Interval(Integral, 0, None, closed='neither')], 'evaluate_every': [Interval(Integral, None, None, closed='neither')], 'total_samples': [Interval(Real, 0, None, closed='neither')], 'perp_tol': [Interval(Real, 0, None, closed='left')], 'mean_change_tol': [Interval(Real, 0, None, closed='left')], 'max_doc_update_iter': [Interval(Integral, 0, None, closed='left')], 'n_jobs': [None, Integral], 'verbose': ['verbose'], 'random_state': ['random_state']}
+
+    def __init__(self, n_components=10, *, doc_topic_prior=None, topic_word_prior=None, learning_method='batch', learning_decay=0.7, learning_offset=10.0, max_iter=10, batch_size=128, evaluate_every=-1, total_samples=1000000.0, perp_tol=0.1, mean_change_tol=0.001, max_doc_update_iter=100, n_jobs=None, verbose=0, random_state=None):
+        self.n_components = n_components
+        self.doc_topic_prior = doc_topic_prior
+        self.topic_word_prior = topic_word_prior
+        self.learning_method = learning_method
+        self.learning_decay = learning_decay
+        self.learning_offset = learning_offset
+        self.max_iter = max_iter
+        self.batch_size = batch_size
+        self.evaluate_every = evaluate_every
+        self.total_samples = total_samples
+        self.perp_tol = perp_tol
+        self.mean_change_tol = mean_change_tol
+        self.max_doc_update_iter = max_doc_update_iter
+        self.n_jobs = n_jobs
+        self.verbose = verbose
+        self.random_state = random_state
+
+    def _approx_bound(self, X, doc_topic_distr, sub_sampling):
+        """Estimate the variational bound.
+
+        Estimate the variational bound over "all documents" using only the
+        documents passed in as X. Since log-likelihood of each word cannot
+        be computed directly, we use this bound to estimate it.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        doc_topic_distr : ndarray of shape (n_samples, n_components)
+            Document topic distribution. In the literature, this is called
+            gamma.
+
+        sub_sampling : bool, default=False
+            Compensate for subsampling of documents.
+            It is used in calculate bound in online learning.
+
+        Returns
+        -------
+        score : float
+
+        """
+
+        def _loglikelihood(prior, distr, dirichlet_distr, size):
+            score = np.sum((prior - distr) * dirichlet_distr)
+            score += np.sum(gammaln(distr) - gammaln(prior))
+            score += np.sum(gammaln(prior * size) - gammaln(np.sum(distr, 1)))
+            return score
+        is_sparse_x = sp.issparse(X)
+        n_samples, n_components = doc_topic_distr.shape
+        n_features = self.components_.shape[1]
+        score = 0
+        dirichlet_doc_topic = _dirichlet_expectation_2d(doc_topic_distr)
+        dirichlet_component_ = _dirichlet_expectation_2d(self.components_)
+        doc_topic_prior = self.doc_topic_prior_
+        topic_word_prior = self.topic_word_prior_
+        if is_sparse_x:
+            X_data = X.data
+            X_indices = X.indices
+            X_indptr = X.indptr
+        for idx_d in range(0, n_samples):
+            if is_sparse_x:
+                ids = X_indices[X_indptr[idx_d]:X_indptr[idx_d + 1]]
+                cnts = X_data[X_indptr[idx_d]:X_indptr[idx_d + 1]]
+            else:
+                ids = np.nonzero(X[idx_d, :])[0]
+                cnts = X[idx_d, ids]
+            temp = dirichlet_doc_topic[idx_d, :, np.newaxis] + dirichlet_component_[:, ids]
+            norm_phi = logsumexp(temp, axis=0)
+            score += np.dot(cnts, norm_phi)
+        score += _loglikelihood(doc_topic_prior, doc_topic_distr, dirichlet_doc_topic, self.n_components)
+        if sub_sampling:
+            doc_ratio = float(self.total_samples) / n_samples
+            score *= doc_ratio
+        score += _loglikelihood(topic_word_prior, self.components_, dirichlet_component_, n_features)
+        return score

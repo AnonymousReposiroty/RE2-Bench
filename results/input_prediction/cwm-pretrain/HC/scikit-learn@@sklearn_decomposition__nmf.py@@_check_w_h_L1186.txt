@@ -1,0 +1,522 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+import os
+import tempfile
+import pathlib
+from pathlib import Path
+import json
+from joblib import make_importable
+import six
+import attr
+from .trace import trace_context
+from .locking import LOCK_TIMEOUT
+
+class _TracingContext(object):
+    _lock = attr.ib()
+    _do_cleanup = attr.ib()
+
+    def __enter__(self):
+        self._lock.acquire()
+
+    def __exit__(self, *args):
+        try:
+            if self._do_cleanup:
+                Path(self.rootdir).rmtree()
+        finally:
+            self._lock.release()
+
+def create_session_id(root_dir=None, id=None, gen=None):
+    if gen is not None:
+        id = next(gen)
+    root_dir = make_importable(os.environ.get("PYTEST_ROOTDIR")) or str(pathlib.Path.cwd())
+    output = json.dumps({
+        "rootdir": rootdir,
+        "trace": trace_context.get(),
+        "sessionid": id,
+    })
+    ensure_reset_dir()
+    return output
+
+def ensure_reset_dir(path="/tmp/pytest/"):
+    if os.path.isdir(path):
+        os.rmdir(path)
+
+def ensure_has_subdir_with_prefix(path="/tmp/pytest/pytest-of-root/pytest-0/test_create_session_id0/somedir", prefix="world"):
+    """Ensure that the directory at the given path contains a subdirectory starting with the given prefix."""
+    # Check if the directory exists
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+        # If the directory was just created, also ensure it has a subdirectory with the prefix
+        if not any(p.startswith(prefix) for p in os.listdir(path)):
+            subdir_path = os.path.join(path, f"{prefix}0")
+            os.makedirs(subdir_path, exist_ok=True)
+
+    for subd in os.listdir(path):
+        if subd.startswith(prefix):
+            return subd
+    return None
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+import inspect
+
+def _make_decorator(trace_func, context_type, name):
+    @functools.wraps(trace_func)
+    def f_trace(*args, **kw):
+        kw = kw.copy()
+        trace_context.enable()
+        with trace_context.attachable(
+            context_type._context_impl(args[0], trace_context.get().context), kw.pop("close", False)
+        ) as ctx:
+            ret = trace_func(*args, **kw)
+            trace_context.close(ctx)
+        return ret
+
+    f_trace.__name__ = "%s" % name
+    f_trace.__qualname__ = "%s" % name
+    if hasattr(trace_func, "__module__"):
+        f_trace.__module__ = trace_func.__module__
+    return f_trace
+
+def _find_impl_and_version(modulename, classname, name, kind):
+    from .trace import trace_context
+    root_dir = modulename.split(".")[0]
+    version = trace_context.get().version
+    if version is not None:
+        impl = importlib.import_module("._py-%s" % version, root_dir)
+    else:
+        impl = importlib.import_module("._py", root_dir)
+    while True:
+        assert classname in impl.__dict__, (modulename, classname, name, kind)
+        classobj = getattr(impl, classname)
+        assert name in classobj.__dict__, (modulename, classname, name, kind)
+        func = getattr(classobj, name)
+        if func.__closure__ is None:
+            return func, version
+        for i, cell in enumerate(func.__closure__):
+            if cell.cell_contents is trace_context:
+                return func, version
+        impl = importlib.import_module("._py-%d" % (i + 1), root_dir)
+[/PYTHON]
+What will be the input of `ensure_has_subdir_with_prefix`, given the following output:
+[OUTPUT]
+```
+{
+    "value": "world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "path": XXX,
+    "prefix": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. The output "world0" suggests that a subdirectory named world0 was created or already exists under the specified path.
+2. The function ensure_has_subdir_with_prefix ensures that the directory at the given path contains a subdirectory starting with the given prefix. If it doesn't exist, it will create it.
+3. To achieve this, the path should be "/tmp/pytest/pytest-of-root/pytest-0/test_create_session_id0/somedir" and prefix should be "world".
+</think>
+
+[INPUT]
+```
+{
+    "path": "/tmp/pytest/pytest-of-root/pytest-0/test_create_session_id0/somedir",
+    "prefix": "world"
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import pathlib
+from contextlib import contextmanager
+import os
+
+def _symlink_or_copytree(src, dst, *, is_dir, verbose, custom_symlink):
+    """
+    Symlink or copy a directory tree.
+
+    If src is a file, it's hardlinked to dst
+    (except on windows when on a different partition).
+
+    If src is a directory, copies are always recursive.
+
+    Returns
+    -------
+    output: string
+        Path to symlinked/copied file/directory.
+    """
+    src = os.path.normpath(os.path.abspath(src))
+    dst = os.path.normpath(os.path.abspath(dst))
+    if custom_symlink:
+        if verbose >= 1:
+            print(f"Symlinking {src} -> {dst}")
+        dst = custom_symlink(src, dst, is_dir=is_dir, verbose=verbose)
+    elif is_dir:
+        if verbose >= 1:
+            print(f"Copying tree {src} -> {dst}")
+        dst = _copytree(src, dst, dir_fd=None, verbose=verbose)
+    elif os.path.exists(dst):
+        # even if we are on windows we copy to avoid permissions problems
+        if verbose >= 1:
+            print(f"Copying {src} -> {dst}")
+        copyfile(src, dst)
+    elif os.name == 'nt':
+        if verbose >= 1:
+            print(f"Hard linking {src} -> {dst}")
+        _copyfile(src, dst, follow_symlinks=False)
+    else:
+        if verbose >= 1:
+            print(f"Hard linking {src} -> {dst}")
+        os.link(src, dst)
+    return dst
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def _ensure_to_directory(*, is_dir, verbose):
+    @contextmanager
+    def _ensure_to_directory(path, verbose=verbose):
+        if is_dir:
+            # ensure the destination is an empty directory
+            if os.path.exists(path) and not os.path.isdir(path):
+                raise RuntimeError(f"cannot create a directory at {path} because a file is in the way")
+            if os.path.isdir(path):
+                # only empty directories can be removed
+                if os.listdir(path):
+                    raise RuntimeError(f"destination directory {path} is not empty")
+                # destination is an empty directory: remove it
+                os.rmdir(path)
+            os.makedirs(path, exist_ok=True)
+            if verbose >= 1:
+                print(f"Creating dir: {path!r}")
+        else:
+            # ensure that the destination directory exists
+            parent_dir = os.path.dirname(os.path.abspath(path))
+            os.makedirs(parent_dir, exist_ok=True)
+        yield path
+
+    return _ensure_to_directory
+[/PYTHON]
+What will be the input of `_ensure_to_directory`, given the following output:
+[OUTPUT]
+```
+{
+    "output": null
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "is_dir": XXX,
+    "verbose": XXX,
+    "path": XXX,
+    "make_parent": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+
+ Always use the tags [INPUT] and [/INPUT] to enclose the predicted input in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+</think>
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from .repo import Repo
+from .convert import load
+
+def _getdir(git_dir):
+    if not os.path.exists(git_dir):
+        raise ValueError("Git repository {} does not exist".format(git_dir))
+    path = load(os.path.join(git_dir, "path"), "UTF-8")
+    if path is not None and os.path.exists(path):
+        git_dir = path
+    return os.path.dirname(os.path.abspath(git_dir))
+
+def discover_git(git_dir, config, _from_process=True):
+    src = Repo(git_dir, config=config, parent=None, search_parent_directories=False)
+    if not _from_process and src.abbreviated_commit_id:
+        working_dir = os.path.dirname(git_dir)
+        cwd, stored_cwd = os.getcwd(), None
+        if os.path.basename(cwd) == ".git" and os.path.isdir(
+            os.path.join(cwd, "objects")
+        ):
+            stored_cwd = cwd
+            cwd = os.path.dirname(cwd)
+        try:
+            os.chdir(cwd)
+            src = Repo(cwd, config=config, parent=None, search_parent_directories=False)
+            if stored_cwd is not None:
+                os.chdir(stored_cwd)
+        finally:
+            if stored_cwd is None:
+                os.chdir(cwd)
+    return src
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def _find_git(git_dir, search_parent_directories=True):
+    if git_dir is None:
+        if search_parent_directories:
+            current_directory = os.path.abspath(".")
+        else:
+            current_directory = os.path.abspath("..")
+    else:
+        git_dir = os.path.abspath(git_dir)
+        current_directory = os.path.dirname(git_dir)
+        if _has_symlinks(current_directory) and not _is_valid_directory(current_directory):
+            current_directory = os.path.realpath(current_directory)
+    if _is_git_dir(current_directory):
+        return current_directory
+    for _ in range(5):
+        if _has_symlinks(current_directory):
+            current_directory = os.path.realpath(current_directory)
+        root_directory = os.path.dirname(current_directory)
+        if current_directory == root_directory:
+            break
+        current_directory = root_directory
+    return None
+
+
+def _get_prefix():
+    prefix = os.path.expanduser("~/.git")
+    if _is_valid_directory(prefix):
+        return prefix
+    prefix = os.environ.get("GIT_PREFIX")
+    if prefix is not None and _is_valid_directory(prefix):
+        return prefix
+    if os.name == "nt":
+        prefixes = [
+            os.path.expanduser("~/.git"),
+            os.path.expanduser("~/AppData/Local/Git"),
+        ]
+    else:
+        prefixes = [os.path.expanduser("~/.git")]
+    for prefix in prefixes:
+        if _is_valid_directory(prefix):
+            return prefix
+    return os.path.expanduser("~/.git")
+
+
+def _get_user():
+    return os.environ.get("USER", os.environ.get("USERNAME"))
+
+
+def _hash(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _has_symlinks(path):
+    while path != os.path.dirname(path):
+        if os.path.islink(path):
+            return True
+        path = os.path.dirname(path)
+    return False
+
+
+def _is_git_dir(path):
+    if not os.path.isdir(path):
+        return False
+    return os.path.exists(os.path.join(path, "HEAD"))
+
+
+def _is_valid_directory(path):
+    try:
+        if os.path.exists(path) and os.path.isdir(path):
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def _list(dir):
+    return [f for f in os.listdir(dir) if not f.startswith(".")]
+
+[/PYTHON]
+What will be the input of `discover_git`, given the following output:
+[OUTPUT]
+```
+{
+    "git_dir": "/Users/Arto/notmuch/notmuch/archive/box",
+    "config": {}
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "git_dir": XXX,
+    "config": XXX,
+    "_from_process": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+
+ Always use the tags [INPUT] and [/INPUT] to enclose the predicted input in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing

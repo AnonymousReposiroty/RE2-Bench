@@ -1,0 +1,98 @@
+[THOUGHT]
+We trace world_to_pixel_values with the given self:
+
+- _wcs.pixel_n_dim = 3, _slices_pixel = [10, slice(None), slice(None)], _pixel_keep has length 2, _world_keep = [0,1], and the method is called with two world arrays (50.0, 50.0).
+
+First, _pixel_to_world_values_all is called with two zeros (one per element of _pixel_keep).
+Inside _pixel_to_world_values_all:
+- Loop ipix in range(3):
+  ipix=0: _slices_pixel[0] is an integer (10) → isinstance(..., Integral) is True. (branch at line 20: Y)
+  ipix=1: _slices_pixel[1] is slice(None) → not Integral → go to else; ipix_curr increments to 0. slice.start is None, so (branch at line 24) is False. (branch at line 20 for this iteration: N; line 24: N)
+  ipix=2: similarly slice(None) → not Integral (branch at line 20: N); in else ipix_curr becomes 1 and start is None → (branch at line 24: N)
+Thus line 20 encounters ['Y','N','N'] and line 24 encounters ['N','N'].
+
+_pixel_to_world_values_all then calls self._wcs.pixel_to_world_values(...) and returns some iterable of length world_n_dim (3), assigned to sliced_out_world_coords.
+
+Back in world_to_pixel_values:
+- Loop iworld in range(self._wcs.world_n_dim) i.e. 0,1,2 and _world_keep = [0,1]:
+  iworld=0: 0 in _world_keep → branch at line 38 True (Y)
+  iworld=1: 1 in _world_keep → True (Y)
+  iworld=2: 2 not in _world_keep → False (N)
+So line 38: ['Y','Y','N'].
+
+world_arrays_new broadcasted, call self._wcs.world_to_pixel_values(...) → pixel_arrays is a list (length 3).
+
+Loop ipixel in range(self._wcs.pixel_n_dim) (0,1,2):
+- Check isinstance(self._slices_pixel[ipixel], slice) and start is not None:
+  ipixel=0: _slices_pixel[0] is int → False
+  ipixel=1: slice(None) but start is None → False
+  ipixel=2: same → False
+So line 48 encountered 3 times: ['N','N','N'].
+
+Then check if isinstance(pixel_arrays, np.ndarray) and not pixel_arrays.shape:
+- pixel_arrays is a list (not np.ndarray) → condition False. So line 51: ['N'].
+
+Finally check if self.pixel_n_dim == 1 and self._wcs.pixel_n_dim > 1:
+- self.pixel_n_dim = len(self._pixel_keep) = 2 → left condition False → overall False. So line 54: ['N'].
+
+All branches annotated in the order they are executed.
+[/THOUGHT]
+
+[ANSWER]
+1 import numbers
+2 from collections import defaultdict
+3 import numpy as np
+4 from astropy.utils import isiterable
+5 from astropy.utils.decorators import lazyproperty
+6 from ..low_level_api import BaseLowLevelWCS
+7 from .base import BaseWCSWrapper
+8 
+9 __all__ = ['sanitize_slices', 'SlicedLowLevelWCS']
+10 
+11 class SlicedLowLevelWCS(BaseWCSWrapper):
+12     @property
+13     def pixel_n_dim(self):
+14         return len(self._pixel_keep)
+15     def _pixel_to_world_values_all(self, *pixel_arrays):
+16         pixel_arrays = tuple(map(np.asanyarray, pixel_arrays))
+17         pixel_arrays_new = []
+18         ipix_curr = -1
+19         for ipix in range(self._wcs.pixel_n_dim):
+20             if isinstance(self._slices_pixel[ipix], numbers.Integral): ## [BRANCH]taken=['Y', 'N', 'N'][/BRANCH]
+21                 pixel_arrays_new.append(self._slices_pixel[ipix])
+22             else:
+23                 ipix_curr += 1
+24                 if self._slices_pixel[ipix].start is not None: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+25                     pixel_arrays_new.append(pixel_arrays[ipix_curr] + self._slices_pixel[ipix].start)
+26                 else:
+27                     pixel_arrays_new.append(pixel_arrays[ipix_curr])
+28 
+29         pixel_arrays_new = np.broadcast_arrays(*pixel_arrays_new)
+30         return self._wcs.pixel_to_world_values(*pixel_arrays_new)
+31     def world_to_pixel_values(self, *world_arrays):
+32         sliced_out_world_coords = self._pixel_to_world_values_all(*[0]*len(self._pixel_keep))
+33 
+34         world_arrays = tuple(map(np.asanyarray, world_arrays))
+35         world_arrays_new = []
+36         iworld_curr = -1
+37         for iworld in range(self._wcs.world_n_dim):
+38             if iworld in self._world_keep: ## [BRANCH]taken=['Y', 'Y', 'N'][/BRANCH]
+39                 iworld_curr += 1
+40                 world_arrays_new.append(world_arrays[iworld_curr])
+41             else:
+42                 world_arrays_new.append(sliced_out_world_coords[iworld])
+43 
+44         world_arrays_new = np.broadcast_arrays(*world_arrays_new)
+45         pixel_arrays = list(self._wcs.world_to_pixel_values(*world_arrays_new))
+46 
+47         for ipixel in range(self._wcs.pixel_n_dim):
+48             if isinstance(self._slices_pixel[ipixel], slice) and self._slices_pixel[ipixel].start is not None: ## [BRANCH]taken=['N', 'N', 'N'][/BRANCH]
+49                 pixel_arrays[ipixel] -= self._slices_pixel[ipixel].start
+50 
+51         if isinstance(pixel_arrays, np.ndarray) and not pixel_arrays.shape: ## [BRANCH]taken=['N'][/BRANCH]
+52             return pixel_arrays
+53         pixel = tuple(pixel_arrays[ip] for ip in self._pixel_keep)
+54         if self.pixel_n_dim == 1 and self._wcs.pixel_n_dim > 1: ## [BRANCH]taken=['N'][/BRANCH]
+55             pixel = pixel[0]
+56         return pixel
+[/ANSWER]

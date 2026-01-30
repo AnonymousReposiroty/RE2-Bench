@@ -1,0 +1,524 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+</think>
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from .datastructures import FrozenDict, AliasKey
+from . import environment
+from .env import fix_nodeid
+
+def make_init(*args, **kwargs):
+    from _pytest.python import PyCollector
+    return PyCollector.from_parent(parent=None, name="collect_init_tests")
+
+class CollectReport:
+
+    def __init__(self):
+        self.nodeidsadded = set()
+        self.collector = None
+        self.parents = []
+
+    def consider_collector(self, collector):
+        if self.collector is None:
+            self.collector = collector
+            self.parents.append(collector.obj)
+            return True
+        return False
+
+    def get_collector(self):
+        return self.collector
+
+    def genid(self, nodeid):
+        if nodeid not in self.nodeidsadded:
+            self.nodeidsadded.add(nodeid)
+        else:
+            return None
+        return nodeid
+
+    def genparentid(self, nodeid):
+        # turn pytest.Init object into a nodeid to mark as parent
+        # of sub tests and fixtures
+        for parent in reversed(self.parents):
+            if isinstance(parent, type):
+                parent = parent.__name__
+            else:
+                parent = getattr(parent, "__name__", parent.__class__.__name__)
+            try:
+                nodeid = "{0}::{1}".format(parent, nodeid)
+            except UnicodeDecodeError:
+                nodeid = "{0}::{1}".format(parent, nodeid)
+            if self.genid(nodeid):
+                return nodeid
+        return None
+
+    def consider_module(self, mod):
+        if self.consider_collector(mod):
+            nodeid = mod.nodeid
+            self.genparentid(nodeid)
+
+    def consider_function(self, funcobj):
+        if self.consider_collector(funcobj):
+            nodeid = funcobj.nodeid
+            self.genparentid(nodeid)
+
+    def finish(self):
+        if self.collector is None:
+            return
+        for parent in reversed(self.parents):
+            nodeid = parent.nodeid
+            self.genid(nodeid)
+
+class NotSet:
+
+    def __eq__(self, other):
+        return False
+
+    def __repr__(self):
+        return "<NotSet>"
+
+
+class Node:
+
+    def __init__(self, name, parent, config, session, nodeid, fspath=None, **kw):
+        self.config = config
+        self.session = session
+        self._nodeid = nodeid
+        self.fspath = fspath
+        self.parent = parent
+        self.name = name
+        self.keywords = self.keywords.copy()
+        self.keywords.update(kw)
+        self.funcargs = {}
+        self._report_sections = []
+        self.reportinfo = []
+        self._report_sections.append("_stats" if parent is None else "_report")
+        self.extrakeywords = None
+        self.own_markers = []
+        self._initreport_collect()
+        self.fspath = fspath
+        self._warn = self.session.config._issue_warning_callable
+        self.trace = {}
+        self.user_properties = []
+        self.nodeid = self._nodeid
+
+    def _get_name(self):
+        """ Inherit the name from the node if it's not overridden. """
+        if "name" in self.keywords:
+            return self.keywords["name"]
+        name = self.name
+        try:
+            name = self.fspath.basename
+        except AttributeError:
+            pass
+        return name
+
+    name = property(_get_name)
+
+    def _initreport_collect(self):
+        self.collect_report = CollectReport()
+
+    def reportinfo(self):
+        sections = [getattr(self, name) for name in self._report_sections]
+        return self.section_sections(sections, "report", singleline=True)
+
+    def section_sections(self, sections, prefix, singleline=False, **args):
+        """ Sections we report as a log, e.g. in XML.  """
+        return [self.section(key, value, keyisattr=True, singleline=singleline) for key, value in sections]
+
+    def section(self, key, value, keyisattr=False, singleline=False):
+        if value and not isinstance(value, str):
+            value = list(value)
+        if not singleline and value and isinstance(value[0], str) and value[0].startswith("\n"):
+            value = value[1:]
+        if keyisattr:
+            return (key[1:], value)
+        else:
+            return (key, value)
+
+    def __repr__(self):
+        return "<%s %r>" % (self.__class__.__name__, self.name)
+
+    def add_report_section(self, when, key, content):
+        assert when in ("setup", "call", "teardown")
+        if key.startswith("run"):
+            raise ValueError("The prefix 'run' is reserved to pytest")
+        self.reportinfo.append((when, key, content))
+
+    def addfinalizer(self, finalizer):
+        if self.finalizers is None:
+            self.finalizers = [finalizer]
+        else:
+            self.finalizers.append(finalizer)
+
+    def delattr(self, key, default=NotSet()):
+        try:
+            del self.keywords[key]
+        except KeyError:
+            if default is not NotSet():
+                return default
+            raise AttributeError("Attribute %r not found" % key)
+
+    def getattr(self, key, default=NotSet()):
+        try:
+            return self.keywords[key]
+        except KeyError:
+            if default is not NotSet():
+                return default
+            raise AttributeError("Attribute %r not found" % key)
+
+    def setattr(self, key, value):
+        self.keywords[key] = value
+
+    def get_closest_marker(self, name, default=NotSet()):
+        marker = self.get_marker(name)
+        if marker is not None:
+            return marker
+        if default is not NotSet():
+            return default
+        if self.parent is not None:
+            return self.parent.get_closest_marker(name, default=default)
+        return None
+
+    def get_marker(self, name):
+        """ Return the marker object or None if not found.  """
+        for mark in self.iter_markers(name):
+            return mark
+
+    def iter_markers(self, name=None):
+        """ Yield all markers of the node and its parents.  """
+        if name is None:
+            for mark in self.iter_markers_with_node():
+                yield mark
+        else:
+            for mark in self.iter_markers_with_node():
+                if mark.name == name:
+                    yield mark
+
+    def iter_markers_with_node(self):
+        """ Yield all markers with their associated nodes.  """
+        extra_markers = {}
+        if self.extrakeywords is not None:
+            markers = self.keywords.get("pytestmark", []) + list(self.extrakeywords.get("pytestmark", []))
+        else:
+            markers = self.keywords.get("pytestmark", [])
+        if self.own_markers:
+            markers.extend(self.own_markers)
+        for mark in markers:
+            yield (mark, self)
+
+    def listchain(self):
+        node = self
+        while node is not None:
+            yield node
+            node = node.parent
+
+    def listextrakeywords(self, collect=True):
+        """ Returns a list of dictionaries of extra keywords, either from this
+        Node instance, or from cached attributes (when collect == True).  """
+        return [self.extrakeywords]
+
+    def listextrakeys(self):
+        return []
+
+    def listnames(self):
+        node = self
+        while node is not None:
+            yield node.name
+            node = node.parent
+
+    def addfinalizer(self, finalizer):
+        if self.finalizers is None:
+            self.finalizers = [finalizer]
+        else:
+            self.finalizers.append(finalizer)
+
+    def delattr(self, key, default=NotSet()):
+        try:
+            del self.keywords[key]
+        except KeyError:
+            if default is not NotSet():
+                return default
+            raise AttributeError("Attribute %r not found" % key)
+
+    def getattr(self, key, default=NotSet()):
+        try:
+            return self.keywords[key]
+        except KeyError:
+            if default is not NotSet():
+                return default
+            raise AttributeError("Attribute %r not found" % key)
+
+    def setfuncargvalue(self, name, value):
+        """ Set an indirect func-arg's value. """
+        self.funcargs[name] = value
+
+    def getfuncargvalue(self, name):
+        """ Return the value of an indirect func-arg. """
+        return self.funcargs[name]
+
+    def add_marker(self, marker):
+        """ Add a marker to this node. """
+        self.own_markers.append(marker)
+
+    def get_marker(self, name):
+        """ Return the marker object or None if not found. """
+        for mark in self.iter_markers(name):
+            return mark
+
+    def get_closest_marker(self, name, default=NotSet()):
+        """ Return the marker object or default if not found. """
+        marker = self.get_marker(name)
+        if marker is not None:
+            return marker
+        if default is not NotSet():
+            return default
+        if self.parent is not None:
+            return self.parent.get_closest_marker(name, default=default)
+        return None
+
+    def iter_markers(self, name=None):
+        """ Yield all markers of the node and its parents. """
+        if name is None:
+            for mark in self.iter_markers_with_node():
+                yield mark
+        else:
+            for mark in self.iter_markers_with_node():
+                if mark.name == name:
+                    yield mark
+
+    def iter_markers_with_node(self):
+        """ Yield all markers with their associated nodes. """
+        extra_markers = {}
+        if self.extrakeywords is not None:
+            markers = self.keywords.get("pytestmark", []) + list(self.extrakeywords.get("pytestmark", []))
+        else:
+            markers = self.keywords.get("pytestmark", [])
+        if self.own_markers:
+            markers.extend(self.own_markers)
+        for mark in markers:
+            yield (mark, self)
+
+    def gethookproxy(self, fspath):
+        """ Return a hookproxy for the hookimpls in this Node.  """
+        return self.hook.gethookproxy(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node.  """
+        return self.hook.gethookrec(fspath)
+
+    def gethookrec(self, fspath):
+        """ Return a hookrec for the hookimpls in this Node

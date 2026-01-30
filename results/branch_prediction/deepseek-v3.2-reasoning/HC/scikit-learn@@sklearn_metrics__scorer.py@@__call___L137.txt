@@ -1,0 +1,72 @@
+[THOUGHT]
+We need to trace the execution of the __call__ method for the given input.
+
+First, compute _use_cache(estimator). Since self._scorers has only one scorer ("score": "EmpiricalCovariance.score"), len(self._scorers) == 1 is true, so the branch on line 51 is taken: ['Y']. _use_cache returns False, so cache is set to None in line 25.
+
+Next, in __call__, check _routing_enabled(). Since no metadata is passed in kwargs (kwargs is empty), and _routing_enabled() likely returns False in this context, the branch on line 27 is not taken: ['N']. Therefore, execution goes to the else branch on line 30, which is taken: ['Y'].
+
+In the else branch, common_kwargs is initialized as an empty dictionary since kwargs is empty. Then, routed_params is created with empty score dictionaries for each scorer. The check for 'sample_weight' in kwargs on line 32 is false because kwargs is empty, so this branch is not taken: ['N'].
+
+Now, enter the loop over self._scorers.items(). There is only one scorer: name="score", scorer="EmpiricalCovariance.score". Check if isinstance(scorer, _BaseScorer). Since "EmpiricalCovariance.score" is likely a method and not an instance of _BaseScorer (which is a specific class in sklearn), this branch is not taken: ['N']. Therefore, execute line 41 to compute the score.
+
+No other branches are encountered.
+[/THOUGHT]
+
+[ANSWER]
+1 from collections import Counter
+2 from functools import partial
+3 from traceback import format_exc
+4 from sklearn.utils import Bunch
+5 from sklearn.utils.metadata_routing import (
+6     MetadataRequest,
+7     MetadataRouter,
+8     MethodMapping,
+9     _MetadataRequester,
+10    _raise_for_params,
+11    _routing_enabled,
+12    get_routing_for_object,
+13    process_routing,
+14 )
+15 from sklearn.utils.validation import _check_response_method
+16 
+17 class _MultimetricScorer:
+18 
+19     def __init__(self, *, scorers, raise_exc=True):
+20         self._scorers = scorers
+21         self._raise_exc = raise_exc
+22 
+23     def __call__(self, estimator, *args, **kwargs):
+24         scores = {}
+25         cache = {} if self._use_cache(estimator) else None
+26         cached_call = partial(_cached_call, cache)
+27         if _routing_enabled(): ## [BRANCH]taken=[N][/BRANCH]
+28             routed_params = process_routing(self, 'score', **kwargs)
+29         else: ## [BRANCH]taken=[Y][/BRANCH]
+30             common_kwargs = {arg: value for arg, value in kwargs.items() if arg != 'sample_weight'}
+31             routed_params = Bunch(**{name: Bunch(score=common_kwargs.copy()) for name in self._scorers})
+32             if 'sample_weight' in kwargs: ## [BRANCH]taken=[N][/BRANCH]
+33                 for name, scorer in self._scorers.items():
+34                     if scorer._accept_sample_weight():
+35                         routed_params[name].score['sample_weight'] = kwargs['sample_weight']
+36         for name, scorer in self._scorers.items():
+37             try:
+38                 if isinstance(scorer, _BaseScorer): ## [BRANCH]taken=[N][/BRANCH]
+39                     score = scorer._score(cached_call, estimator, *args, **routed_params.get(name).score)
+40                 else:
+41                     score = scorer(estimator, *args, **routed_params.get(name).score)
+42                 scores[name] = score
+43             except Exception as e:
+44                 if self._raise_exc:
+45                     raise e
+46                 else:
+47                     scores[name] = format_exc()
+48         return scores
+49 
+50     def _use_cache(self, estimator):
+51         if len(self._scorers) == 1: ## [BRANCH]taken=[Y][/BRANCH]
+52             return False
+53         counter = Counter([_check_response_method(estimator, scorer._response_method).__name__ for scorer in self._scorers.values() if isinstance(scorer, _BaseScorer)])
+54         if any((val > 1 for val in counter.values())):
+55             return True
+56         return False
+57

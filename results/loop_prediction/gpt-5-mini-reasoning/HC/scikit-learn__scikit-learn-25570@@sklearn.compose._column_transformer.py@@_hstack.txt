@@ -1,0 +1,503 @@
+[THOUGHT]
+Input Xs is [0]. The list comprehension iterates over the original Xs once:
+- Iteration 1: f = 0. sparse.issparse(0) is False, so expression yields 0.
+The new Xs produced by the comprehension is [0]. During the single iteration, the iterated Xs (the original sequence) is [0].
+[/THOUGHT]
+
+[ANSWER]
+1 from numbers import Integral, Real
+2 from itertools import chain
+3 from collections import Counter
+4 import numpy as np
+5 from scipy import sparse
+6 from ..base import clone, TransformerMixin
+7 from ..utils._estimator_html_repr import _VisualBlock
+8 from ..pipeline import _fit_transform_one, _transform_one, _name_estimators
+9 from ..preprocessing import FunctionTransformer
+10 from ..utils import Bunch
+11 from ..utils import _safe_indexing
+12 from ..utils import _get_column_indices
+13 from ..utils._param_validation import HasMethods, Interval, StrOptions, Hidden
+14 from ..utils._set_output import _get_output_config, _safe_set_output
+15 from ..utils import check_pandas_support
+16 from ..utils.metaestimators import _BaseComposition
+17 from ..utils.validation import check_array, check_is_fitted, _check_feature_names_in
+18 from ..utils.parallel import delayed, Parallel
+19 
+20 __all__ = ["ColumnTransformer", "make_column_transformer", "make_column_selector"]
+21 _ERR_MSG_1DCOLUMN = (
+22     "1D data passed to a transformer that expects 2D data. "
+23     "Try to specify the column selection as a list of one "
+24     "item instead of a scalar."
+25 )
+26 
+27 class ColumnTransformer(TransformerMixin, _BaseComposition):
+28 
+29     _required_parameters = ["transformers"]
+30 
+31     _parameter_constraints: dict = {
+32         "transformers": [list, Hidden(tuple)],
+33         "remainder": [
+34             StrOptions({"drop", "passthrough"}),
+35             HasMethods(["fit", "transform"]),
+36             HasMethods(["fit_transform", "transform"]),
+37         ],
+38         "sparse_threshold": [Interval(Real, 0, 1, closed="both")],
+39         "n_jobs": [Integral, None],
+40         "transformer_weights": [dict, None],
+41         "verbose": ["verbose"],
+42         "verbose_feature_names_out": ["boolean"],
+43     }
+44 
+45     def __init__(
+46         self,
+47         transformers,
+48         *,
+49         remainder="drop",
+50         sparse_threshold=0.3,
+51         n_jobs=None,
+52         transformer_weights=None,
+53         verbose=False,
+54         verbose_feature_names_out=True,
+55     ):
+56         self.transformers = transformers
+57         self.remainder = remainder
+58         self.sparse_threshold = sparse_threshold
+59         self.n_jobs = n_jobs
+60         self.transformer_weights = transformer_weights
+61         self.verbose = verbose
+62         self.verbose_feature_names_out = verbose_feature_names_out
+63 
+64     @property
+65     def _transformers(self):
+66         try:
+67             return [(name, trans) for name, trans, _ in self.transformers]
+68         except (TypeError, ValueError):
+69             return self.transformers
+70 
+71     @_transformers.setter
+72     def _transformers(self, value):
+73         try:
+74             self.transformers = [
+75                 (name, trans, col)
+76                 for ((name, trans), (_, _, col)) in zip(value, self.transformers)
+77             ]
+78         except (TypeError, ValueError):
+79             self.transformers = value
+80 
+81     def set_output(self, *, transform=None):
+82         super().set_output(transform=transform)
+83         transformers = (
+84             trans
+85             for _, trans, _ in chain(
+86                 self.transformers, getattr(self, "transformers_", [])
+87             )
+88             if trans not in {"passthrough", "drop"}
+89         )
+90         for trans in transformers:
+91             _safe_set_output(trans, transform=transform)
+92 
+93         return self
+94 
+95     def get_params(self, deep=True):
+96         return self._get_params("_transformers", deep=deep)
+97 
+98     def set_params(self, **kwargs):
+99         self._set_params("_transformers", **kwargs)
+100         return self
+101 
+102     def _iter(self, fitted=False, replace_strings=False, column_as_strings=False):
+103         if fitted:
+104             if replace_strings:
+105 
+106                 def replace_passthrough(name, trans, columns):
+107                     if name not in self._name_to_fitted_passthrough:
+108                         return name, trans, columns
+109                     return name, self._name_to_fitted_passthrough[name], columns
+110 
+111                 transformers = [
+112                     replace_passthrough(*trans) for trans in self.transformers_
+113                 ]
+114             else:
+115                 transformers = self.transformers_
+116         else:
+117 
+118             transformers = [
+119                 (name, trans, column)
+120                 for (name, trans, _), column in zip(self.transformers, self._columns)
+121             ]
+122 
+123             if self._remainder[2]:
+124                 transformers = chain(transformers, [self._remainder])
+125         get_weight = (self.transformer_weights or {}).get
+126 
+127         output_config = _get_output_config("transform", self)
+128         for name, trans, columns in transformers:
+129             if replace_strings:
+130 
+131                 if trans == "passthrough":
+132                     trans = FunctionTransformer(
+133                         accept_sparse=True,
+134                         check_inverse=False,
+135                         feature_names_out="one-to-one",
+136                     ).set_output(transform=output_config["dense"])
+137                 elif trans == "drop":
+138                     continue
+139                 elif _is_empty_column_selection(columns):
+140                     continue
+141 
+142             if column_as_strings:
+143 
+144                 columns_is_scalar = np.isscalar(columns)
+145 
+146                 indices = self._transformer_to_input_indices[name]
+147                 columns = self.feature_names_in_[indices]
+148 
+149                 if columns_is_scalar:
+150 
+151                     columns = columns[0]
+152 
+153             yield (name, trans, columns, get_weight(name))
+154 
+155     def _validate_transformers(self):
+156         if not self.transformers:
+157             return
+158 
+159         names, transformers, _ = zip(*self.transformers)
+160 
+161         self._validate_names(names)
+162 
+163         for t in transformers:
+164             if t in ("drop", "passthrough"):
+165                 continue
+166             if not (hasattr(t, "fit") or hasattr(t, "fit_transform")) or not hasattr(
+167                 t, "transform"
+168             ):
+169 
+170                 raise TypeError(
+171                     "All estimators should implement fit and "
+172                     "transform, or can be 'drop' or 'passthrough' "
+173                     "specifiers. '%s' (type %s) doesn't." % (t, type(t))
+174                 )
+175 
+176     def _validate_column_callables(self, X):
+177         all_columns = []
+178         transformer_to_input_indices = {}
+179         for name, _, columns in self.transformers:
+180             if callable(columns):
+181                 columns = columns(X)
+182             all_columns.append(columns)
+183             transformer_to_input_indices[name] = _get_column_indices(X, columns)
+184 
+185         self._columns = all_columns
+186         self._transformer_to_input_indices = transformer_to_input_indices
+187 
+188     def _validate_remainder(self, X):
+189         self._n_features = X.shape[1]
+190         cols = set(chain(*self._transformer_to_input_indices.values()))
+191         remaining = sorted(set(range(self._n_features)) - cols)
+192         self._remainder = ("remainder", self.remainder, remaining)
+193         self._transformer_to_input_indices["remainder"] = remaining
+194 
+195     @property
+196     def named_transformers_(self):
+197 
+198         return Bunch(**{name: trans for name, trans, _ in self.transformers_})
+199 
+200     def _get_feature_name_out_for_transformer(
+201         self, name, trans, column, feature_names_in
+202     ):
+203         column_indices = self._transformer_to_input_indices[name]
+204         names = feature_names_in[column_indices]
+205         if trans == "drop" or _is_empty_column_selection(column):
+206             return
+207         elif trans == "passthrough":
+208             return names
+209 
+210         if not hasattr(trans, "get_feature_names_out"):
+211             raise AttributeError(
+212                 f"Transformer {name} (type {type(trans).__name__}) does "
+213                 "not provide get_feature_names_out."
+214             )
+215         return trans.get_feature_names_out(names)
+216 
+217     def get_feature_names_out(self, input_features=None):
+218         check_is_fitted(self)
+219         input_features = _check_feature_names_in(self, input_features)
+220 
+221         transformer_with_feature_names_out = []
+222         for name, trans, column, _ in self._iter(fitted=True):
+223             feature_names_out = self._get_feature_name_out_for_transformer(
+224                 name, trans, column, input_features
+225             )
+226             if feature_names_out is None:
+227                 continue
+228             transformer_with_feature_names_out.append((name, feature_names_out))
+229 
+230         if not transformer_with_feature_names_out:
+231 
+232             return np.array([], dtype=object)
+233 
+234         return self._add_prefix_for_feature_names_out(
+235             transformer_with_feature_names_out
+236         )
+237 
+238     def _add_prefix_for_feature_names_out(self, transformer_with_feature_names_out):
+239         if self.verbose_feature_names_out:
+240 
+241             names = list(
+242                 chain.from_iterable(
+243                     (f"{name}__{i}" for i in feature_names_out)
+244                     for name, feature_names_out in transformer_with_feature_names_out
+245                 )
+246             )
+247             return np.asarray(names, dtype=object)
+248 
+249         feature_names_count = Counter(
+250             chain.from_iterable(s for _, s in transformer_with_feature_names_out)
+251         )
+252         top_6_overlap = [
+253             name for name, count in feature_names_count.most_common(6) if count > 1
+254         ]
+255         top_6_overlap.sort()
+256         if top_6_overlap:
+257             if len(top_6_overlap) == 6:
+258 
+259                 names_repr = str(top_6_overlap[:5])[:-1] + ", ...]"
+260             else:
+261                 names_repr = str(top_6_overlap)
+262             raise ValueError(
+263                 f"Output feature names: {names_repr} are not unique. Please set "
+264                 "verbose_feature_names_out=True to add prefixes to feature names"
+265             )
+266 
+267         return np.concatenate(
+268             [name for _, name in transformer_with_feature_names_out],
+269         )
+270 
+271     def _update_fitted_transformers(self, transformers):
+272 
+273         fitted_transformers = iter(transformers)
+274         transformers_ = []
+275         self._name_to_fitted_passthrough = {}
+276 
+277         for name, old, column, _ in self._iter():
+278             if old == "drop":
+279                 trans = "drop"
+280             elif old == "passthrough":
+281 
+282                 func_transformer = next(fitted_transformers)
+283                 trans = "passthrough"
+284 
+285                 self._name_to_fitted_passthrough[name] = func_transformer
+286             elif _is_empty_column_selection(column):
+287                 trans = old
+288             else:
+289                 trans = next(fitted_transformers)
+290             transformers_.append((name, trans, column))
+291 
+292         assert not list(fitted_transformers)
+293         self.transformers_ = transformers_
+294 
+295     def _validate_output(self, result):
+296         names = [
+297             name for name, _, _, _ in self._iter(fitted=True, replace_strings=True)
+298         ]
+299         for Xs, name in zip(result, names):
+300             if not getattr(Xs, "ndim", 0) == 2:
+301                 raise ValueError(
+302                     "The output of the '{0}' transformer should be 2D (scipy "
+303                     "matrix, array, or pandas DataFrame).".format(name)
+304                 )
+305 
+306     def _record_output_indices(self, Xs):
+307         idx = 0
+308         self.output_indices_ = {}
+309 
+310         for transformer_idx, (name, _, _, _) in enumerate(
+311             self._iter(fitted=True, replace_strings=True)
+312         ):
+313             n_columns = Xs[transformer_idx].shape[1]
+314             self.output_indices_[name] = slice(idx, idx + n_columns)
+315             idx += n_columns
+316 
+317         all_names = [t[0] for t in self.transformers] + ["remainder"]
+318         for name in all_names:
+319             if name not in self.output_indices_:
+320                 self.output_indices_[name] = slice(0, 0)
+321 
+322     def _log_message(self, name, idx, total):
+323         if not self.verbose:
+324             return None
+325         return "(%d of %d) Processing %s" % (idx, total, name)
+326 
+327     def _fit_transform(self, X, y, func, fitted=False, column_as_strings=False):
+328         transformers = list(
+329             self._iter(
+330                 fitted=fitted, replace_strings=True, column_as_strings=column_as_strings
+331             )
+332         )
+333         try:
+334             return Parallel(n_jobs=self.n_jobs)(
+335                 delayed(func)(
+336                     transformer=clone(trans) if not fitted else trans,
+337                     X=_safe_indexing(X, column, axis=1),
+338                     y=y,
+339                     weight=weight,
+340                     message_clsname="ColumnTransformer",
+341                     message=self._log_message(name, idx, len(transformers)),
+342                 )
+343                 for idx, (name, trans, column, weight) in enumerate(transformers, 1)
+344             )
+345         except ValueError as e:
+346             if "Expected 2D array, got 1D array instead" in str(e):
+347                 raise ValueError(_ERR_MSG_1DCOLUMN) from e
+348             else:
+349                 raise
+350 
+351     def fit(self, X, y=None):
+352         self._validate_params()
+353 
+354         self.fit_transform(X, y=y)
+355         return self
+356 
+357     def fit_transform(self, X, y=None):
+358         self._validate_params()
+359         self._check_feature_names(X, reset=True)
+360 
+361         X = _check_X(X)
+362 
+363         self._check_n_features(X, reset=True)
+364         self._validate_transformers()
+365         self._validate_column_callables(X)
+366         self._validate_remainder(X)
+367 
+368         result = self._fit_transform(X, y, _fit_transform_one)
+369 
+370         if not result:
+371             self._update_fitted_transformers([])
+372 
+373             return np.zeros((X.shape[0], 0))
+374 
+375         Xs, transformers = zip(*result)
+376 
+377         if any(sparse.issparse(X) for X in Xs):
+378             nnz = sum(X.nnz if sparse.issparse(X) else X.size for X in Xs)
+379             total = sum(
+380                 X.shape[0] * X.shape[1] if sparse.issparse(X) else X.size for X in Xs
+381             )
+382             density = nnz / total
+383             self.sparse_output_ = density < self.sparse_threshold
+384         else:
+385             self.sparse_output_ = False
+386 
+387         self._update_fitted_transformers(transformers)
+388         self._validate_output(Xs)
+389         self._record_output_indices(Xs)
+390 
+391         return self._hstack(list(Xs))
+392 
+393     def transform(self, X):
+394         check_is_fitted(self)
+395         X = _check_X(X)
+396 
+397         fit_dataframe_and_transform_dataframe = hasattr(
+398             self, "feature_names_in_"
+399         ) and hasattr(X, "columns")
+400 
+401         if fit_dataframe_and_transform_dataframe:
+402             named_transformers = self.named_transformers_
+403 
+404             non_dropped_indices = [
+405                 ind
+406                 for name, ind in self._transformer_to_input_indices.items()
+407                 if name in named_transformers
+408                 and isinstance(named_transformers[name], str)
+409                 and named_transformers[name] != "drop"
+410             ]
+411 
+412             all_indices = set(chain(*non_dropped_indices))
+413             all_names = set(self.feature_names_in_[ind] for ind in all_indices)
+414 
+415             diff = all_names - set(X.columns)
+416             if diff:
+417                 raise ValueError(f"columns are missing: {diff}")
+418         else:
+419 
+420             self._check_n_features(X, reset=False)
+421 
+422         Xs = self._fit_transform(
+423             X,
+424             None,
+425             _transform_one,
+426             fitted=True,
+427             column_as_strings=fit_dataframe_and_transform_dataframe,
+428         )
+429         self._validate_output(Xs)
+430 
+431         if not Xs:
+432 
+433             return np.zeros((X.shape[0], 0))
+434 
+435         return self._hstack(list(Xs))
+436 
+437     def _hstack(self, Xs):
+438         if self.sparse_output_:
+439             try:
+440 
+441                 converted_Xs = [
+442                     check_array(X, accept_sparse=True, force_all_finite=False)
+443                     for X in Xs
+444                 ]
+445             except ValueError as e:
+446                 raise ValueError(
+447                     "For a sparse output, all columns should "
+448                     "be a numeric or convertible to a numeric."
+449                 ) from e
+450 
+451             return sparse.hstack(converted_Xs).tocsr()
+452         else:
+453             Xs = [f.toarray() if sparse.issparse(f) else f for f in Xs]## [STATE]f=[0][/STATE] [STATE]Xs=[[0]][/STATE]
+454             config = _get_output_config("transform", self)
+455             if config["dense"] == "pandas" and all(hasattr(X, "iloc") for X in Xs):
+456                 pd = check_pandas_support("transform")
+457                 output = pd.concat(Xs, axis=1)
+458 
+459                 if not self.verbose_feature_names_out:
+460                     return output
+461 
+462                 transformer_names = [
+463                     t[0] for t in self._iter(fitted=True, replace_strings=True)
+464                 ]
+465 
+466                 feature_names_outs = [X.columns for X in Xs if X.shape[1] != 0]
+467                 names_out = self._add_prefix_for_feature_names_out(
+468                     list(zip(transformer_names, feature_names_outs))
+469                 )
+470                 output.columns = names_out
+471                 return output
+472 
+473             return np.hstack(Xs)
+474 
+475     def _sk_visual_block_(self):
+476         if isinstance(self.remainder, str) and self.remainder == "drop":
+477             transformers = self.transformers
+478         elif hasattr(self, "_remainder"):
+479             remainder_columns = self._remainder[2]
+480             if (
+481                 hasattr(self, "feature_names_in_")
+482                 and remainder_columns
+483                 and not all(isinstance(col, str) for col in remainder_columns)
+484             ):
+485                 remainder_columns = self.feature_names_in_[remainder_columns].tolist()
+486             transformers = chain(
+487                 self.transformers, [("remainder", self.remainder, remainder_columns)]
+488             )
+489         else:
+490             transformers = chain(self.transformers, [("remainder", self.remainder, "")])
+491 
+492         names, transformers, name_details = zip(*transformers)
+493         return _VisualBlock(
+494             "parallel", transformers, names=names, name_details=name_details
+495         )
+[/ANSWER]

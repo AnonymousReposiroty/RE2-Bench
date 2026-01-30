@@ -1,0 +1,73 @@
+Let's break this down step by step.
+
+**Step 1: Understand the output format**  
+The output is `"test_util_typing.\"<MyClass2>\""`.  
+It looks like `stringify` returns `modulename` + `'.'` + `qualname`, but `qualname` here is `"<MyClass2>"`, which seems unusual.
+
+**Step 2: Trace through the `stringify` function**  
+If `annotation` is a string, it returns the string directly (stripping outer quotes if starts/ends with `'`).  
+But our output is not a plain string; it contains quotes around `<MyClass2>` inside the result.
+
+**Step 3: Look at `_stringify_py37` logic**  
+It first checks `module = getattr(annotation, '__module__', None)`.  
+If `module == 'typing'`, it handles typing objects.  
+Otherwise, if `hasattr(annotation, '__qualname__')`, it returns `'%s.%s' % (module, annotation.__qualname__)`.  
+If no `__qualname__`, it tries `__origin__`.  
+If all fails, returns `repr(annotation)`.
+
+**Step 4: Match the output**  
+`test_util_typing.\"<MyClass2>\"` means `module = 'test_util_typing'`, `qualname = '"<MyClass2>"'`? Wait, but `\"<MyClass2>\"` means literal double quotes are inside the string.  
+So possibly `annotation.__qualname__ == '"<MyClass2>"'` (string including quotes),  
+or `repr(annotation)` gave `'"<MyClass2>"'` and module was prepended manually.
+
+But `repr(annotation)` path happens when `hasattr(annotation, '__qualname__')` is False and `hasattr(annotation, '__origin__')` is False.
+
+Alternatively: maybe `annotation` is a `ForwardRef` with `__forward_arg__`?  
+In `_stringify_py37`, if `module == 'typing'` and `getattr(annotation, '__forward_arg__', None)` exists, `qualname = annotation.__forward_arg__`. But `__forward_arg__` would be `"<MyClass2>"` (no outer quotes), so joining with module would give `test_util_typing."<MyClass2>"`? That doesn't match — there's extra quotes inside.
+
+Actually, look carefully at output: `test_util_typing.\"<MyClass2>\"` — in JSON it's shown escaped, but actual Python string would be `test_util_typing."<MyClass2>"`. That means `qualname` is `"<MyClass2>"` including quotes. That is weird for a normal qualname.
+
+So maybe `annotation` is something like a string literal inside quotes?  
+
+**Step 5: Check earlier `stringify`**  
+If `annotation` is `"\"<MyClass2>\""` (a string containing `<MyClass2>` with double quotes around), then `stringify` sees `isinstance(annotation, str)` true.  
+Then it checks `if annotation.startswith("'") and annotation.endswith("'")` — false. So returns `annotation` unchanged.  
+Thus `stringify` would return `"\"<MyClass2>\""`. But our final output is `test_util_typing.\"<MyClass2>\"`. That implies someone prepended `test_util_typing.` to `"\"<MyClass2>\""`.
+
+That prepending must happen in `_stringify_py37` earlier:  
+If `hasattr(annotation, '__qualname__')` is false but `annotation` is a string, it wouldn't reach `%s.%s` logic. But `annotation` being a string means `module = getattr(annotation, '__module__', None)` gives `None`. Then `hasattr(annotation, '__qualname__')` false, `hasattr(annotation, '__origin__')` false, so `return repr(annotation)`. That gives `'"<MyClass2>"'` with outer single quotes. That's not what we have.
+
+Wait — maybe `annotation` is an instance of a class whose `__repr__` returns `"<MyClass2>"` (with double quotes), and `__module__` is `test_util_typing`, and `__qualname__` doesn't exist. Then `hasattr(annotation, '__qualname__')` false, `hasattr(annotation, '__origin__')` false, `return repr(annotation)`. That `repr(annotation)` returns `'"<MyClass2>"'` (single quotes around double quotes). But our final output shows `test_util_typing.\"<MyClass2>\"` — that’s `test_util_typing."<MyClass2>"`. That's not `repr(annotation)`, that's `module + '.' + repr(annotation)`? But `repr(annotation)` includes outer quotes. To get `test_util_typing."<MyClass2>"`, they must have done `module + '.' + annotation.__repr__()` but without outer quotes? That doesn’t match code.
+
+Unless `annotation` is a `ForwardRef('"<MyClass2>"')`? Then `__forward_arg__` is `"<MyClass2>"`. Then `module` is `'typing'` (`ForwardRef` is from typing). Then `qualname = annotation.__forward_arg__` → `"<MyClass2>"`. Wait, but `module == 'typing'` is true, so branch:  
+`elif getattr(annotation, '__forward_arg__', None): qualname = annotation.__forward_arg__`. Then no `__args__`, so `return qualname`. That would return just `"<MyClass2>"`, not `test_util_typing."<MyClass2>"`. So not ForwardRef.
+
+**Step 6: Likely scenario**  
+`annotation` is a class-like object with `__module__ = 'test_util_typing'`, `__qualname__ = '"<MyClass2>"'` (string includes quotes). Then `_stringify_py37` does:  
+`hasattr(annotation, '__qualname__')` true → `qualname = '%s.%s' % (module, annotation.__qualname__)` = `'test_util_typing."<MyClass2>"'`. That’s exactly the output.
+
+Therefore `annotation.__qualname__` must be `"<MyClass2>"` (with quotes).  
+Also `__module__` is `'test_util_typing'`.  
+`__doc__` can be anything (`None` maybe).
+
+**Step 7: Fill structure**  
+`args.annotation.__module__ = 'test_util_typing'`  
+`args.annotation.__doc__ = None` (or any placeholder).
+
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "annotation": {
+            "__module__": "test_util_typing",
+            "__doc__": null,
+            "__qualname__": "\"<MyClass2>\""
+        }
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

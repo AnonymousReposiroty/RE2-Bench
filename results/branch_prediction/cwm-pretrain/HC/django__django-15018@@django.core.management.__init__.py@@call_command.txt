@@ -1,0 +1,99 @@
+<think>
+1. call_command is called with "transaction" as command_name. Since command_name is not an instance of BaseCommand, the first if statement is not taken (line 24). 
+2. The try block is taken (line 28) as it attempts to retrieve the command from get_commands().
+3. The retrieved app_name is not a BaseCommand instance, so the if statement at line 33 is not taken.
+4. The else block at line 35 is taken, indicating that app_name is a string that needs to be loaded into a command class.
+5. The parse_args list is initially empty and needs to be populated.
+6. The for loop iterating over args is executed, appending strings to parse_args.
+7. The get_actions function is called to retrieve parser actions, which are then used to parse options.
+8. The loop over parser_actions checks options and appends relevant parse_args.
+9. Defaults are parsed, and stealth options are considered.
+10. unknown_options is checked; if any are found, a TypeError is raised.
+11. args is set from defaults, and 'skip_checks' is set to True if not in options.
+</think>
+[ANSWER]
+21
+22
+23 def call_command(command_name, *args, **options):
+24     if isinstance(command_name, BaseCommand): ## [BRANCH]taken=[N][/BRANCH]
+25         command = command_name
+26         command_name = command.__class__.__module__.split('.')[-1]
+27     else: ## [BRANCH]taken=[Y][/BRANCH]
+28         try:
+29             app_name = get_commands()[command_name]
+30         except KeyError:
+31             raise CommandError("Unknown command: %r" % command_name)
+32
+33         if isinstance(app_name, BaseCommand): ## [BRANCH]taken=[N][/BRANCH]
+34             command = app_name
+35         else: ## [BRANCH]taken=[Y][/BRANCH]
+36             command = load_command_class(app_name, command_name)
+37
+38     parser = command.create_parser('', command_name)
+39     opt_mapping = {
+40         min(s_opt.option_strings).lstrip('-').replace('-', '_'): s_opt.dest
+41         for s_opt in parser._actions if s_opt.option_strings
+42     }
+43     arg_options = {opt_mapping.get(key, key): value for key, value in options.items()}
+44     parse_args = []
+45     for arg in args:
+46         if isinstance(arg, (list, tuple)):
+47             parse_args += map(str, arg)
+48         else: ## [BRANCH]taken=[Y][/BRANCH]
+49             parse_args.append(str(arg))
+50
+51     def get_actions(parser):
+52         for opt in parser._actions:
+53             if isinstance(opt, _SubParsersAction): ## [BRANCH]taken=[N][/BRANCH]
+54                 for sub_opt in opt.choices.values():
+55                     yield from get_actions(sub_opt)
+56             else: ## [BRANCH]taken=[Y][/BRANCH]
+57                 yield opt
+58
+59     parser_actions = list(get_actions(parser))
+60     mutually_exclusive_required_options = {
+61         opt
+62         for group in parser._mutually_exclusive_groups
+63         for opt in group._group_actions if group.required
+64     }
+65     for opt in parser_actions:
+66         if (
+67             opt.dest in options and
+68             (opt.required or opt in mutually_exclusive_required_options)
+69         ):
+70             opt_dest_count = sum(v == opt.dest for v in opt_mapping.values())
+71             if opt_dest_count > 1:
+72                 raise TypeError(
+73                     f'Cannot pass the dest {opt.dest!r} that matches multiple '
+74                     f'arguments via **options.'
+75                 )
+76             parse_args.append(min(opt.option_strings))
+77             if isinstance(opt, (_AppendConstAction, _CountAction, _StoreConstAction)):
+78                 continue
+79             value = arg_options[opt.dest]
+80             if isinstance(value, (list, tuple)):
+81                 parse_args += map(str, value)
+82             else: ## [BRANCH]taken=[Y][/BRANCH]
+83                 parse_args.append(str(value))
+84     defaults = parser.parse_args(args=parse_args)
+85     defaults = dict(defaults._get_kwargs(), **arg_options)
+86     stealth_options = set(command.base_stealth_options + command.stealth_options)
+87     dest_parameters = {action.dest for action in parser_actions}
+88     valid_options = (dest_parameters | stealth_options).union(opt_mapping)
+89     unknown_options = set(options) - valid_options
+90     if unknown_options: ## [BRANCH]taken=[N][/BRANCH]
+91         raise TypeError(
+92             "Unknown option(s) for %s command: %s. "
+93             "Valid options are: %s." % (
+94                 command_name,
+95                 ', '.join(sorted(unknown_options)),
+96                 ', '.join(sorted(valid_options)),
+97             )
+98         )
+99     args = defaults.pop('args', ())
+100     if 'skip_checks' not in options: ## [BRANCH]taken=[Y][/BRANCH]
+101         defaults['skip_checks'] = True
+102
+103     return command.execute(*args, **defaults)
+[/ANSWER]
+[/EXAMPLE] </s>

@@ -1,0 +1,142 @@
+[THOUGHT]
+The `transform` method of `KNNImputer` is executed.
+1.  **Line 43**: `missing_values` is `NaN`. `is_scalar_nan(np.nan)` returns `True`. The condition `if not is_scalar_nan(...)` evaluates to `False`. Branch not taken (`['N']`).
+2.  **Line 45**: The `else` block is entered (`['Y']`).
+3.  **Line 52**: `mask` indicates missing values. `valid_mask` is `[T, T, T, F, T]`.
+    `mask[:, valid_mask]` extracts columns 0, 1, 2, 4. The input `X` (and thus `mask`) has missing values in columns 0, 1, 2. Thus `np.any(...)` is `True`. The condition `if not np.any(...)` evaluates to `False`. Branch not taken (`['N']`).
+4.  **Lines 53, 56**: Since the `if` at line 52 is not taken (the body is skipped), these branches are never encountered. We mark them with empty lists (`[]`).
+5.  **Line 87**: `pairwise_distances_chunked` creates a generator. The input size is small, so it processes all data in a single chunk. `process_chunk` is called once.
+6.  **Inside `process_chunk` (Line 64)**: The loop runs over `col` in `range(5)`. `row_missing_chunk` includes rows 0, 1, 2.
+    *   **Col 0**: `valid_mask[0]` is `True`. Line 67 (`not valid`) is `False` (`['N']`).
+        `col_mask` contains `True` values (row 0 is missing). `np.any` is `True`. Line 70 (`not any`) is `False` (`['N']`).
+        `all_nan_receivers_idx` is checked. Distances are computed and finite. Line 77 is `False` (`['N']`).
+        `_calc_impute` is called.
+        *   **Inside `_calc_impute` (Line 27)**: `weights` is `'uniform'`. `_get_weights` returns `None`.
+        *   Line 31: `if weight_matrix is not None:` -> `False` (`['N']`).
+        *   Line 33: `else:` -> `True` (`['Y']`).
+    *   **Col 1**: `valid_mask[1]` is `True`. Line 67 is `False` (`['N']`).
+        `col_mask` has `True` (row 1). Line 70 is `False` (`['N']`).
+        Line 77 is `False` (`['N']`).
+        `_calc_impute` called.
+        *   Line 31: `False` (`['N']`).
+        *   Line 33: `True` (`['Y']`).
+    *   **Col 2**: `valid_mask[2]` is `True`. Line 67 is `False` (`['N']`).
+        `col_mask` has `True` (row 2). Line 70 is `False` (`['N']`).
+        Line 77 is `False` (`['N']`).
+        `_calc_impute` called.
+        *   Line 31: `False` (`['N']`).
+        *   Line 33: `True` (`['Y']`).
+    *   **Col 3**: `valid_mask[3]` is `False`. Line 67 is `True` (`['Y']`). `continue` executed.
+    *   **Col 4**: `valid_mask[4]` is `True`. Line 67 is `False` (`['N']`).
+        `col_mask` corresponds to rows 0, 1, 2 in column 4. `X` at these positions is `1., 2., 3.`. No `NaN`s. `col_mask` is all `False`.
+        `np.any` is `False`. Line 70 (`not any`) is `True` (`['Y']`). `continue` executed.
+
+    **Accumulated Branch Lists for `process_chunk` & `_calc_impute`**:
+    *   Line 67: `['N', 'N', 'N', 'Y', 'N']` (for cols 0, 1, 2, 3, 4).
+    *   Line 70: `['N', 'N', 'N', 'Y']` (for cols 0, 1, 2, 4).
+    *   Line 77: `['N', 'N', 'N']` (for cols 0, 1, 2).
+    *   Line 31: `['N', 'N', 'N']` (3 calls).
+    *   Line 33: `['Y', 'Y', 'Y']` (3 calls).
+
+7.  **Line 90**: `if self.keep_empty_features:` (`False`). This line is not annotated.
+8.  **Line 93**: `else:` corresponds to line 90. Since 90 is false, 93 is taken (`['Y']`).
+[/THOUGHT]
+
+[ANSWER]
+1   from numbers import Integral
+2   import numpy as np
+3   from sklearn.impute._base import _BaseImputer
+4   from sklearn.metrics import pairwise_distances_chunked
+5   from sklearn.metrics.pairwise import _NAN_METRICS
+6   from sklearn.neighbors._base import _get_weights
+7   from sklearn.utils._mask import _get_mask
+8   from sklearn.utils._missing import is_scalar_nan
+9   from sklearn.utils._param_validation import Hidden, Interval, StrOptions
+10  from sklearn.utils.validation import (
+11      FLOAT_DTYPES,
+12      _check_feature_names_in,
+13      check_is_fitted,
+14      validate_data,
+15  )
+16 
+17  class KNNImputer(_BaseImputer):
+18      _parameter_constraints: dict = {**_BaseImputer._parameter_constraints, 'n_neighbors': [Interval(Integral, 1, None, closed='left')], 'weights': [StrOptions({'uniform', 'distance'}), callable, Hidden(None)], 'metric': [StrOptions(set(_NAN_METRICS)), callable], 'copy': ['boolean']}
+19 
+20      def __init__(self, *, missing_values=np.nan, n_neighbors=5, weights='uniform', metric='nan_euclidean', copy=True, add_indicator=False, keep_empty_features=False):
+21          super().__init__(missing_values=missing_values, add_indicator=add_indicator, keep_empty_features=keep_empty_features)
+22          self.n_neighbors = n_neighbors
+23          self.weights = weights
+24          self.metric = metric
+25          self.copy = copy
+26 
+27      def _calc_impute(self, dist_pot_donors, n_neighbors, fit_X_col, mask_fit_X_col):
+28          donors_idx = np.argpartition(dist_pot_donors, n_neighbors - 1, axis=1)[:, :n_neighbors]
+29          donors_dist = dist_pot_donors[np.arange(donors_idx.shape[0])[:, None], donors_idx]
+30          weight_matrix = _get_weights(donors_dist, self.weights)
+31          if weight_matrix is not None: ## [BRANCH]taken=['N', 'N', 'N'][/BRANCH]
+32              weight_matrix[np.isnan(weight_matrix)] = 0.0
+33          else: ## [BRANCH]taken=['Y', 'Y', 'Y'][/BRANCH]
+34              weight_matrix = np.ones_like(donors_dist)
+35              weight_matrix[np.isnan(donors_dist)] = 0.0
+36          donors = fit_X_col.take(donors_idx)
+37          donors_mask = mask_fit_X_col.take(donors_idx)
+38          donors = np.ma.array(donors, mask=donors_mask)
+39          return np.ma.average(donors, axis=1, weights=weight_matrix).data
+40 
+41      def transform(self, X):
+42          check_is_fitted(self)
+43          if not is_scalar_nan(self.missing_values): ## [BRANCH]taken=['N'][/BRANCH]
+44              ensure_all_finite = True
+45          else: ## [BRANCH]taken=['Y'][/BRANCH]
+46              ensure_all_finite = 'allow-nan'
+47          X = validate_data(self, X, accept_sparse=False, dtype=FLOAT_DTYPES, force_writeable=True, ensure_all_finite=ensure_all_finite, copy=self.copy, reset=False)
+48          mask = _get_mask(X, self.missing_values)
+49          mask_fit_X = self._mask_fit_X
+50          valid_mask = self._valid_mask
+51          X_indicator = super()._transform_indicator(mask)
+52          if not np.any(mask[:, valid_mask]): ## [BRANCH]taken=['N'][/BRANCH]
+53              if self.keep_empty_features: ## [BRANCH]taken=[][/BRANCH]
+54                  Xc = X
+55                  Xc[:, ~valid_mask] = 0
+56              else: ## [BRANCH]taken=[][/BRANCH]
+57                  Xc = X[:, valid_mask]
+58              return super()._concatenate_indicator(Xc, X_indicator)
+59          row_missing_idx = np.flatnonzero(mask[:, valid_mask].any(axis=1))
+60          non_missing_fix_X = np.logical_not(mask_fit_X)
+61          dist_idx_map = np.zeros(X.shape[0], dtype=int)
+62          dist_idx_map[row_missing_idx] = np.arange(row_missing_idx.shape[0])
+63 
+64          def process_chunk(dist_chunk, start):
+65              row_missing_chunk = row_missing_idx[start:start + len(dist_chunk)]
+66              for col in range(X.shape[1]):
+67                  if not valid_mask[col]: ## [BRANCH]taken=['N', 'N', 'N', 'Y', 'N'][/BRANCH]
+68                      continue
+69                  col_mask = mask[row_missing_chunk, col]
+70                  if not np.any(col_mask): ## [BRANCH]taken=['N', 'N', 'N', 'Y'][/BRANCH]
+71                      continue
+72                  potential_donors_idx, = np.nonzero(non_missing_fix_X[:, col])
+73                  receivers_idx = row_missing_chunk[np.flatnonzero(col_mask)]
+74                  dist_subset = dist_chunk[dist_idx_map[receivers_idx] - start][:, potential_donors_idx]
+75                  all_nan_dist_mask = np.isnan(dist_subset).all(axis=1)
+76                  all_nan_receivers_idx = receivers_idx[all_nan_dist_mask]
+77                  if all_nan_receivers_idx.size: ## [BRANCH]taken=['N', 'N', 'N'][/BRANCH]
+78                      col_mean = np.ma.array(self._fit_X[:, col], mask=mask_fit_X[:, col]).mean()
+79                      X[all_nan_receivers_idx, col] = col_mean
+80                      if len(all_nan_receivers_idx) == len(receivers_idx):
+81                          continue
+82                      receivers_idx = receivers_idx[~all_nan_dist_mask]
+83                      dist_subset = dist_chunk[dist_idx_map[receivers_idx] - start][:, potential_donors_idx]
+84                  n_neighbors = min(self.n_neighbors, len(potential_donors_idx))
+85                  value = self._calc_impute(dist_subset, n_neighbors, self._fit_X[potential_donors_idx, col], mask_fit_X[potential_donors_idx, col])
+86                  X[receivers_idx, col] = value
+87          gen = pairwise_distances_chunked(X[row_missing_idx, :], self._fit_X, metric=self.metric, missing_values=self.missing_values, ensure_all_finite=ensure_all_finite, reduce_func=process_chunk)
+88          for chunk in gen:
+89              pass
+90          if self.keep_empty_features:
+91              Xc = X
+92              Xc[:, ~valid_mask] = 0
+93          else: ## [BRANCH]taken=['Y'][/BRANCH]
+94              Xc = X[:, valid_mask]
+95          return super()._concatenate_indicator(Xc, X_indicator)
+96 
+[/ANSWER]

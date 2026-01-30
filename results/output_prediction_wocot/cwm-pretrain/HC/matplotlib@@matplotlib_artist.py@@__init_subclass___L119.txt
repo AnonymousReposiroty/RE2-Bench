@@ -1,0 +1,497 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+import attrs
+import six
+import os
+from pathlib import Path
+import tempfile
+import pytest
+from conftest import (
+    make_numbered_dir,
+    LOCK_TIMEOUT,
+    get_user,
+    ensure_reset_dir,
+    find_prefixed,
+)
+from _pytest.tmpdir import _make_tmpdir
+
+
+@attrs.define
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import collections
+import functools
+from distutils.version import LooseVersion
+from typing import NamedTuple, Sequence
+import matplotlib as mpl
+import numpy as np
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+from . import artist
+from . import image
+from . import angles
+
+
+# Lookup tables for points to have a "circular" shape
+# Shape created by adjusting the semi-major/minor axes of an ellipse by ratio 4:3
+_N_POINTS = 20
+_ROOT = np.sqrt(np.arange(1, _N_POINTS + 1))
+_X_POINTS = np.multiply(
+    np.outer(3 * _ROOT, np.cos(2 * np.pi * np.arange(0, _N_POINTS) / _N_POINTS)),
+    _ROOT.reshape((_N_POINTS, 1)) / 4)
+_Y_POINTS = np.multiply(
+    np.outer(3 * _ROOT, np.sin(2 * np.pi * np.arange(0, _N_POINTS) / _N_POINTS)),
+    _ROOT.reshape((_N_POINTS, 1)) / 4)
+_X_POINTS /= _X_POINTS.max()
+_Y_POINTS /= _Y_POINTS.max()
+
+
+# Helper class for Patch properties with aliases
+class PatchProperty:
+    __slots__ = ('name', 'aliases', 'type', 'default', 'doc',
+                 '_get', '_set', '_transformed', '_bool1', '_bool2')
+
+    def __init__(self, prop, get=None, set=None):
+        self.name = prop[0]
+        self.aliases = prop[1]
+        self.type = prop[2]
+        self.default = prop[3]
+        self.doc = prop[4]
+
+        self._get = get if get is not None else self.default
+        self._set = set if set is not None else self.default
+        self._transformed = None
+        self._bool1, self._bool2 = None, None
+
+    @property
+    def transform(self):
+        return self._transformed
+
+    @transform.setter
+    def transform(self, value):
+        self._transformed = value
+
+
+class PatchProps(NamedTuple('_PatchProps', [
+    ('_property_list', Sequence[PatchProperty]),
+    ('_cached_default_kwarg_values', dict),
+    ('_init_dict', dict),
+    ('_need_new_style_aliases', bool),
+])):
+    """
+    PatchProperties handles artist property initialization and update.
+
+    Parameters
+    ----------
+    props : list of [name, alias, type, default value, doc] tuples
+    """
+
+
+def get_patch_props():
+    return PatchProps(PPROPS, cached_default_kwarg_values,
+                      init_dict, need_new_style_aliases)
+
+
+def is_pproplist(prop):
+    return isinstance(prop, PatchProperty)
+
+
+def create_property_from_patchprop(pprop, instance=None):
+    return mpl.artist.Property(pprop.name,
+                               doc=pprop.doc,
+                               default=pprop._get if instance is None
+                               else pprop._get(instance),
+                               alias=pprop.aliases,
+                               type=pprop.type,
+                               set_func=pprop._set)
+
+
+# Helper class to return {name : value} for simple properties from class
+class SimpleProperty:
+    __slots__ = ('name',)
+
+    def __init__(self, name):
+        self.name = name
+
+
+class PPROPS:
+    _simple = ['alpha', 'animated', 'axes', 'clip_box', 'clip_on', 'clip_path',
+               'data', 'figure', 'gid', 'in_layout', 'label', 'path_effects',
+               'picker', 'rasterized', 'remove_method', 'sketch_params',
+               'snap', 'sticky_edges', 'transform', 'url', 'visible',
+               'zorder']
+
+    _patchproperty = {
+        'path':  PatchProperty(['path', None, mpl.patheffects.PathEffectRenderer],
+                               get=get_path, set=set_path),
+        'fill':  PatchProperty(['fill', None, bool],
+                               get=get_fill, set=set_fill,
+                               doc='Patch property: Fill the patch'),
+        'fillstyle': PatchProperty(['fillstyle', None, str],
+                                   get=lambda a: _is_stroke(None, False),
+                                   doc='Patch property: FillStyle is "solid" or'
+                                   ' "hatch"'),
+        'edgecolor': PatchProperty(['edgecolor', 'ec', 'edgecolors', 'c'],
+                                   get=get_edgecolor,
+                                   set=set_edgecolor,
+                                   doc='Patch property: Edge color'),
+        'facecolor': PatchProperty(['facecolor', 'fc', 'facecolors', 'color'],
+                                   get=get_facecolor,
+                                   set=set_facecolor,
+                                   doc='Patch property: Face color'),
+        'linewidth': PatchProperty(['linewidth', 'lw', 'linewidths'],
+                                   get=get_linewidth, set=set_linewidth,
+                                   doc='Patch property: Edge width'),
+        'linestyle': PatchProperty(['linestyle', None, 'string or (offset, on-off-seq)',
+                                    ['solid', 'dashed', 'dashdot', 'dotted']],
+                                   get=get_linestyle, set=set_linestyle,
+                                   doc='Patch property: Edge style'),
+        'antialiased': PatchProperty(['antialiased', None, bool], default=True,
+                                     get=artist.allow_rasterization,
+                                     doc='Patch property: Antialiased'),
+        'hatch': PatchProperty(['hatch', None, 'str or string or (color, angle, pattern)']),
+        'joinstyle': PatchProperty(['joinstyle', None, 'string', None]),
+        'capstyle': PatchProperty(['capstyle', None, 'string', None]),
+    }
+    if mpl.rcParams['path.sketch']:
+        _patchproperty['sketch_params'] = PatchProperty(
+            ['sketch_params', None, 'rcParams', None],
+            doc='Patch property: Sketch parameters')
+    _patchproperty.update(dict(
+        [(name, PatchProperty([name, None, type(value)]))
+         for name, value in vars(mpl.lines.Line2D()).items()
+         if name not in _simple and name not in _patchproperty and not callable(value)
+         and not isinstance(value, property)]))
+    if not artist.istype(instance(artist.Artist)):
+        _patchproperty.update({
+            'transformSet': PatchProperty(['transformSet', None, bool],
+                                          get=functools.partial(
+                                              lambda x: getattr(x, x)(),
+                                              'transformSet'),
+                                          set=functools.partial(
+                                              lambda x, value: setattr(
+                                                  x, x, value),
+                                              'transformSet')),
+            'nesting_level': PatchProperty(['nesting_level', None, int, 0],
+                                           get=functools.partial(
+                                               lambda x: getattr(x, x),
+                                               'nesting_level')),
+            'eventson': PatchProperty(['eventson', None, bool, True],
+                                      get=functools.partial(
+                                          lambda x: getattr(x, x),
+                                          'eventson')),
+        })
+        _patchproperty.update(
+            {name: PatchProperty([name, aliases, type], default=mngr.value[name])
+             for name, aliases, type in
+             artist.Artist.properties().items()})
+    _patchproperty.update(
+        [(name, PatchProperty([name, aliases, type, None],
+                              get=functools.partial(
+                                  lambda name, x: getattr(x, name),
+                                  name),
+                              set=functools.partial(
+                                  lambda name, x, value: setattr(x, name,
+                                                                 value),
+                                  name)))
+         for name, aliases, type in artist.Artist._alias_map.items() if
+         name not in _patchproperty])
+    _patchproperty.update({name: PatchProperty([name, [alias], type, default,
+                                                doc],
+                                               get=functools.partial(
+                                                   lambda name, x: getattr(x,
+                                                                           name),
+                                                   name),
+                                               set=functools.partial(
+                                                   lambda name, x, value:
+                                                   setattr(x, name,
+                                                           value),
+                                                   name)) for name, alias,
+                           type, default, doc in
+                           artist.Artist._prop_aliases.items() if
+                           name not in _patchproperty})
+
+
+    _patchproperty['zorder'] = PatchProperty(['zorder', None, float, 0],
+                                             doc='Patch property: Z order')
+
+    _patchproperty['linestyle'] = PatchProperty(
+        ['linestyle', None, 'string or (offset, on-off-seq)',
+         ['solid', 'dashed', 'dashdot', 'dotted']],
+        get=get_linestyle, set=set_linestyle,
+        doc='Patch property: Edge style')
+
+    _patchproperty['edgecolor'] = PatchProperty(
+        ['edgecolor', 'ec', 'edgecolors', 'c'],
+        get=get_edgecolor,
+        set=set_edgecolor,
+        doc='Patch property: Edge color')
+
+    _patchproperty['facecolor'] = PatchProperty(
+        ['facecolor', 'fc', 'facecolors', 'color'],
+        get=get_facecolor,
+        set=set_facecolor,
+        doc='Patch property: Face color')
+
+    if mpl.rcParams['text.hinting']:
+        _patchproperty['text_hinter'] = PatchProperty(
+            ['text_hinter', None, 'TextHinter', None])
+
+    if artist.Artist.get_transform is not artist.Artist.get_data_transform:
+        _patchproperty.update(
+            {'get_data_transform':
+             PatchProperty(['get_data_transform', None, mpl.transforms.Transform,
+                            None],
+                           get=artist.Artist.get_data_transform,
+                           doc='Artist property: Transform property')})
+
+    if LooseVersion(mpl.__version__) >= LooseVersion('3.3.0'):
+        _patchproperty.update(
+            {'xy':
+             PatchProperty(['xy', None, (float, float),
+                            default=(0, 0),
+                            doc='xy location in data coordinates')})
+        _patchproperty['xy'].aliases.append('xytext')
+        _patchproperty['transform'] = PatchProperty(
+            ['transform', None, mpl.transforms.Transform, None],
+            doc='Patch property: Transform property')
+
+    _patchproperty.update(
+        {'path_effects':
+         PatchProperty(['path_effects', None, 'list of PathEffect',
+            mpl.rcParams['path.effects']],
+            doc='Patch property: List of PathEffect objects to be applied')})
+
+    _patchproperty['path_effects'].aliases.extend(['patheffect',
+                                                   'path_effects'])
+    _patchproperty.update(
+        {'data':
+         PatchProperty(['data', None, (np.ndarray, float, int), None],
+                       doc='Patch property: Data property')})
+
+    if isinstance(mpl.pyplot.figure().add_artist, artist.Artist):
+        _patchproperty['remove'] = PatchProperty(['remove', None, None, None],
+                                                 get=remove,
+                                                 set=remove)
+
+    _patchproperty['remove_method'] = PatchProperty(
+        ['remove_method', None, None, None],
+        get=get_remove_method,
+        set=set_remove_method)
+
+    for name in ('path', 'sketch', 'fillstyle', 'zorder',
+                 'edgecolor', 'facecolor', 'linewidth', 'linestyle'):
+        for props in _patchproperty.values():
+            if props.name == name:
+                props._bool1, props._bool2 = True, True
+                break
+
+    _patchproperty['fillstyle'] = PatchProperty(
+        ['fillstyle', None, str, None],
+        get=lambda a: _is_stroke(None, False))
+
+    _patchproperty.update({prop.name: SimpleProperty(prop.name)
+                           for prop in _patchproperty.values() if
+                           isinstance(prop.type, list)})
+
+    values = [pprop for pprop in _patchproperty.values()
+              if pprop.name != 'simple_property']
+    return [pprop for pprop in values if pprop._bool1 or pprop._bool2]
+
+
+if LooseVersion(mpl.__version__) >= LooseVersion('3.4.3'):
+    __new_style_aliases = True
+    __need_new_style_aliases = False
+    for patch_property in PPROPS._patchproperty.values():
+        if isinstance(patch_property, PatchProperty):
+            if patch_property.name == 'alpha':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('a')
+                    continue
+            if patch_property.name == 'visible':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('vis')
+                    continue
+            if patch_property.name == 'facecolor':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('fc')
+                    patch_property.aliases.append('color')
+                    patch_property.aliases.append('facecolors')
+                    continue
+            if patch_property.name == 'edgecolor':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('ec')
+                    patch_property.aliases.append('c')
+                    patch_property.aliases.append('edgecolors')
+                    continue
+            if patch_property.name == 'linewidth':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('lw')
+                    patch_property.aliases.append('linewidths')
+                    continue
+            if patch_property.name == 'linestyle':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('ls')
+                    patch_property.aliases.append('linestyles')
+                    continue
+            if patch_property.name == 'zorder':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('z')
+                    patch_property.aliases.append('zorders')
+                    continue
+            if patch_property.name == 'transform':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('t')
+                    continue
+            if patch_property.name == 'animated':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('an')
+                    continue
+            if patch_property.name == 'axes':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('ax')
+                    continue
+            if patch_property.name == 'figure':
+                if len(patch_property.aliases) == 0:
+                    __need_new_style_aliases = True
+                    patch_property.aliases.append('fig')
+                    continue
+            if patch_property.name == 'clip_box':
+                if len(patch_property.aliases) == 0:
+                    __need_new

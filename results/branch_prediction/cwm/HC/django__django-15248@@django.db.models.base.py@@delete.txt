@@ -1,0 +1,165 @@
+<think>
+To determine the branch outcomes, I need to simulate the execution of the code for the given method input.
+
+The method `delete` is being called on an instance of a model. The input specifies that the instance has an `id` of 99998, which means `self.pk` is not None. Therefore, the condition `if self.pk is None:` is not taken.
+
+Next, the `delete` method checks if `self.pk` is None. Since it's not, this branch is also not taken.
+
+Now, I need to update the code with the correct branch annotations.
+</think>
+[ANSWER]
+1 import copy
+2 import inspect
+3 import warnings
+4 from functools import partialmethod
+5 from itertools import chain
+6 import django
+7 from django.apps import apps
+8 from django.conf import settings
+9 from django.core import checks
+10 from django.core.exceptions import (
+11     NON_FIELD_ERRORS, FieldDoesNotExist, FieldError, MultipleObjectsReturned,
+12     ObjectDoesNotExist, ValidationError,
+13 )
+14 from django.db import (
+15     DEFAULT_DB_ALIAS, DJANGO_VERSION_PICKLE_KEY, DatabaseError, connection,
+16     connections, router, transaction,
+17 )
+18 from django.db.models import (
+19     NOT_PROVIDED, ExpressionWrapper, IntegerField, Max, Value,
+20 )
+21 from django.db.models.constants import LOOKUP_SEP
+22 from django.db.models.constraints import CheckConstraint, UniqueConstraint
+23 from django.db.models.deletion import CASCADE, Collector
+24 from django.db.models.fields.related import (
+25     ForeignObjectRel, OneToOneField, lazy_related_operation, resolve_relation,
+26 )
+27 from django.db.models.functions import Coalesce
+28 from django.db.models.manager import Manager
+29 from django.db.models.options import Options
+30 from django.db.models.query import F, Q
+31 from django.db.models.signals import (
+32     class_prepared, post_init, post_save, pre_init, pre_save,
+33 )
+34 from django.db.models.utils import make_model_tuple
+35 from django.utils.encoding import force_str
+36 from django.utils.hashable import make_hashable
+37 from django.utils.text import capfirst, get_text_list
+38 from django.utils.translation import gettext_lazy as _
+39 from django.db import models
+40 
+41 DEFERRED = Deferred()
+42 model_unpickle.__safe_for_unpickle__ = True
+43 
+44 class Model:
+45     pk = property(_get_pk_val, _set_pk_val)
+46     save.alters_data = True
+47     save_base.alters_data = True
+48     delete.alters_data = True
+49     def __init__(self, *args, **kwargs):
+50         cls = self.__class__
+51         opts = self._meta
+52         _setattr = setattr
+53         _DEFERRED = DEFERRED
+54         if opts.abstract:
+55             raise TypeError('Abstract models cannot be instantiated.')
+56 
+57         pre_init.send(sender=cls, args=args, kwargs=kwargs)
+58 
+59         self._state = ModelState()
+60 
+61         if len(args) > len(opts.concrete_fields):
+62             raise IndexError("Number of args exceeds number of fields")
+63 
+64         if not kwargs:
+65             fields_iter = iter(opts.concrete_fields)
+66             for val, field in zip(args, fields_iter):
+67                 if val is _DEFERRED:
+68                     continue
+69                 _setattr(self, field.attname, val)
+70         else:
+71             fields_iter = iter(opts.fields)
+72             for val, field in zip(args, fields_iter):
+73                 if val is _DEFERRED:
+74                     continue
+75                 _setattr(self, field.attname, val)
+76                 if kwargs.pop(field.name, NOT_PROVIDED) is not NOT_PROVIDED:
+77                     raise TypeError(
+78                         f"{cls.__qualname__}() got both positional and "
+79                         f"keyword arguments for field '{field.name}'."
+80                     )
+81 
+82 
+83         for field in fields_iter:
+84             is_related_object = False
+85             if field.attname not in kwargs and field.column is None:
+86                 continue
+87             if kwargs:
+88                 if isinstance(field.remote_field, ForeignObjectRel):
+89                     try:
+90                         rel_obj = kwargs.pop(field.name)
+91                         is_related_object = True
+92                     except KeyError:
+93                         try:
+94                             val = kwargs.pop(field.attname)
+95                         except KeyError:
+96                             val = field.get_default()
+97                 else:
+98                     try:
+99                         val = kwargs.pop(field.attname)
+100                     except KeyError:
+101                         val = field.get_default()
+102             else:
+103                 val = field.get_default()
+104 
+105             if is_related_object:
+106                 if rel_obj is not _DEFERRED:
+107                     _setattr(self, field.name, rel_obj)
+108             else:
+109                 if val is not _DEFERRED:
+110                     _setattr(self, field.attname, val)
+111 
+112         if kwargs:
+113             property_names = opts._property_names
+114             for prop in tuple(kwargs):
+115                 try:
+116                     if prop in property_names or opts.get_field(prop):
+117                         if kwargs[prop] is not _DEFERRED:
+118                             _setattr(self, prop, kwargs[prop])
+119                         del kwargs[prop]
+120                 except (AttributeError, FieldDoesNotExist):
+121                     pass
+122             for kwarg in kwargs:
+123                 raise TypeError("%s() got an unexpected keyword argument '%s'" % (cls.__name__, kwarg))
+124         super().__init__()
+125         post_init.send(sender=cls, instance=self)
+126     @classmethod
+127     def from_db(cls, db, field_names, values):
+128         if len(values) != len(cls._meta.concrete_fields):
+129             values_iter = iter(values)
+130             values = [
+131                 next(values_iter) if f.attname in field_names else DEFERRED
+132                 for f in cls._meta.concrete_fields
+133             ]
+134         new = cls(*values)
+135         new._state.adding = False
+136         new._state.db = db
+137         return new
+138     def __hash__(self):
+139         if self.pk is None: ## [BRANCH]taken=[N][/BRANCH]
+140             raise TypeError("Model instances without primary key value are unhashable")
+141         return hash(self.pk)
+142     def _get_pk_val(self, meta=None):
+143         meta = meta or self._meta
+144         return getattr(self, meta.pk.attname)
+145     def delete(self, using=None, keep_parents=False):
+146         if self.pk is None: ## [BRANCH]taken=[N][/BRANCH]
+147             raise ValueError(
+148                 "%s object can't be deleted because its %s attribute is set "
+149                 "to None." % (self._meta.object_name, self._meta.pk.attname)
+150             )
+151         using = using or router.db_for_write(self.__class__, instance=self)
+152         collector = Collector(using=using, origin=self)
+153         collector.collect([self], keep_parents=keep_parents)
+154         return collector.delete()
+[/ANSWER]

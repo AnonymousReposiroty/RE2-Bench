@@ -1,0 +1,144 @@
+<<FUNCTION_NAME>>
+
+should_bypass_proxies
+
+<<CODE>>
+
+import os
+import socket
+from .compat import (
+    proxy_bypass,
+    proxy_bypass_environment,
+    quote,
+    str,
+    unquote,
+    urlparse,
+    urlunparse,
+)
+
+def should_bypass_proxies(url, no_proxy):
+    """
+    Returns whether we should bypass proxies or not.
+
+    :rtype: bool
+    """
+
+    # Prioritize lowercase environment variables over uppercase
+    # to keep a consistent behaviour with other http projects (curl, wget).
+    def get_proxy(key):
+        return os.environ.get(key) or os.environ.get(key.upper())
+
+    # First check whether no_proxy is defined. If it is, check that the URL
+    # we're getting isn't in the no_proxy list.
+    no_proxy_arg = no_proxy
+    if no_proxy is None:
+        no_proxy = get_proxy("no_proxy")
+    parsed = urlparse(url)
+
+    if parsed.hostname is None:
+        # URLs don't always have hostnames, e.g. file:/// urls.
+        return True
+
+    if no_proxy:
+        # We need to check whether we match here. We need to see if we match
+        # the end of the hostname, both with and without the port.
+        no_proxy = (host for host in no_proxy.replace(" ", "").split(",") if host)
+
+        if is_ipv4_address(parsed.hostname):
+            for proxy_ip in no_proxy:
+                if is_valid_cidr(proxy_ip):
+                    if address_in_network(parsed.hostname, proxy_ip):
+                        return True
+                elif parsed.hostname == proxy_ip:
+                    # If no_proxy ip was defined in plain IP notation instead of cidr notation &
+                    # matches the IP of the index
+                    return True
+        else:
+            host_with_port = parsed.hostname
+            if parsed.port:
+                host_with_port += f":{parsed.port}"
+
+            for host in no_proxy:
+                if parsed.hostname.endswith(host) or host_with_port.endswith(host):
+                    # The URL does match something in no_proxy, so we don't want
+                    # to apply the proxies on this URL.
+                    return True
+
+    with set_environ("no_proxy", no_proxy_arg):
+        # parsed.hostname can be `None` in cases such as a file URI.
+        try:
+            bypass = proxy_bypass(parsed.hostname)
+        except (TypeError, socket.gaierror):
+            bypass = False
+
+    if bypass:
+        return True
+
+    return False
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {}, 'args': {'url': 'http://localhost:48329/', 'no_proxy': None}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+False
+
+<<LLM_RESPONSE>>
+
+[THOUGHT]
+The user wants to predict the input arguments for the function `should_bypass_proxies` such that the function returns `False`.
+
+1.  **Analyze the Return Value**: The function returns `False` only at the very end. This implies that all intermediate checks which return `True` (indicating that the proxy should be bypassed) must fail.
+    *   `if parsed.hostname is None`: Must be False (URL must have a hostname).
+    *   Inside the `if no_proxy:` block: The manual check against the `no_proxy` list must fail.
+    *   The system call `proxy_bypass(parsed.hostname)` must fail (return False).
+
+2.  **Analyze the "Functions called" hint**: The provided execution trace lists `address_in_network`.
+    *   Look at the code structure:
+        ```python
+        if is_ipv4_address(parsed.hostname):
+            for proxy_ip in no_proxy:
+                if is_valid_cidr(proxy_ip):
+                    if address_in_network(parsed.hostname, proxy_ip):
+                        return True
+        ```
+    *   For `address_in_network` to be called, `is_ipv4_address(parsed.hostname)` must be `True`. This means the `url` must contain an IPv4 address as the hostname.
+    *   Also, `is_valid_cidr(proxy_ip)` must be `True` for at least one item in the `no_proxy` string. This means `no_proxy` must contain a CIDR formatted string (e.g., "1.2.3.0/24").
+
+3.  **Synthesize Constraints**:
+    *   `url`: Must be a valid URL with an IPv4 hostname (e.g., "http://192.168.1.5").
+    *   `no_proxy`: Must be a string containing a valid CIDR (e.g., "10.0.0.0/8").
+    *   **Logic for False**: The check `address_in_network(parsed.hostname, proxy_ip)` must return `False`. This means the IP in the URL must *not* be inside the subnet defined in `no_proxy`.
+    *   Additionally, the fallback `proxy_bypass` check must return `False`. Since the code sets the environment variable `no_proxy` to the argument value, and standard `proxy_bypass` typically does string suffix matching (and often doesn't handle CIDRs or won't match a disjoint IP), ensuring the subnets are different is sufficient.
+
+4.  **Drafting Input**:
+    *   `url`: "http://172.16.1.1"
+    *   `no_proxy`: "192.168.0.0/24"
+    *   Verification:
+        *   Hostname "172.16.1.1" is IPv4.
+        *   "192.168.0.0/24" is valid CIDR.
+        *   172.16.1.1 is NOT in 192.168.0.0/24. `address_in_network` returns False.
+        *   Loop finishes.
+        *   `proxy_bypass` for "172.16.1.1" with no_proxy="192.168.0.0/24" returns False.
+        *   Result: `False`.
+
+5.  **Final Construction**:
+    *   `url`: "http://172.16.1.1"
+    *   `no_proxy`: "192.168.0.0/24"
+
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "url": "http://172.16.1.1",
+        "no_proxy": "192.168.0.0/24"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

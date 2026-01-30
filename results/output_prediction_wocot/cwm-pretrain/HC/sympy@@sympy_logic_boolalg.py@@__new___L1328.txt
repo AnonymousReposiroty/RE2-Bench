@@ -1,0 +1,560 @@
+<think>
+The function `__new__` is called on the `Equivalent` class with two arguments: `"Q.even(X) | Q.even(Z)"` and `"Q.even(X*Z)"`. 
+
+1. The function checks if `evaluate` is `None`, which it is, so it defaults to `global_parameters.evaluate`.
+2. It then converts the arguments to sympy expressions using `_sympify`.
+3. It creates a set of arguments, discarding any duplicates and simplifying them.
+4. It checks for any relational expressions in the arguments and their canonical and negated forms.
+5. It looks for any contradictions, like a relational expression and its negation being present. If found, it returns `False`.
+6. If there are fewer than two arguments, it returns `True` or an `And` expression.
+7. If `True` is in the argument set, it removes it and returns an `And` of the remaining arguments.
+8. If `False` is in the argument set, it removes it and returns an `And` of the negations of the remaining arguments.
+9. Finally, it returns an instance of the `Equivalent` class with the ordered argument set.
+
+In this case, since neither of the expressions is a contradiction, and there are two arguments, the function will return an instance of the `Equivalent` class with the given arguments. The output structure requires only the output to be printed, so the predicted output is an `Equivalent` instance with the given arguments.
+</think>
+<|output|>
+```
+{
+    "output": "Equivalent(Q.even(X) | Q.even(Z), Q.even(X*Z))"
+}
+```
+</|output|>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class ExtensionStrategy(object):
+    def setup_package(self, package_name):
+        package_dir = pkg_resources.resource_filename(package_name, "")
+        nspkg = imp.new_module(package_name)
+        nspkg.__path__ = [package_dir]
+        sys.modules[package_name] = nspkg
+        return nspkg
+[/PYTHON]
+
+What will be the output of `setup_package`, given the following input:
+[INPUT]
+{
+    "self": null,
+    "args": {
+        "package_name": "pkg_name"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "type": "setup_package",
+    "is_method": XXX,
+    "package_name": "pkg_name",
+    "returns": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "type": "setup_package",
+    "is_method": true,
+    "package_name": "pkg_name",
+    "returns": true
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import dis
+import imp
+import sys
+import types
+import logging
+import sysconfig
+from pkg_resources import resource_filename
+from importlib import import_module
+
+log = logging.getLogger(__name__)
+
+class PatchedimpImporter(object):
+    def __init__(self, name):
+        self._package = import_module(name)
+        # self._package.__path__ is the parent package, only the top level
+        # need to be removed to avoid namespace pollution
+
+    def create_package(self, name):
+        module = imp.new_module(name)
+        module.__path__ = self._package.__path__[:]
+        # so that package sub-packages are created, even though
+        # that sub-package's __init__.py has not yet been executed
+        module.__path__.insert(0, "")
+        return module
+
+    def find_module(self, fullname, path):
+        # returns self if given the parent package's __init__.py and a submodule
+        if fullname.startswith(self._package.__name__ + "."):
+            if not (".py" in path or ".pyc" in path):
+                return self
+        return None
+
+    def find_loader(self, fullname, path):
+        return self.find_module(fullname, path)
+
+    def is_package(self, fullname):
+        return fullname.startswith(self._package.__name__ + ".") or not self.find_module(fullname, ("",))
+
+    def load_module(self, name):
+        log.debug("load_module %r", name)
+
+        if name in sys.modules:
+            return sys.modules[name]
+
+        if name == self._package.__name__:
+            return self._package
+
+        module = self.create_package(name)
+        sys.modules[name] = module
+        return module
+
+    def exec_module(self, module):
+        module_name = module.__name__
+
+        log.debug("exec_module %r", module_name)
+
+        if module_name in sys.modules:
+            return
+
+        try:
+            # We add the path to sys.path to allow direct execution
+            sys.path.insert(0, module.__path__[0])
+            file, pathname, description = imp.find_module("__init__", module.__path__)
+            # We remove the path from sys.path to avoid
+            # side-effects to subsequent code
+            sys.path.pop(0)
+
+        except ImportError:
+            # failed to find __init__.py file, so just insert the empty module
+            sys.modules[module_name] = module
+        else:
+            # the new module may not be executed correctly if it calls
+            # import_parent. Thus we need to special-case it here
+            log.debug("using parent loader to load %s", module_name)
+            module = imp.load_module(module_name, file, pathname, description)
+
+        sys.modules[module_name] = module
+        return module
+
+    def get_code(self, fullname):
+        module_name = fullname.split(".")[0]
+        if module_name == fullname:
+            parent_module = self._package
+        else:
+            parent_module = sys.modules[module_name]
+        loader = parent_module.__loader__
+        if isinstance(loader, types.ModuleType):
+            loader = loader.__loader__
+        init_source = loader.get_source(fullname)
+        init_code = compile(init_source, "{}.py".format(fullname), "exec")
+        return init_code
+
+
+def patch_imp_importer():
+    sys.meta_path.append(PatchedimpImporter("import_parent"))
+    # Python 3.6 added an new type of module, ModuleSpec, to
+    # replace the old style imports. This function monkey patches
+    # the class that implements this functionality
+    import importlib.util
+    importlib.util.spec_from_file_location = patched_spec_from_file_location
+
+
+def patched_spec_from_file_location(name, location, *, module=None, **kwargs):
+    spec = importlib.util.spec_from_file_location(name, location, **kwargs)
+    if location.endswith("__init__.py"):
+        spec.loader = PatchedimpImporter(name.rsplit(".", 1)[0])
+    return spec
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+imp.new_module
+
+def new_module(name):
+    """Create a new module.
+
+    The module and its name are not entered in sys.modules.
+
+    """
+    return types.ModuleType(name)
+
+sys.modules
+
+# A global dictionary that caches already imported modules.
+# This should be considered read-only by code outside sys.
+
+sys.path
+
+# A list of strings that specifies the search path for modules.
+# Initialized from the environment variable PYTHONPATH, plus an
+# installation-dependent default.
+
+sysconfig.get_path
+
+sysconfig.get_path(name):
+    """Return the path corresponding to the `name` argument, or None if no
+    such path is defined. Example argument values are 'stdlib',
+    'platstdlib', 'purelib', 'platlib', 'include', 'scripts', 'data'.
+    Return a string.
+
+    """
+    return get_config_vars().get(name)
+
+get_config_vars()
+
+def get_config_vars():
+    """Get config vars set by sysconfig, augment it with the CONFIG_ARGS."""
+
+    return _CONFIG_VARS
+
+imp.find_module
+
+def find_module(name, path=None):
+    """Search for a module.
+
+    If path is omitted or None, search for a built-in, frozen or special
+    module and return the appropriate module object. 'path' argument can be
+    a sequence -- each item is interpreted as a separate directory path to
+    look for. Return value is None if no module was found.
+    """
+
+    # short circuit if the module is already imported
+    if name in sys.modules:
+        return sys.modules[name]
+
+    result = None
+    try:
+        # search the parents of the given module (or package)
+        modules = sys.modules.copy()
+        for pkg in name.split('.')[:-1]:
+            pkg = modules.pop(pkg)
+            for loader in pkg.__loaders__:
+                loader = getattr(loader, 'load_module', loader)
+                result = loader(pkg.__name__ + '.' + name.rsplit('.', 1)[-1])
+                if result is not None:
+                    break
+            else:
+                continue
+            break
+
+        # if we didn't find the module, try the search path
+        if result is None:
+            if path is None:
+                path = sys.path
+            for item in path:
+                # is it a package?
+                result = safe_hasattr(item, '__path__')
+                if result:
+                    break
+                else:
+                    # a regular module?
+                    f, p, d = None, None, None
+                    try:
+                        f, p, d = imp.find_module(name, [item])
+                    except ImportError:
+                        pass
+                    if f is not None:
+                        break
+
+        # find_module() returns a tuple, not a module
+        if not isinstance(result, tuple):
+            return result
+        result = imp.load_module(name, *result)
+    except:
+        return None
+    else:
+        return result
+
+def load_module(name, file, filename, details):
+    """Load a module, given information returned by find_module().
+
+    The module name must include the full package name, if any.
+
+    """
+    if name in sys.modules:
+        return sys.modules[name]
+    mod = imp.new_module(name)
+    if name in sys.modules:
+        # Somebody got there before us!  Maybe even import_hook...
+        # We need to return what import_hook put into sys.modules
+        mod = sys.modules[name]
+    else:
+        # insert it into sys.modules before anything else, to make sure
+        # that if some other function (e.g., a class constructor) tries
+        # to import the module again, it will get the half-initialized
+        # version.  That may cause problems, but not as bad problems as
+        # if two different objects were inserted into sys.modules.
+        sys.modules[name] = mod
+    if not isinstance(details, (list, tuple)):
+        details = (details,)
+    mod.__loader__ = mod.__loader__.load_module(name)
+    mod.__file__ = filename
+    mod.__name__ = name
+    mod.__package__ = get_package(name)
+    if details[0] == 3:
+        mod.__path__ = [filename]
+    if details[0] in (1, 2, 3):
+        from zipimport import zipimporter
+        mod.__loader__ = zipimporter(filename)
+    else:
+        mod.__loader__ = mod.__loader__.load_module(name)
+    try:
+        get_code(mod)
+    except SyntaxError as msg:
+        raise ImportError(str(msg))
+    return mod
+
+def get_code(mod):
+    """Return the code object for the module.
+
+    """
+    return mod.__code__
+
+sys.modules.pop
+
+def pop(self, key, default=None):
+    # Return the key, default to None if not found
+    return self._pop(key, default)
+
+sys.path.insert
+
+def insert(self, index, object):
+    # Insert object before index.
+    self._list.insert(index, object)
+
+sys.path.pop
+
+def pop(self, index=-1):
+    # Return the item at index (default last).
+    # Raise IndexError if list is empty or index is out of range.
+    return self._pop(index)
+[/PYTHON]
+
+What will be the output of `load_module`, given the following input:
+[INPUT]
+```
+{
+    "self": null,
+    "args": {
+        "name": "some_module",
+        "file": "some_file",
+        "filename": "some_filename",
+        "details": "(src, path, info)"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "is_function": XXX,
+    "module_name": XXX,
+    "file": XXX,
+    "filename": XXX,
+    "details": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+
+ Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+<think>
+The function `load_module` is called with the arguments:
+- `name`: "some_module"
+- `file`: "some_file"
+- `filename`: "some_filename"
+- `details`: "(src, path, info)"
+
+The function performs the following operations:
+1. Checks if the module `some_module` is already in `sys.modules`. Since it is not, it proceeds.
+2. Creates a new module object using `imp.new_module`.
+3. Inserts the new module into `sys.modules` to prevent recursive imports.
+4. Converts `details` into a tuple if it is not already one.
+5. Assigns the module's loader, file, name, package, and path attributes.
+6. If the `details` indicate a package (3), sets the module's path to `[filename]`.
+7. If the `details` indicate a ZIP file (1, 2, 3), sets the module's loader to a `zipimporter`.
+8. Otherwise, sets the module's loader to the result of `mod.__loader__.load_module(name)`.
+9. Tries to get the module's code using `get_code(mod)`.
+10. If a `SyntaxError` occurs during code retrieval, raises an `ImportError`.
+11. Returns the loaded module.
+
+Since no exceptions are raised and the module is successfully loaded, the function returns the module.
+</think>
+<|output|>
+```
+{
+    "is_function": true,
+    "module_name": "some_module",
+    "file": "some_file",
+    "filename": "some_filename",
+    "details": "(src, path, info)"
+}
+```
+</|output|>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class Runner(NamedTuple):
+    """A `pytest.Runner` representation.
+
+    This mirrors the state of :class:`pytest.Runner` and represents the
+    working directory of that class.
+
+    :param Root runner
+
+    :param Popen subprocess
+
+    :param List[Path] locations: Current temp locations that are
+        used by `runner`
+    """
+
+    runner: Runner
+    subprocess: "Popen[bytes]"
+    locations: List[Path] = attr.Factory(list)
+
+    @classmethod
+    def create(cls, tmpdir, monkeypatch=None):
+        p = tmpdir.getbasetemp().parent
+
+        r = runner.Runner(p, path_resolver=tmpdir.path_resolver, printslow=0)
+
+        with lock:
+            singleton._runner = r
+
+        return cls(runner=r, subprocess=r._subprocess)
+
+    def finalise(self):
+        with lock:
+            if singleton._runner is not self.runner:
+                raise RuntimeError(
+                    "called `finalise()` on a non-singleton Runner"
+                )
+
+            singleton._runner = None
+
+        # note that we can not close the original Popen object here because
+        # Python still has open references to it (e.g. `_waitpid_lock` will
+        # leak as it keeps a reference alive).
+        os.kill(self.subprocess.pid, signal.SIGTERM)
+
+    def cwd(self) -> Path:
+        """
+        Return the cwd of the `pytest.Runner`.
+        """
+        return Path(self.runner._dirname)
+
+
+class RunnerFactory(AttrWrapper):
+    @classmethod
+    def from_runner(cls, runner: Runner) -> "RunnerFactory":
+        return cls(Runner.create(runner.cwd(), runner._getmonkeypatch()))
+
+    def _create(self, tmpdir: Path) -> Runner:
+        return Runner.create(tmpdir)
+
+    def _finalise(self, runner: Runner) -> None:
+        runner.finalise()
+
+    def ensure_runner(self, tmpdir: Path) -> Runner:
+        """ """
+        if not (runner := singleton._runner):
+            singleton._runner = runner = self._create(tmpdir)
+        return runner
+
+    def has_runner(self) -> bool:
+        """
+        Returns True if the runner exists, False otherwise.
+        """
+        return singleton._runner is not None
+
+    def find_runner(self) -> Runner | None:
+        """
+        Returns a :class:`Runner` if it exists.
+
+        :raises RuntimeError: if the Runner does not exist.
+        """
+        return singleton._runner or None
+[/PYTHON]
+
+What will be the output of `Runner`, given the following input:
+[INPUT]
+{
+    "self": null,
+    "args": {
+        "runner": "runner1",
+        "subprocess": "subprocess1"
+    },
+    "kwargs": {
+        "locations": []
+    }
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "runner": XXX,
+    "subprocess": XXX,
+    "locations": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "runner": "runner1",
+    "subprocess": "subprocess1",
+    "locations": []
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+class TempDirFactory(AttrWrapper):
+    """ """
+
+    def getbasetemp(self) -> Path:
+        return pathlib.Path(tempfile.mkdtemp(prefix="test_"))
+
+    def get_checker(self) -> CheckDir:
+        return CheckDirFactory(subprocess_runner_factory).from_tmpdir(
+            self.getbasetemp()
+        )
+
+
+class _TempDir(AttrWrapper):
+    path: Path
+    basetemp: Path
+
+
+class

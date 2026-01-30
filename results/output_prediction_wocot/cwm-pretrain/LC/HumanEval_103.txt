@@ -1,0 +1,265 @@
+<think>
+Step 1: Determine if m is less than n. Given n=185 and m=546, m is not less than n, so proceed to calculate the summation of numbers from n to m inclusive.
+Step 2: Initialize the summation variable to 0.
+Step 3: Iterate through the range from n to m (inclusive) and calculate the sum of all numbers in this range.
+Step 4: Calculate the average by dividing the summation by the count of numbers (m - n + 1).
+Step 5: Round the average to the nearest whole number.
+Step 6: Convert the rounded average to its binary representation.
+</think>
+The calculated rounded average is 0b11110.
+[OUTPUT]
+{
+    "output": "0b11110"
+}
+[/OUTPUT]
+
+[FILEPATH] src/preprocess/preprocess_generation_java_source_small.ksh [/FILEPATH]
+#!/usr/bin/env bash
+
+function generate_baseline {
+  echo "Processing $1..."
+  # .train
+  python3 src/preprocess/generate_data_small.py \
+    --model_name_or_path $1 \
+    --dataset gsm8k_small \
+    --finetuning_type classification \
+    --template zero_shot_cot \
+    --split train \
+    --save_json_file_dir data/solutions/generation/gsm8k_source_small/$1 \
+    --tokenizer $1 \
+    --seed 2023 \
+    --cut_prompt 'output' \
+    --max_example 50 \
+    --max_length 1024
+
+  # .val
+  python3 src/preprocess/generate_data_small.py \
+    --model_name_or_path $1 \
+    --dataset gsm8k_small \
+    --finetuning_type classification \
+    --template zero_shot_cot \
+    --split val \
+    --save_json_file_dir data/solutions/generation/gsm8k_source_small/$1 \
+    --tokenizer $1 \
+    --seed 2023 \
+    --cut_prompt 'output' \
+    --max_example 100 \
+    --max_length 1024
+
+  # .test
+  python3 src/preprocess/generate_data_small.py \
+    --model_name_or_path $1 \
+    --dataset gsm8k_small \
+    --finetuning_type classification \
+    --template zero_shot_cot \
+    --split test \
+    --save_json_file_dir data/solutions/generation/gsm8k_source_small/$1 \
+    --tokenizer $1 \
+    --seed 2023 \
+    --cut_prompt 'output' \
+    --max_example 100 \
+    --max_length 1024
+}
+
+# --model_name_or_path google/t5-x
+# --model_name_or_path google/t5-xxl-1.1b
+# --model_name_or_path google/flan-t5-small
+# --model_name_or_path google/flan-t5-base
+# --model_name_or_path google/flan-t5-large
+# --model_name_or_path google/flan-t5-xl
+# --model_name_or_path google/flan-ul2
+# --model_name_or_path facebook/bart-base
+# --model_name_or_path microsoft/phi-2
+
+# openai/gpt-3.5-turbo-instruct
+generate_baseline openai/gpt-3.5-turbo-instruct
+
+# openai/gpt-4-1106-preview
+generate_baseline openai/gpt-4-1106-preview
+
+# openai/gpt-4
+generate_baseline openai/gpt-4
+
+# claude-2.1
+generate_baseline claude-2.1
+
+# claude-instant-1.2
+generate_baseline claude-instant-1.2
+
+# claude-2
+generate_baseline claude-2
+
+# claude-2.0
+generate_baseline claude-2.0
+
+[FILEPATH] src/preprocess/generate_data_small.py [/FILEPATH]
+import argparse
+import copy
+import json
+import os
+import random
+import re
+import sys
+import time
+from tqdm import tqdm
+import numpy as np
+import torch
+from numpy.random import seed
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer, T5ForConditionalGeneration
+from transformers import LlamaForCausalLM, LlamaTokenizer
+from accelerate import Accelerator
+from accelerate import DistributedType
+from accelerate.logging import get_logger
+from datasets import load_dataset
+from src.template.templates import CodeTemplate, ChatTemplate, chats2dialog
+from src.model.modeling_ope_llama import OPELlamaForCausalLM
+from src.utils import ignore_warnings, get_checkpoint, dynamic_import_function, load_hf_lm
+from src.metrics.metrics import compute_metric, Example
+from src.common.registry import registry
+from src.preprocess.simulate_api import api
+from src.preprocess.get_solutions import load_hf_llm_code, load_hf_llm_completion
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--model_name_or_path', type=str, default='', help='LLM model name or path')
+parser.add_argument('--dataset', type=str, default='gsm8k_small', choices=['gsm8k_small', 'multiarith_small'])
+parser.add_argument('--finetuning_type', type=str, default='chat', choices=['instruction', 'chat', 'code', 'classification'])
+parser.add_argument('--template', type=str, default='zero_shot_cot', choices=['zero_shot_cot'])
+parser.add_argument('--save_json_file_dir', type=str, default='')
+parser.add_argument('--tokenizer', type=str, default='', help='Tokenizer path')
+parser.add_argument('--seed', type=int, default=2023, help='Seed for sampling the calibration data.')
+parser.add_argument('--input_max_length', type=int, default=1024, help='Maximum length of input')
+parser.add_argument('--use_sft_inference', action='store_true', default=False, help='Whether to use the sft inference')
+parser.add_argument('--split', type=str, default='train', choices=['train', 'val', 'test'])
+parser.add_argument('--max_example', type=int, default=100, help='Maximum number of examples to evaluate on')
+parser.add_argument('--device_map', type=str, default='auto', choices=['cpu', 'cuda', 'mps', 'auto'])
+parser.add_argument('--top_k', type=int, default=0, help='If > 0, only sample top_k tokens')
+parser.add_argument('--top_p', type=float, default=0, help='If > 0, only sample tokens with top_p probability')
+parser.add_argument('--temperature', type=float, default=1.0, help='Sampling temperature')
+parser.add_argument('--repetition_penalty', type=float, default=1.0, help='Repetition penalty from CTRL paper (https://arxiv.org/abs/1909.05858). If > 1, then repetition is penalized.')
+parser.add_argument('--load_in_8bit', action='store_true', default=False, help='Load model in 8bit mode, which will reduce memory and speed up inference.')
+parser.add_argument('--load_in_4bit', action='store_true', default=False, help='Load model in 4bit mode, which will reduce memory and speed up inference.')
+parser.add_argument('--gptq', action='store_true', default=False, help='Load 4bit pre-quantized model which accerates inference with a little output quality degradation.')
+parser.add_argument('--cut_prompt', type=str, default='', help='Prompt to remove from the beginning of generated answer')
+parser.add_argument('--stop_words', nargs='+', default=[], help='List of words to stop generation when encountered.')
+parser.add_argument('--max_length', type=int, default=1024, help='Maximum length of the output tokens')
+parser.add_argument('--fp16', action='store_true', default=False, help='Enable fp16 for inference')
+parser.add_argument('--dry_run', action='store_true', default=False, help='Do not save results')
+parser.add_argument('--clean_output', action='store_true', default=False, help='Clean output from extra characters')
+parser.add_argument('--code_shot', type=int, default=0, help='Number of code shots to include in the prompt')
+parser.add_argument('--fail_log', type=str, default='', help='Path to log failed examples')
+parser.add_argument('--use_direct_load', action='store_true', default=False, help='Whether to use direct load')
+parser.add_argument('--use_example', action='store_true', default=False, help='Whether to use example')
+parser.add_argument('--limit', action='store_true', default=False, help='Limit the number of examples to generate')
+parser.add_argument('--hf_generation_model', action='store_true', default=False, help='Whether to use HF generation model')
+parser.add_argument('--use_memory_replay', action='store_true', default=False, help='Whether to use memory replay')
+parser.add_argument('--replay_threshold', type=float, default=0.2, help='Threshold for memory replay')
+parser.add_argument('--save_replay_json_dir', type=str, default='', help='Path to save replay JSON files')
+parser.add_argument('--token_dir', type=str, default='', help='Path to save token JSON files')
+parser.add_argument('--example_dir', type=str, default='', help='Path to save example JSON files')
+parser.add_argument('--solution_file_dir', type=str, default='', help='Path to save solution JSON files')
+parser.add_argument('--get_solution', action='store_true', default=False, help='Whether to get solution')
+parser.add_argument('--overwrite', action='store_true', default=False, help='Overwrite existing files')
+parser.add_argument('--chat_model', type=str, default='openai/gpt-3.5-turbo', help='Chat model to use')
+parser.add_argument('--source_code', type=str, default='', help='Source code to use')
+parser.add_argument('--get_gpt_solution', action='store_true', default=False, help='Whether to get GPT solution')
+parser.add_argument('--clean_solution', action='store_true', default=False, help='Whether to clean solution')
+parser.add_argument('--save_json_file_dir_1118', type=str, default='', help='Path to save solution JSON files')
+parser.add_argument('--solution_file_dir_1118', type=str, default='', help='Path to save solution JSON files')
+parser.add_argument('--token_dir_1118', type=str, default='', help='Path to save token JSON files')
+parser.add_argument('--solution_file_dir_1118_3shot', type=str, default='', help='Path to save solution JSON files')
+parser.add_argument('--save_json_file_dir_3shot', type=str, default='', help='Path to save solution JSON files')
+parser.add_argument('--use_source_code', action='store_true', default=False, help='Whether to use source code')
+parser.add_argument('--use_self_consistency', action='store_true', default=False, help='Whether to use self consistency')
+parser.add_argument('--use_example_self_consistency', action='store_true', default=False, help='Whether to use self consistency with examples')
+parser.add_argument('--cot_example_dir', type=str, default='', help='Path to save solution JSON files')
+parser.add_argument('--use_cot_example', action='store_true', default=False, help='Whether to use self consistency with examples')
+parser.add_argument('--use_self_consistency_cot_example', action='store_true', default=False, help='Whether to use self consistency with examples')
+parser.add_argument('--temp', type=float, default=1.0, help='Temperature for self consistency')
+parser.add_argument('--step', type=int, default=1, help='Step for self consistency')
+parser.add_argument('--use_self_consistency_cot_example_chat', action='store_true', default=False, help='Whether to use self consistency with examples')
+parser.add_argument('--use_cot_example_chat', action='store_true', default=False, help='Whether to use self consistency with examples')
+parser.add_argument('--max_new_tokens', type=int, default=128, help='Max new tokens for self consistency')
+parser.add_argument('--use_gpt4', action='store_true', default=False, help='Whether to use GPT-4')
+parser.add_argument('--save_solution_file_dir', type=str, default='', help='Path to save solution JSON files')
+parser.add_argument('--use_gpt3_5', action='store_true', default=False, help='Whether to use GPT-3.5')
+parser.add_argument('--use_gpt4_1106_preview', action='store_true', default=False, help='Whether to use GPT-4-1106-preview')
+parser.add_argument('--use_claude2_1', action='store_true', default=False, help='Whether to use claude-2.1')
+parser.add_argument('--use_claude_instant_1_2', action='store_true', default=False, help='Whether to use claude-instant-1.2')
+parser.add_argument('--use_claude2', action='store_true', default=False, help='Whether to use claude-2')
+parser.add_argument('--use_claude2_0', action='store_true', default=False, help='Whether to use claude-2.0')
+parser.add_argument('--use_open_source', action='store_true', default=False, help='Whether to use open source models')
+parser.add_argument('--use_llama2_70b', action='store_true', default=False, help='Whether to use llama2-70b')
+parser.add_argument('--use_llama2_70b_chat', action='store_true', default=False, help='Whether to use llama2-70b-chat')
+parser.add_argument('--use_llama2_70b_chat_flash', action='store_true', default=False, help='Whether to use llama2-70b-chat')
+parser.add_argument('--use_llama3_70b', action='store_true', default=False, help='Whether to use llama3-70b')
+parser.add_argument('--use_llama3_8b', action='store_true', default=False, help='Whether to use llama3-8b')
+parser.add_argument('--use_hf_llm_completion', action='store_true', default=False, help='Whether to use huggingface llm completion')
+parser.add_argument('--use_hf_llm_code', action='store_true', default=False, help='Whether to use huggingface llm code')
+parser.add_argument('--use_hf_model_name_or_path', type=str, default='', help='Model path to use')
+parser.add_argument('--use_hf_model_toker_name_or_path', type=str, default='', help='Model path to use')
+parser.add_argument('--gpt4_solution_file_dir', type=str, default='', help='Path to save solution JSON files')
+parser.add_argument('--solution_file_dir_java', type=str, default='', help='Path to save solution JSON files')
+
+args = parser.parse_args()
+assert args.tokenizer, 'Please specify the tokenizer path, i.e., the model name or path'
+
+ignore_warnings()
+logger = get_logger(__name__)
+
+if args.model_name_or_path != '':
+    # if not os.path.exists(os.path.join(args.save_json_file_dir, f'pred_results_{args.model_name_or_path.split("/")[-1]}_temp{args.temperature}_seed{args.seed}.json')):
+    #     os.makedirs(os.path.join(args.save_json_file_dir, f'pred_results_{args.model_name_or_path.split("/")[-1]}_temp{args.temperature}_seed{args.seed}.json'), exist_ok=True)
+    if args.save_json_file_dir == '':
+        args.save_json_file_dir = os.path.join(
+            'data/solutions',
+            f'generations_{args.split}_small',
+            args.model_name_or_path.split('/')[-1] if args.model_name_or_path.startswith('openai/') or args.model_name_or_path.startswith('claude-') else f'generations_{args.split}_small' + ('_cache' if args.limit else ''),
+            f'pred_results_{args.model_name_or_path.split("/")[-1]}_temp{args.temperature}_seed{args.seed}.json'
+        )
+    if os.path.exists(args.save_json_file_dir) and not args.overwrite:
+        logger.warning(f'File {args.save_json_file_dir} already exists. Skipping...')
+        sys.exit(0)
+    os.makedirs(os.path.dirname(args.save_json_file_dir), exist_ok=True)
+else:
+    args.save_json_file_dir = os.path.join(
+        'data/solutions',
+        f'generations_{args.split}_small',
+        args.tokenizer.split('/')[-1] if args.tokenizer.startswith('openai/') or args.tokenizer.startswith('claude-') else 'generations',
+        f'pred_results_{args.tokenizer.split("/")[-1]}_temp{args.temperature}_seed{args.seed}.json'
+    )
+    if os.path.exists(args.save_json_file_dir) and not args.overwrite:
+        logger.warning(f'File {args.save_json_file_dir} already exists. Skipping...')
+        sys.exit(0)
+    os.makedirs(os.path.dirname(args.save_json_file_dir), exist_ok=True)
+
+
+use_few_shot = True
+hf_load_type = 'flash_attn'
+
+tokenizer_name_or_path = args.model_name_or_path if args.model_name_or_path else args.tokenizer
+model_name_or_path = args.model_name_or_path
+
+if args.solution_file_dir == '':
+    args.solution_file_dir = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_solution.json')
+if args.solution_file_dir_1118 == '':
+    args.solution_file_dir_1118 = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_solution.json')
+if args.token_dir == '':
+    args.token_dir = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_tokens.json')
+if args.example_dir == '':
+    args.example_dir = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_example.json')
+if args.cot_example_dir == '':
+    args.cot_example_dir = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_cot_example.json')
+if args.save_json_file_dir_1118 == '':
+    args.save_json_file_dir_1118 = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_solution_1118.json')
+if args.token_dir_1118 == '':
+    args.token_dir_1118 = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_tokens_1118.json')
+if args.solution_file_dir_1118_3shot == '':
+    args.solution_file_dir_1118_3shot = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_solution_1118_3shot.json')
+if args.save_json_file_dir_3shot == '':
+    args.save_json_file_dir_3shot = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_solution_3shot.json')
+if args.save_solution_file_dir == '':
+    args.save_solution_file_dir = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_solution.json')
+if args.gpt4_solution_file_dir == '':
+    args.gpt4_solution_file_dir = os.path.join('data/solutions', f'generations_{args.split}_small', 'gpt4_solution.json')
+if args.solution_file

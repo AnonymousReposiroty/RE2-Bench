@@ -1,0 +1,36 @@
+# Problem: django__django-11618@@django.contrib.staticfiles.storage.py@@read_manifest
+# Benchmark: Swebench
+# Module: django.contrib.staticfiles.storage
+# Function: read_manifest
+
+from django.contrib.staticfiles.storage import ManifestFilesMixin
+
+
+def test_input(pred_input):
+    obj_ins = ManifestFilesMixin()
+    obj_ins._constructor_args = [[], {}]
+    obj_ins._location = '/tmp/django__qhwfn8e/tmpzocmelzr'
+    obj_ins._base_url = '/static/'
+    obj_ins._file_permissions_mode = None
+    obj_ins._directory_permissions_mode = None
+    obj_ins._patterns = {'*.css': None}
+    obj_ins.hashed_files = {'cached/css/img/window.png': 'cached/css/img/window.acae32e4532b.png', 'cached/css/fonts/font.svg': 'cached/css/fonts/font.b8d603e42714.svg', 'cached/css/fonts/font.eot': 'cached/css/fonts/font.b9b105392eb8.eot', 'cached/img/relative.png': 'cached/img/relative.acae32e4532b.png', 'cached/css/ignored.css': 'cached/css/ignored.554da52152af.css', 'cached/css/window.css': 'cached/css/window.5d5c10836967.css', 'cached/css/fragments.css': 'cached/css/fragments.a60c0e74834f.css', 'test/vendor/module.js': 'test/vendor/module.d41d8cd98f00.js', 'cached/styles_insensitive.css': 'cached/styles_insensitive.3fa427592a53.css', 'cached/import.css': 'cached/import.f53576679e5a.css', 'cached/absolute.css': 'cached/absolute.eb04def9f9a4.css', 'cached/other.css': 'cached/other.d41d8cd98f00.css', 'cached/url.css': 'cached/url.902310b73412.css', 'cached/styles.css': 'cached/styles.5e0040571e1a.css', 'cached/relative.css': 'cached/relative.c3e9e1ea6f2e.css', 'cached/test.js': 'cached/test.62789ffcd280.js', 'test/file.txt': 'test/file.dad0999e4f8f.txt', 'test/camelCase.txt': 'test/camelCase.dcc960fbf12d.txt', 'subdir/test.txt': 'subdir/test.b3eff404e5bb.txt', 'prefix/test.txt': 'prefix/test.131f0ab129ae.txt', 'test/file1.txt': 'test/file1.6c0403df55de.txt', 'test/⊗.txt': 'test/⊗.8a3dda0dff20.txt', 'test/window.png': 'test/window.9224bd75b323.png', 'test/nonascii.css': 'test/nonascii.a5155db9d7cc.css', 'test/%2F.txt': 'test/.txt.fd1cb434fc14', 'absolute_root.css': 'absolute_root.f821df1b64f7.css', 'styles_root.css': 'styles_root.401f2509a628.css', 'test.txt': 'test.b3eff404e5bb.txt', 'file2.txt': 'file2.ae652b5c514c.txt', 'media-file.txt': 'media-file.65b17f937dfa.txt'}
+    obj_ins.base_location = '/tmp/django__qhwfn8e/tmpzocmelzr'
+    obj_ins.location = '/tmp/django__qhwfn8e/tmpzocmelzr'
+    obj_ins.directory_permissions_mode = None
+    obj_ins.file_permissions_mode = 420
+    obj_ins.base_url = '/static/'
+    obj_ins_pred = ManifestFilesMixin()
+    obj_ins_pred._constructor_args = pred_input['self']['_constructor_args']
+    obj_ins_pred._location = pred_input['self']['_location']
+    obj_ins_pred._base_url = pred_input['self']['_base_url']
+    obj_ins_pred._file_permissions_mode = pred_input['self']['_file_permissions_mode']
+    obj_ins_pred._directory_permissions_mode = pred_input['self']['_directory_permissions_mode']
+    obj_ins_pred._patterns = pred_input['self']['_patterns']
+    obj_ins_pred.hashed_files = pred_input['self']['hashed_files']
+    obj_ins_pred.base_location = pred_input['self']['base_location']
+    obj_ins_pred.location = pred_input['self']['location']
+    obj_ins_pred.directory_permissions_mode = pred_input['self']['directory_permissions_mode']
+    obj_ins_pred.file_permissions_mode = pred_input['self']['file_permissions_mode']
+    obj_ins_pred.base_url = pred_input['self']['base_url']
+    assert obj_ins.read_manifest()==obj_ins_pred.read_manifest(), 'Prediction failed!'

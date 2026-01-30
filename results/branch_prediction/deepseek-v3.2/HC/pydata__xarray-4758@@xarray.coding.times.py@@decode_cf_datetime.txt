@@ -1,0 +1,153 @@
+[THOUGHT]
+Let's trace through the execution step by step with the given input.
+
+We are calling `decode_cf_datetime` with:
+- num_dates = [12300, 12301, 12302, 12303, 12304]
+- units = "hour since 1680-01-01 00:00:00.500000"
+- kwargs includes calendar = "standard"
+- No explicit use_cftime argument.
+
+Step 1: Line 65: `num_dates = np.asarray(num_dates)` → creates numpy array.
+Step 2: Line 66: `flat_num_dates = num_dates.ravel()` → flattened array.
+
+Step 3: Line 67: `if calendar is None:` → The input provides calendar="standard" via kwargs, so calendar is NOT None. Therefore this branch is NOT taken → 'N'.
+
+Step 4: Line 70: `if use_cftime is None:` → use_cftime was not provided in input, so it defaults to None. Therefore this branch IS taken → 'Y'.
+
+Inside this branch:
+- Lines 71-77: Try `_decode_datetime_with_pandas` first, and if it raises exceptions, fall back to `_decode_datetime_with_cftime`.
+- We need to determine whether the try block succeeds or raises an exception.
+- The units are "hour since 1680-01-01 00:00:00.500000". The reference year is 1680.
+- The num_dates values are 12300 hours after the reference date.
+- 12300 hours ≈ 512.5 days ≈ 1.4 years. So resulting dates are around 1681–1682.
+- Pandas can handle dates starting from 1677-09-21 00:12:43.145225 (minimum numpy datetime64[ns]), so 1681 is within range.
+- However, the reference datetime includes fractional seconds: "00:00:00.500000". This might cause issues? Pandas should handle fractional seconds fine.
+- But let's check: Pandas' `pd.to_datetime` with units like "hours since ..." might work, but the reference has microseconds. Should be okay.
+- The calendar is "standard" which is supported by pandas.
+- So likely no exception is raised, and `dates = _decode_datetime_with_pandas(...)` succeeds.
+- Therefore we skip the except block.
+- Then we go to lines 78-93: check if dates[np.nanargmin(num_dates)].year < 1678 or >= 2262.
+- The min num_dates is 12300, which corresponds to a date around 1681. So year is ~1681, which is NOT < 1678 and NOT >= 2262. So condition is False.
+- Therefore we skip the warning and cftime_to_nptime conversion.
+- So after line 77, dates are numpy datetime64 objects from pandas.
+
+Thus, after line 70 branch, we don't go into the `elif use_cftime:` branch (line 94) because use_cftime is None, so condition `elif use_cftime:` evaluates to False (None is not truthy). Therefore that branch is NOT taken → 'N'.
+
+So branch outcomes:
+- Line 67: taken='N'
+- Line 70: taken='Y'
+- Line 94: taken='N'
+
+Note: For line 70, the branch is taken once, so list length 1: 'Y'.
+For line 94, it's also encountered once, so list length 1: 'N'.
+
+Thus:
+- Line 67: ['N']
+- Line 70: ['Y']
+- Line 94: ['N']
+
+Wait, but there's also an `else:` branch after line 94 (line 96). That else is not marked with BRANCH tags, so we don't need to annotate it.
+[/THOUGHT]
+
+[ANSWER]
+1 import re
+2 import warnings
+3 from datetime import datetime, timedelta
+4 from distutils.version import LooseVersion
+5 from functools import partial
+6 import numpy as np
+7 import pandas as pd
+8 from pandas.errors import OutOfBoundsDatetime
+9 from ..core import indexing
+10 from ..core.common import contains_cftime_datetimes
+11 from ..core.formatting import first_n_items, format_timestamp, last_item
+12 from ..core.variable import Variable
+13 from .variables import (
+14     SerializationWarning,
+15     VariableCoder,
+16     lazy_elemwise_func,
+17     pop_to,
+18     safe_setitem,
+19     unpack_for_decoding,
+20     unpack_for_encoding,
+21 )
+22 import cftime
+23 import cftime
+24 
+25 _STANDARD_CALENDARS = {"standard", "gregorian", "proleptic_gregorian"}
+26 _NS_PER_TIME_DELTA = {
+27     "ns": 1,
+28     "us": int(1e3),
+29     "ms": int(1e6),
+30     "s": int(1e9),
+31     "m": int(1e9) * 60,
+32     "h": int(1e9) * 60 * 60,
+33     "D": int(1e9) * 60 * 60 * 24,
+34 }
+35 _US_PER_TIME_DELTA = {
+36     "microseconds": 1,
+37     "milliseconds": 1_000,
+38     "seconds": 1_000_000,
+39     "minutes": 60 * 1_000_000,
+40     "hours": 60 * 60 * 1_000_000,
+41     "days": 24 * 60 * 60 * 1_000_000,
+42 }
+43 _NETCDF_TIME_UNITS_CFTIME = [
+44     "days",
+45     "hours",
+46     "minutes",
+47     "seconds",
+48     "milliseconds",
+49     "microseconds",
+50 ]
+51 _NETCDF_TIME_UNITS_NUMPY = _NETCDF_TIME_UNITS_CFTIME + ["nanoseconds"]
+52 TIME_UNITS = frozenset(
+53     [
+54         "days",
+55         "hours",
+56         "minutes",
+57         "seconds",
+58         "milliseconds",
+59         "microseconds",
+60         "nanoseconds",
+61     ]
+62 )
+63 
+64 def decode_cf_datetime(num_dates, units, calendar=None, use_cftime=None):
+65     num_dates = np.asarray(num_dates)
+66     flat_num_dates = num_dates.ravel()
+67     if calendar is None: ## [BRANCH]taken=[N][/BRANCH]
+68         calendar = "standard"
+69 
+70     if use_cftime is None: ## [BRANCH]taken=[Y][/BRANCH]
+71         try:
+72             dates = _decode_datetime_with_pandas(flat_num_dates, units, calendar)
+73         except (KeyError, OutOfBoundsDatetime, OverflowError):
+74             dates = _decode_datetime_with_cftime(
+75                 flat_num_dates.astype(float), units, calendar
+76             )
+77 
+78             if (
+79                 dates[np.nanargmin(num_dates)].year < 1678
+80                 or dates[np.nanargmax(num_dates)].year >= 2262
+81             ):
+82                 if calendar in _STANDARD_CALENDARS:
+83                     warnings.warn(
+84                         "Unable to decode time axis into full "
+85                         "numpy.datetime64 objects, continuing using "
+86                         "cftime.datetime objects instead, reason: dates out "
+87                         "of range",
+88                         SerializationWarning,
+89                         stacklevel=3,
+90                     )
+91             else:
+92                 if calendar in _STANDARD_CALENDARS:
+93                     dates = cftime_to_nptime(dates)
+94     elif use_cftime: ## [BRANCH]taken=[N][/BRANCH]
+95         dates = _decode_datetime_with_cftime(flat_num_dates, units, calendar)
+96     else:
+97         dates = _decode_datetime_with_pandas(flat_num_dates, units, calendar)
+98 
+99     return dates.reshape(num_dates.shape)
+100 
+[/ANSWER]

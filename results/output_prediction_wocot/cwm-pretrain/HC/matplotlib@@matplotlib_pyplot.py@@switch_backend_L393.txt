@@ -1,0 +1,614 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+import threading
+from collections import deque
+
+class WorkerPool:
+    def __init__(self, num_workers=4):
+        self.tasks = deque()
+        self.results = deque()
+        self.lock = threading.Lock()
+        self.num_workers = num_workers
+        self.pool = []
+        self.stopped = False
+        
+    def submit(self, task):
+        """Add task to queue and notify worker if available"""
+        with self.lock:
+            self.tasks.append(task)
+            if len(self.pool) < self.num_workers:
+                thread = threading.Thread(target=self._worker)
+                thread.daemon = True
+                thread.start()
+                self.pool.append(thread)
+    
+    def _worker(self):
+        """Worker thread that processes tasks"""
+        while True:
+            task = None
+            with self.lock:
+                if self.stopped and not self.tasks:
+                    break
+                if self.tasks:
+                    task = self.tasks.popleft()
+            
+            if task:
+                result = task()
+                with self.lock:
+                    self.results.append(result)
+            
+            # Small sleep to prevent busy-waiting
+            time.sleep(0.01)
+    
+    def get_result(self, timeout=None):
+        """Get a result with timeout"""
+        start_time = time.time()
+        while True:
+            with self.lock:
+                if self.results:
+                    return self.results.popleft()
+            if timeout is not None and time.time() - start_time > timeout:
+                raise TimeoutError("Timeout waiting for result")
+            time.sleep(0.01)
+    
+    def shutdown(self):
+        """Shut down all workers"""
+        with self.lock:
+            self.stopped = True
+        for thread in self.pool:
+            thread.join()
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+time.sleep
+threading.Thread
+threading.Lock
+
+What will be the output of `WorkerPool.submit`, given the following input:
+[INPUT]
+{
+    "self": {
+        "tasks": [],
+        "results": [],
+        "lock": "<threading.Lock object>",
+        "num_workers": 4,
+        "pool": [],
+        "stopped": false
+    },
+    "args": {
+        "task": "<function test_function at 0x7f8c1e19a2c0>"
+    }
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "output": null
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from pathlib import Path
+from typing import Sequence, Optional, Iterator
+from unittest.mock import patch
+from sphinx.application import Sphinx
+from sphinx.config import Config
+from sphinx.util import logging
+from sphinx.pycode import ModuleAnalyzer
+
+def setup_logging():
+    """Configure logging for Sphinx applications."""
+    logger = logging.getLogger('sphinx')
+    logger.propagate = False
+    logger.addHandler(logging.NullHandler())
+    return logger
+
+def load_extensions(
+    app: Sphinx,
+    extensions: Sequence[str],
+    skip_validation: bool = False
+) -> None:
+    """
+    Load all given extensions, in the order given. If an extension
+    modifies the list of extensions, :exc:`RuntimeError` is raised.
+    """
+    extensions = list(extensions)  # in case it is a tuple or similar
+
+    # Must perform a copy to catch extensions modifying the list.
+    extensions_copy = extensions[:]
+
+    # The extensions will be loaded in reversed order as extensions
+    # are usually provided as a list and we want to respect the order
+    # of the extensions specified in the extensions list. The reversed
+    # order is needed because loading the extensions may in turn add
+    # further extensions in the extensions list.
+    for modname in reversed(extensions):
+        app.setup_extension(modname)
+    # Check all extensions was loaded
+    if extensions != extensions_copy:
+        raise RuntimeError('some extensions did add new extensions')
+    
+    if not skip_validation:
+        app._validate_extensions()
+
+def find_modules(
+    path: Path,
+    ignore_patterns: Optional[Sequence[str]] = None
+) -> Iterator[Path]:
+    """
+    Find Python modules in the given directory, recursively.
+    """
+    # If no ignore patterns are given, we use the standard ones
+    if ignore_patterns is None:
+        ignore_patterns = [
+            '^.*/\\.\\..*$',
+            '^.*/#.*#$',
+            '^.*/(?:CVS|RCS|SCCS|\\.svn|_MTN|\\.git|\\.hg|\\.bzr|_darcs)$',
+            '^.*/(?:[Mm]akefile|GNUmakefile|Makefile\\.in|autom4te\\.cache)$',
+            '^.*/(?:pytyped|\\.pytype)$',
+        ]
+    ignore_patterns = [Path(pat).as_posix() for pat in ignore_patterns]
+    
+    for pyfile in find_files(path, ignore_patterns):
+        if pyfile.suffix == '.py':
+            yield pyfile
+
+def find_files(
+    path: Path,
+    ignore_patterns: Optional[Sequence[str]] = None
+) -> Iterator[Path]:
+    """
+    Find files in the given directory, recursively.
+    """
+    if ignore_patterns is None:
+        ignore_patterns = ['.*', '*~']
+    ignore_patterns = [Path(pat).as_posix() for pat in ignore_patterns]
+    
+    ignore_test = lambda f: any(f.match(pat) for pat in ignore_patterns)
+    for root, dirs, files in os.walk(path):
+        root = Path(root)
+        dirs[:] = [d for d in dirs if not ignore_test(root / d)]
+        for filename in files:
+            if not ignore_test(filename):
+                yield root / filename
+
+def read_config(
+    app: Sphinx,
+    silent: bool = False
+) -> None:
+    """
+    Read configuration from Sphinx configuration file and make it accessible
+    via ``app.config``.
+    """
+    logger = setup_logging()
+    config = Config()
+    for cfgname in ['conf', 'configuration', 'conf.py']:
+        cfgfile = Path(cfgname)
+        if cfgfile.exists():
+            config.read(cfgfile, app.tags, silent=silent)
+            break
+    app.config = config
+    return config
+
+def get_analysis_for_source(
+    source: Path
+) -> ModuleAnalyzer:
+    """
+    Get a module analyzer for the given source file.
+    """
+    with open(source, 'r') as f:
+        source = f.read()
+    analyzer = ModuleAnalyzer.for_string(source, source.name)
+    analyzer.find_tags()
+    return analyzer
+
+def check_module_dependencies(
+    app: Sphinx,
+    modules: Sequence[Path]
+) -> None:
+    """
+    Check that all module dependencies are found and accessible.
+    """
+    for module in modules:
+        try:
+            analyzer = get_analysis_for_source(module)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to analyze {module}") from exc
+        if analyzer.tags.has('needs-sphinx'):
+            app._load_needs_sphinx(analyzer)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+Path
+Config
+ModuleAnalyzer
+
+What will be the output of `load_extensions`, given the following input:
+[INPUT]
+```
+{
+    "app": {
+        "extensions": {
+            "sphinx.ext.autodoc": {
+                "imported": true
+            },
+            "sphinx.ext.doctest": {
+                "imported": true
+            }
+        },
+        "_pending_setups": []
+    },
+    "extensions": ["sphinx.ext.autodoc", "sphinx.ext.doctest"],
+    "skip_validation": true
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+
+ Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+import io
+import sys
+
+class Capturing(list):
+    """
+    List subclass that captures stdout. Acts like a list, and has the additional
+    convenience of being able to be used as a context manager, at which point
+    it will start capturing whatever is written to stdout.
+    """
+    def __enter__(self):
+        self._stdout = sys.stdout
+        sys.stdout = self._stringio = io.StringIO()
+        return self
+
+    def __exit__(self, *args):
+        self.extend(self._stringio.getvalue().splitlines())
+        del self._stringio
+        sys.stdout = self._stdout
+
+    def __repr__(self):
+        return "<Capturing %s>" % list.__repr__(self)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sys.stdout
+io.StringIO
+
+What will be the output of `Capturing.__repr__`, given the following input:
+[INPUT]
+```
+{
+    "self": [
+        "Hello World",
+        "foo",
+        "bar"
+    ]
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "output": "<Capturing ['Hello World', 'foo', 'bar']>"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import sys
+import csv
+from contextlib import contextmanager
+
+@contextmanager
+def unicode_csv_reader(utf8_data, dialect=csv.excel, **kwargs):
+    """
+    Read rows from the CSV file. We encode the CSV file to a UTF-8 stream.
+    
+    :param utf8_data: An object that supports a `.read` interface similar to a file object.
+    :param dialect: The CSV dialect to use for parsing the CSV file.
+    :param kwargs: Additional keyword arguments to pass to the csv.reader constructor.
+    :return: A CSV reader object that can be used to iterate over the rows of the CSV file.
+    """
+    # When reading a CSV file from a bytes stream, we must first decode the bytes to text.
+    # The default encoding for the csv module is 'ascii', which is not sufficient for many
+    # real-world CSV files. So, we will use the 'utf-8' encoding.
+    csv_reader = csv.reader(utf8_data, dialect=dialect, **kwargs)
+    yield csv_reader
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+csv.reader
+csv.excel
+
+What will be the output of `unicode_csv_reader`, given the following input:
+[INPUT]
+```
+{
+    "utf8_data": "Hello, World\nfoo, bar\n",
+    "dialect": "excel",
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+
+ Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class CombinedArgs:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+class C():
+    def __init__(self):
+        self.x = 0
+
+    def f(self, c, **kwargs):
+        combined = CombinedArgs(**kwargs)
+        return c.x, combined.name
+
+def func(c, **kwargs):
+    return c.f(c, **kwargs)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+CombinedArgs
+C.__init__
+C.f
+
+What will be the output of `func`, given the following input:
+[INPUT]
+{
+    "c": {
+        "x": 0
+    },
+    "kwargs": {
+        "name": "john"
+    }
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": [
+        XXX, 
+        XXX
+    ]
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+```
+{
+    "output": [
+        0, 
+        "john"
+    ]
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import heapq
+from typing import List, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures._base import Future
+
+class WorkItem:
+    """A work item."""
+    def __init__(self, id: str, fn: callable, args: tuple, **kwargs):
+        self.id = id
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+
+    def __lt__(self, other: 'WorkItem') -> bool:
+        return self.id < other.id
+
+    def __repr__(self) -> str:
+        return f"<WorkItem id={self.id}>"
+
+class Worker:
+    """A worker."""
+    def __init__(self, id: int):
+        self.id = id
+
+    def __repr__(self) -> str:
+        return f"<Worker id={self.id}>"
+
+class WorkerPool:
+    """A pool of workers."""
+    def __init__(self, max_workers: int = 2):
+        self.max_workers = max_workers
+        self.workers = []
+        for i in range(max_workers):
+            self.workers.append(Worker(i))
+        self.work_queue = []
+        self.future_queue = []
+        self.results = {}
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._add_workers_to_queue()
+        self._add_futures_to_queue()
+
+    def _add_workers_to_queue(self) -> None:
+        for worker in self.workers:
+            heapq.heappush(self.work_queue, worker)
+
+    def _add_futures_to_queue(self) -> Future:
+        for worker in self.workers:
+            self.future_queue.append(self.executor.submit(self._worker, worker))
+
+    def _worker(self, worker: Worker) -> None:
+        while True:
+            work_item = self._get_work_item()
+            if work_item is None:
+                break
+            result = work_item.fn(*work_item.args, **work_item.kwargs)
+            self.results[work_item.id] = result
+
+    def _get_work_item(self) -> WorkItem:
+        if not self.work_queue:
+            return None
+        worker = heapq.heappop(self.work_queue)
+        work_item = self.work_queue.pop(0)
+        return work_item
+
+    def submit(self, id: str, fn: callable, *args, **kwargs) -> None:
+        work_item = WorkItem(id, fn, args, kwargs)
+        self.work_queue.append(work_item)
+        self._worker()
+
+    def get_result(self, id: str) -> any:
+        return self.results[id]
+
+    def shutdown(self) -> None:
+        self.executor.shutdown(wait=True)
+
+def run(work_pool: WorkerPool) -> None:
+    work_pool.submit("1", lambda: 1 + 2)
+    work_pool.submit("2", lambda: 2 + 3)
+    result1 = work_pool.get_result("1")
+    result2 = work_pool.get_result("2")
+    assert result1 == 3
+    assert result2 == 5
+    work_pool.shutdown()
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+heapq.heappush
+heapq.heappop
+ThreadPoolExecutor.submit
+ThreadPoolExecutor.shutdown
+
+What will be the output of `run`, given the following input:
+[INPUT]
+```
+{
+    "work_pool": {
+        "max_workers": 2,
+        "workers": [
+            {
+                "id": 0
+            },
+            {
+                "id": 1
+            }
+        ],
+        "work_queue": [],
+        "future_queue": [],
+        "results": {}
+    }
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX
+}
+```
+[/STRUCTURE]
+
+[OUTPUT]
+
+ Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+from typing import List, Tuple, Optional
+import numpy as np
+
+class StatefulModel:
+    def __init__(self):
+        self.weights = np.array([0.1, 0.2])
+        self.bias = 0.3
+        self.history = []
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        if not isinstance(x, np.ndarray

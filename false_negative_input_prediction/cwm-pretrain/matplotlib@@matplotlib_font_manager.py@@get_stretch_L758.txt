@@ -1,0 +1,829 @@
+<<FUNCTION_NAME>>
+
+get_stretch
+
+<<CODE>>
+
+import os
+import matplotlib as mpl
+from matplotlib import _api, _afm, cbook, ft2font
+from matplotlib._fontconfig_pattern import (
+    parse_fontconfig_pattern, generate_fontconfig_pattern)
+from matplotlib.rcsetup import _validators
+
+class FontProperties:
+    """
+    A class for storing and manipulating font properties.
+
+    The font properties are the six properties described in the
+    `W3C Cascading Style Sheet, Level 1
+    <http://www.w3.org/TR/1998/REC-CSS2-19980512/>`_ font
+    specification and *math_fontfamily* for math fonts:
+
+    - family: A list of font names in decreasing order of priority.
+      The items may include a generic font family name, either 'sans-serif',
+      'serif', 'cursive', 'fantasy', or 'monospace'.  In that case, the actual
+      font to be used will be looked up from the associated rcParam during the
+      search process in `.findfont`. Default: :rc:`font.family`
+
+    - style: Either 'normal', 'italic' or 'oblique'.
+      Default: :rc:`font.style`
+
+    - variant: Either 'normal' or 'small-caps'.
+      Default: :rc:`font.variant`
+
+    - stretch: A numeric value in the range 0-1000 or one of
+      'ultra-condensed', 'extra-condensed', 'condensed',
+      'semi-condensed', 'normal', 'semi-expanded', 'expanded',
+      'extra-expanded' or 'ultra-expanded'. Default: :rc:`font.stretch`
+
+    - weight: A numeric value in the range 0-1000 or one of
+      'ultralight', 'light', 'normal', 'regular', 'book', 'medium',
+      'roman', 'semibold', 'demibold', 'demi', 'bold', 'heavy',
+      'extra bold', 'black'. Default: :rc:`font.weight`
+
+    - size: Either a relative value of 'xx-small', 'x-small',
+      'small', 'medium', 'large', 'x-large', 'xx-large' or an
+      absolute font size, e.g., 10. Default: :rc:`font.size`
+
+    - math_fontfamily: The family of fonts used to render math text.
+      Supported values are: 'dejavusans', 'dejavuserif', 'cm',
+      'stix', 'stixsans' and 'custom'. Default: :rc:`mathtext.fontset`
+
+    Alternatively, a font may be specified using the absolute path to a font
+    file, by using the *fname* kwarg.  However, in this case, it is typically
+    simpler to just pass the path (as a `pathlib.Path`, not a `str`) to the
+    *font* kwarg of the `.Text` object.
+
+    The preferred usage of font sizes is to use the relative values,
+    e.g.,  'large', instead of absolute font sizes, e.g., 12.  This
+    approach allows all text sizes to be made larger or smaller based
+    on the font manager's default font size.
+
+    This class accepts a single positional string as fontconfig_ pattern_,
+    or alternatively individual properties as keyword arguments::
+
+        FontProperties(pattern)
+        FontProperties(*, family=None, style=None, variant=None, ...)
+
+    This support does not depend on fontconfig; we are merely borrowing its
+    pattern syntax for use here.
+
+    .. _fontconfig: https://www.freedesktop.org/wiki/Software/fontconfig/
+    .. _pattern:
+       https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
+
+    Note that Matplotlib's internal font manager and fontconfig use a
+    different algorithm to lookup fonts, so the results of the same pattern
+    may be different in Matplotlib than in other applications that use
+    fontconfig.
+    """
+
+    @_cleanup_fontproperties_init
+    def __init__(self, family=None, style=None, variant=None, weight=None, stretch=None, size=None, fname=None, math_fontfamily=None):
+        self.set_family(family)
+        self.set_style(style)
+        self.set_variant(variant)
+        self.set_weight(weight)
+        self.set_stretch(stretch)
+        self.set_file(fname)
+        self.set_size(size)
+        self.set_math_fontfamily(math_fontfamily)
+        if isinstance(family, str) and style is None and (variant is None) and (weight is None) and (stretch is None) and (size is None) and (fname is None):
+            self.set_fontconfig_pattern(family)
+
+    def get_stretch(self):
+        """
+        Return the font stretch or width.  Options are: 'ultra-condensed',
+        'extra-condensed', 'condensed', 'semi-condensed', 'normal',
+        'semi-expanded', 'expanded', 'extra-expanded', 'ultra-expanded'.
+        """
+        return self._stretch
+
+    def set_family(self, family):
+        """
+        Change the font family.  Can be either an alias (generic name
+        is CSS parlance), such as: 'serif', 'sans-serif', 'cursive',
+        'fantasy', or 'monospace', a real font name or a list of real
+        font names.  Real font names are not supported when
+        :rc:`text.usetex` is `True`. Default: :rc:`font.family`
+        """
+        family = mpl._val_or_rc(family, 'font.family')
+        if isinstance(family, str):
+            family = [family]
+        self._family = family
+
+    def set_style(self, style):
+        """
+        Set the font style.
+
+        Parameters
+        ----------
+        style : {'normal', 'italic', 'oblique'}, default: :rc:`font.style`
+        """
+        style = mpl._val_or_rc(style, 'font.style')
+        _api.check_in_list(['normal', 'italic', 'oblique'], style=style)
+        self._slant = style
+
+    def set_variant(self, variant):
+        """
+        Set the font variant.
+
+        Parameters
+        ----------
+        variant : {'normal', 'small-caps'}, default: :rc:`font.variant`
+        """
+        variant = mpl._val_or_rc(variant, 'font.variant')
+        _api.check_in_list(['normal', 'small-caps'], variant=variant)
+        self._variant = variant
+
+    def set_weight(self, weight):
+        """
+        Set the font weight.
+
+        Parameters
+        ----------
+        weight : int or {'ultralight', 'light', 'normal', 'regular', 'book', 'medium', 'roman', 'semibold', 'demibold', 'demi', 'bold', 'heavy', 'extra bold', 'black'}, default: :rc:`font.weight`
+            If int, must be in the range  0-1000.
+        """
+        weight = mpl._val_or_rc(weight, 'font.weight')
+        if weight in weight_dict:
+            self._weight = weight
+            return
+        try:
+            weight = int(weight)
+        except ValueError:
+            pass
+        else:
+            if 0 <= weight <= 1000:
+                self._weight = weight
+                return
+        raise ValueError(f'weight={weight!r} is invalid')
+
+    def set_stretch(self, stretch):
+        """
+        Set the font stretch or width.
+
+        Parameters
+        ----------
+        stretch : int or {'ultra-condensed', 'extra-condensed', 'condensed', 'semi-condensed', 'normal', 'semi-expanded', 'expanded', 'extra-expanded', 'ultra-expanded'}, default: :rc:`font.stretch`
+            If int, must be in the range  0-1000.
+        """
+        stretch = mpl._val_or_rc(stretch, 'font.stretch')
+        if stretch in stretch_dict:
+            self._stretch = stretch
+            return
+        try:
+            stretch = int(stretch)
+        except ValueError:
+            pass
+        else:
+            if 0 <= stretch <= 1000:
+                self._stretch = stretch
+                return
+        raise ValueError(f'stretch={stretch!r} is invalid')
+
+    def set_size(self, size):
+        """
+        Set the font size.
+
+        Parameters
+        ----------
+        size : float or {'xx-small', 'x-small', 'small', 'medium', 'large', 'x-large', 'xx-large'}, default: :rc:`font.size`
+            If a float, the font size in points. The string values denote
+            sizes relative to the default font size.
+        """
+        size = mpl._val_or_rc(size, 'font.size')
+        try:
+            size = float(size)
+        except ValueError:
+            try:
+                scale = font_scalings[size]
+            except KeyError as err:
+                raise ValueError('Size is invalid. Valid font size are ' + ', '.join(map(str, font_scalings))) from err
+            else:
+                size = scale * FontManager.get_default_size()
+        if size < 1.0:
+            _log.info('Fontsize %1.2f < 1.0 pt not allowed by FreeType. Setting fontsize = 1 pt', size)
+            size = 1.0
+        self._size = size
+
+    def set_file(self, file):
+        """
+        Set the filename of the fontfile to use.  In this case, all
+        other properties will be ignored.
+        """
+        self._file = os.fspath(file) if file is not None else None
+
+    def set_fontconfig_pattern(self, pattern):
+        """
+        Set the properties by parsing a fontconfig_ *pattern*.
+
+        This support does not depend on fontconfig; we are merely borrowing its
+        pattern syntax for use here.
+        """
+        for key, val in parse_fontconfig_pattern(pattern).items():
+            if type(val) is list:
+                getattr(self, 'set_' + key)(val[0])
+            else:
+                getattr(self, 'set_' + key)(val)
+
+    def set_math_fontfamily(self, fontfamily):
+        """
+        Set the font family for text in math mode.
+
+        If not set explicitly, :rc:`mathtext.fontset` will be used.
+
+        Parameters
+        ----------
+        fontfamily : str
+            The name of the font family.
+
+            Available font families are defined in the
+            :ref:`default matplotlibrc file <customizing-with-matplotlibrc-files>`.
+
+        See Also
+        --------
+        .text.Text.get_math_fontfamily
+        """
+        if fontfamily is None:
+            fontfamily = mpl.rcParams['mathtext.fontset']
+        else:
+            valid_fonts = _validators['mathtext.fontset'].valid.values()
+            _api.check_in_list(valid_fonts, math_fontfamily=fontfamily)
+        self._math_fontfamily = fontfamily
+    set_name = set_family
+    get_slant = get_style
+    set_slant = set_style
+    get_size_in_points = get_size
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'_family': ['Helvetica'], '_slant': 'normal', '_variant': 'normal', '_weight': 'normal', '_stretch': 'normal', '_file': None, '_size': 12.0, '_math_fontfamily': 'cm'}, 'args': {}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+normal
+
+<<LLM_RESPONSE>>
+
+<think>
+1. To get a return value of "normal" for `get_stretch`, the private attribute `_stretch` must be set to a value that translates to "normal" internally.
+2. Looking at `set_stretch`, if `stretch` is in the `stretch_dict` dictionary, it assigns it to `self._stretch`. Therefore, "normal" must be one of the values in `stretch_dict`, which translates the input parameter into an internal representation. It then returns this internal representation.
+3. Thus, I'll set `_stretch` to "normal" directly, as the function `get_stretch` returns this value from `self._stretch`.
+</think>
+
+[INPUT]
+{
+    "self": {
+        "_family": null,
+        "_slant": null,
+        "_variant": null,
+        "_weight": null,
+        "_stretch": "normal",
+        "_file": null,
+        "_size": null,
+        "_math_fontfamily": null
+    },
+    "args": {},
+    "kwargs": {}
+}
+[/INPUT] </s>
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-1000.dart [/FILEPATH]
+class MyClass {
+  String myAttribute = 'value';
+  String returnString() {
+    return this.myAttribute;
+  }
+}
+// ...you can access these attributes from within your class using the "this" keyword.
+
+// Then, create an instance of MyClass and call the returnString() method:
+var myClassInstance = new MyClass();
+print(myClassInstance.returnString());  // Prints: value
+
+// The example code uses the print() function to output the value of the string returned by returnString(). This output would appear in a console when you run the code in Dartpad or an IDE such as Visual Studio Code.
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-569.dart [/FILEPATH]
+import 'dart:async';
+import 'package:flutter/material.dart';
+
+class Extractor {
+  final String extract = ' ';
+  final List<String> keywords = [];
+  final int start = 0;
+  final int end = 0;
+  final bool isSubstring = false;
+  final bool useRegexp = false;
+  final bool useStart = false;
+  final bool useEnd = false;
+  final bool useSubstring = false;
+
+  Future<List<String>> getKeywords() async {
+    final regexp = RegExp(extract);
+    final startValue = start;
+    final endValue = end;
+    final isSubstring = this.isSubstring;
+    final useRegexp = this.useRegexp;
+    final useStart = this.useStart;
+    final useEnd = this.useEnd;
+    final useSubstring = this.useSubstring;
+
+    if (useRegexp) {
+      final matches = regexp.allMatches(extract);
+      for (final match in matches) {
+        keywords.add(match.group(1));
+      }
+    } else if (useStart && useEnd) {
+      final keyword = extract.substring(startValue, endValue);
+      keywords.add(keyword);
+    } else if (useStart) {
+      final keyword = extract.substring(startValue);
+      keywords.add(keyword);
+    } else if (useEnd) {
+      final keyword = extract.substring(0, endValue);
+      keywords.add(keyword);
+    } else if (isSubstring) {
+      final matches = regexp.allMatches(extract);
+      for (final match in matches) {
+        final keyword = match.group(1);
+        keywords.add(keyword);
+      }
+    }
+
+    return keywords;
+  }
+}
+// ...and then use it in a Flutter app:
+
+import 'package:flutter/material.dart';
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Scaffold(
+        appBar: AppBar(
+          title: Text('Extractor Example'),
+        ),
+        body: Center(
+          child: FutureBuilder(
+            future: getKeywords(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.done) {
+                final keywords = snapshot.data;
+                return Text('Keywords: $keywords');
+              } else {
+                return CircularProgressIndicator();
+              }
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+// ...and that's it! Now you can use the Extractor class to extract keywords from a string in a Flutter app.
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-743.dart [/FILEPATH]
+class MyClass {
+  String myString = 'Hello, world!';
+  int myInt = 42;
+  double myDouble = 3.14;
+  bool myBool = true;
+  List myList = [1, 2, 3, 4, 5];
+  Map myMap = {'one': 1, 'two': 2, 'three': 3};
+}
+
+void main() {
+  MyClass myInstance = MyClass();
+  print(myInstance.myString);
+  print(myInstance.myInt);
+  print(myInstance.myDouble);
+  print(myInstance.myBool);
+  print(myInstance.myList);
+  print(myInstance.myMap);
+}
+// Here's the output:
+// Hello, world!
+// 42
+// 3.14
+// true
+// [1, 2, 3, 4, 5]
+// {one: 1, two: 2, three: 3}
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-519.dart [/FILEPATH]
+void main() {
+  List<int> numbers = [1, 2, 3, 4, 5];
+  int evenCount = 0;
+  int oddCount = 0;
+
+  numbers.forEach((number) {
+    if (number % 2 == 0) {
+      evenCount++;
+    } else {
+      oddCount++;
+    }
+  });
+
+  print('Even numbers: $evenCount');
+  print('Odd numbers: $oddCount');
+}
+// This code will output the following:
+// Even numbers: 2
+// Odd numbers: 3
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-730.dart [/FILEPATH]
+class MyClass {
+  String myAttribute = 'value';
+  String returnString() {
+    return this.myAttribute;
+  }
+}
+// To create an instance of a class in Dart, you use the new keyword followed by the class name:
+
+// MyClass myObject = new MyClass();
+// In this case, myObject is an instance of the MyClass class. You can access the attributes and methods of your class using dot notation:
+
+// myObject.myAttribute = 'new value';
+// print(myObject.myAttribute);  // Prints: new value
+// myObject.returnString();  // Returns: value
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-748.dart [/FILEPATH]
+import 'package:flutter/material.dart';
+
+void main() {
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Flutter App',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+      ),
+      home: MyHomePage(),
+    );
+  }
+}
+
+class MyHomePage extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Welcome to Flutter'),
+      ),
+      body: Center(
+        child: Text('Hello, Flutter!'),
+      ),
+    );
+  }
+}
+// This is a simple Flutter app that displays a blue background with a white text "Hello, Flutter!" in the center of the screen.
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-568.dart [/FILEPATH]
+String stringTemplate = '''
+This is a template with an @@@EXPR@@@ in it.
+You can use the EXPR expression evaluator to evaluate this string and replace the @@@EXPR@@@ with the result.
+''';
+
+String stringToEvaluate = '''
+1 + 2 * 3
+''';
+
+String evaluatedString = EXPR.evaluate(stringToEvaluate);
+String finalString = stringTemplate.replaceFirst('@@@EXPR@@@', evaluatedString);
+
+print(finalString); // This is a template with an 7 in it.
+
+// ...The EXPR class is a static class that provides a single method: evaluate(String string). It takes a string as input and returns the result of evaluating that string as an expression.
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-751.dart [/FILEPATH]
+class MyClass {
+  String myAttribute = 'value';
+  String returnString() {
+    return this.myAttribute;
+  }
+}
+// Create an instance of the class:
+var myInstance = MyClass();
+
+// Access the attributes of the instance:
+print(myInstance.myAttribute); // Prints 'value'
+
+// Call the methods of the instance:
+print(myInstance.returnString()); // Prints 'value'
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-627.dart [/FILEPATH]
+class Point {
+  double x;
+  double y;
+  Point(this.x, this.y);
+
+  Point.reflectX() {
+    x = -x;
+    return this;
+  }
+
+  Point.reflectY() {
+    y = -y;
+    return this;
+  }
+
+  Point.reflectXY() {
+    x = -x;
+    y = -y;
+    return this;
+  }
+
+  String toString() {
+    return '($x, $y)';
+  }
+}
+
+void main() {
+  Point p = Point(1.0, 2.0);
+  print(p); // prints (1.0, 2.0)
+
+  p.reflectX();
+  print(p); // prints (-1.0, 2.0)
+
+  p.reflectY();
+  print(p); // prints (-1.0, -2.0)
+
+  p.reflectXY();
+  print(p); // prints (1.0, 2.0)
+}
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-1044.dart [/FILEPATH]
+import 'package:flutter/material.dart';
+
+void main() {
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Login Page',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+      ),
+      home: LoginPage(),
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  @override
+  _LoginPageState createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final TextEditingController emailController = TextEditingController();
+  final TextEditingController passwordController = TextEditingController();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Login'),
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            TextField(
+              controller: emailController,
+              decoration: InputDecoration(labelText: 'Email'),
+            ),
+            TextField(
+              controller: passwordController,
+              decoration: InputDecoration(labelText: 'Password'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                // Handle login logic here
+                String email = emailController.text;
+                String password = passwordController.text;
+                print('Email: $email, Password: $password');
+              },
+              child: Text('Login'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+// This code creates a basic login page with two text fields for entering the email and password, and a button to handle the login logic. When the button is pressed, it prints the entered email and password to the console.
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-545.dart [/FILEPATH]
+import 'dart:async';
+import 'package:flutter/material.dart';
+
+class ScrollNotifier extends ChangeNotifier {
+  final ScrollController controller;
+
+  ScrollNotifier(this.controller) {
+    controller.addListener(_scrollListener);
+  }
+
+  void _scrollListener() {
+    notifyListeners();
+  }
+}
+
+class MyHomePage extends StatefulWidget {
+  @override
+  _MyHomePageState createState() => _MyHomePageState();
+}
+
+class _MyHomePageState extends State<MyHomePage> {
+  final ScrollController _scrollController = ScrollController();
+  final ScrollNotifier _scrollNotifier = ScrollNotifier();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Scroll Indicator'),
+      ),
+      body: ChangeNotifierProvider(
+        create: (context) => _scrollNotifier,
+        child: ListView.builder(
+          controller: _scrollController,
+          itemCount: 100,
+          itemBuilder: (context, index) {
+            return ListTile(
+              title: Text('Item $index'),
+            );
+          },
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          _scrollController.animateTo(
+            _scrollController.offset + 100,
+            duration: Duration(seconds: 1),
+            curve: Curves.easeInOut,
+          );
+        },
+        child: Icon(Icons.arrow_downward),
+      ),
+    );
+  }
+}
+// To use the ScrollNotifier class in a Flutter app, you can use the ChangeNotifierProvider widget to provide the ScrollNotifier to the widgets that need it. In this example, the MyHomePage widget uses the ChangeNotifierProvider to provide the ScrollNotifier to the ListView.builder widget. The ListView.builder widget uses the scrollController property to animate the scrolling of the list.
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-721.dart [/FILEPATH]
+import 'dart:io';
+
+class DNSServer {
+  final String name;
+  final String address;
+  final int port;
+
+  DNSServer(this.name, this.address, this.port);
+
+  Future<String> getRecord(String recordType, String recordName) async {
+    final response = await HttpGet(
+      '${this.name}/${recordName}',
+      headers: {
+        'Content-Type': 'application/dns-message',
+      },
+      queryParameters: {
+        'type': recordType,
+      },
+    );
+    return response.body;
+  }
+}
+// Then, create a DNSServer object and use it to get a record from a domain name server:
+
+// final dns = DNSServer('example.com', '192.0.2.1', 53);
+// final record = await dns.getRecord('A', 'example.com');
+
+// The example code uses the getRecord() method to get an A record for the domain name example.com from the DNS server example.com. The response is returned as a string.
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-1010.dart [/FILEPATH]
+class MyClass {
+  String myString = 'Hello, world!';
+
+  String getString() {
+    return this.myString;
+  }
+
+  void setString(String newString) {
+    this.myString = newString;
+  }
+
+  void printString() {
+    print(this.myString);
+  }
+}
+// This is an example of how you can use these attributes and methods in a Dart program:
+
+// MyClass myObject = new MyClass();
+
+// myObject.printString(); // prints 'Hello, world!'
+// myObject.setString('Hi there!');
+// myObject.printString(); // prints 'Hi there!'
+// print(myObject.getString()); // prints 'Hi there!'
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-533.dart [/FILEPATH]
+class MyClass {
+  String myString = 'Hello, world!';
+  int myInt = 42;
+  double myDouble = 3.14;
+  bool myBool = true;
+  List myList = [1, 2, 3, 4, 5];
+  Map myMap = {'one': 1, 'two': 2, 'three': 3};
+}
+
+void main() {
+  MyClass myInstance = MyClass();
+  print(myInstance.myString);
+  print(myInstance.myInt);
+  print(myInstance.myDouble);
+  print(myInstance.myBool);
+  print(myInstance.myList);
+  print(myInstance.myMap);
+}
+// Here's the output:
+// Hello, world!
+// 42
+// 3.14
+// true
+// [1, 2, 3, 4, 5]
+// {one: 1, two: 2, three: 3}
+
+[FILEPATH] py1/lambda_supervised/parsed_NL-Gen_interCode-Gen_data-conversion/0_0_1/body-CL_bfs-body-samples-for-agent-outputs/dart-858.dart [/FILEPATH]
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+void main() {
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Flutter App',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+      ),
+      home: MyHomePage(),
+    );
+  }
+}
+
+class MyHomePage extends StatefulWidget {
+  @override
+  _MyHomePageState createState() => _MyHomePageState();
+}
+
+class _MyHomePageState extends State<MyHomePage> {
+  int _selectedIndex = 0;
+
+  static const TextStyle optionStyle = TextStyle(fontSize: 30, fontWeight: FontWeight.bold);
+
+  static const List<Widget> _widgetOptions = <Widget>[
+    Text(
+      'Index 0: Home',
+      style: optionStyle,
+    ),
+    Text(
+      'Index 1: Business',
+      style: optionStyle,
+    ),
+    Text(
+      'Index 2: School',
+      style: optionStyle,
+    ),
+  ];
+
+  void _onItemTapped(int index) {
+    setState(() {
+      _selectedIndex = index;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('BottomNavigationBar Sample'),
+      ),
+      body: Center(
+        child: _widgetOptions.elementAt(_selectedIndex),
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        items: const <

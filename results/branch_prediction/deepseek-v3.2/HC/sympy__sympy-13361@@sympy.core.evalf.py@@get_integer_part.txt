@@ -1,0 +1,242 @@
+[THOUGHT]
+Let's trace the execution step by step with the given input:
+- expr = 1/2 (which is Rational(1, 2) in SymPy)
+- no = -1
+- options = {}
+- return_ints = True
+
+First, at line 66-67: 
+    ire, iim, ire_acc, iim_acc = evalf(expr, assumed_size, options)
+assumed_size = 30. We need to evaluate expr (1/2) numerically.
+Since 1/2 is a rational number, evalf(expr, 30, {}) should return a tuple where:
+    - The real part ire: some mpf representation of 0.5
+    - The imaginary part iim: should be zero (since 1/2 is real)
+    - ire_acc: accuracy (probably large positive)
+    - iim_acc: accuracy (probably large positive)
+
+So ire exists (non-zero/non-None) and iim is zero or None? Let's check the code context: 
+In line 67: `if ire and iim:` checks truthiness. In mpmath, `ire` and `iim` are likely mpf values. For zero, mpf representation might be `fzero`, which might be truthy? Actually in Python, an mpf is an object, so `fzero` might be truthy (non-None). But let's think: `iim` for a real number should be `fzero` (which is not None, and maybe not 0 as int). But the condition `if ire and iim:` might treat `fzero` as True because it's an object. However, looking at the logic, `iim` being zero means `iim` exists but its value is zero. The code later at line 71 `elif ire:` means if ire is truthy and iim is falsy. So the design probably: `ire` and `iim` are either mpf objects or `None`. For purely real numbers, `iim` is `None`? Let's infer from the branch pattern: They have four branches:
+    if ire and iim:
+    elif ire:
+    elif iim:
+    else:
+So they treat `ire` and `iim` as booleans indicating presence of real and imaginary parts. For a real number, likely `iim` is `None` or falsy value (maybe `0` but in mpf, `fzero` might be truthy as object). Usually in evalf functions, they return `(real, imag, real_acc, imag_acc)` where if imag is exactly zero they might set imag to `None` or `fzero`. Given they have explicit check for `iim` later at line 71 `elif ire:` means if iim is falsy. If iim is `fzero`, it's truthy, then we'd go into first branch `if ire and iim:` which would be wrong for real number. So likely they use `None` for zero imaginary part. Let's assume that for a real number like 1/2, `iim` is `None`. Then:
+
+Line 67: `if ire and iim:` → ire truthy, iim falsy (None) → false.
+Line 70: `elif ire:` → true. So we go into this branch.
+
+Thus:
+    Branch at line 67: taken = N
+    Branch at line 70: taken = Y
+    Branch at line 72: not taken (since ire is truthy, we already entered elif ire)
+    Branch at line 73: not taken (we entered a branch).
+
+Now line 71: gap = fastlog(ire) - ire_acc.
+We don't need exact values, but likely gap is negative (since accuracy is high for rational). Assume gap < -margin (margin=10). So line 78: `if gap >= -margin:` → false, so not taken.
+
+Then line 119: `if ire:` → still truthy → taken Y.
+Line 121: `if iim:` → iim is None/falsy → taken N.
+
+Line 124: `if return_ints:` → true (from kwargs) → taken Y.
+
+Now inside calc_part called at line 120:
+    calc_part(re(expr, evaluate=False), ire)
+    re(expr) is expr itself (1/2). ire is the mpf tuple.
+    In calc_part, line 83: `nint = int(to_int(nexpr, rnd))` where nexpr = ire (mpf of 0.5). to_int of 0.5 with rounding? rnd = round_nearest, so to_int(0.5) → 0 or 1? In mpmath, to_int rounds to nearest, so 0.5 → 1? Actually rounding 0.5 to nearest integer: could be 0 or 1 depending on convention. Let's assume it rounds to 0? Not critical for branches.
+
+    Line 86: is_int = (p == 0) where p is from the mpf tuple (nexpr = (n, c, p, b)). For 0.5, p is negative (since it's a fraction), so p != 0 → is_int false.
+    So line 87: `if not is_int:` → true → taken Y.
+
+    Then line 89: `s = options.get('subs', False)`, options = {}, so s = False.
+    So line 89: `if s:` → false → taken N.
+
+    Then line 105: expr = Add(expr, -nint, evaluate=False) where expr is re(expr) which is 1/2, nint is integer part 0 or 1. Let's assume nint = 0 (if to_int(0.5) gives 0). Then expr becomes 1/2 - 0 = 1/2.
+
+    Then line 106: evalf(expr, 10, options) → evaluates 1/2.
+
+    Then line 107-112: check_target etc. Might raise PrecisionExhausted? Possibly not for rational.
+
+    Line 113: `nint += int(no*(mpf_cmp(x or fzero, fzero) == no))` where no = -1. mpf_cmp(x, fzero) for x = 0.5 → positive, so mpf_cmp(...) == 1. no is -1, so no*(1 == -1) → -1*0 → 0. So nint unchanged.
+
+    So nint stays 0 (or 1). Then converted to from_int(nint) at line 114.
+
+    So calc_part returns (nint, INF). So re_ = integer mpf of 0 (or 1), re_acc = INF.
+
+Back to line 120: re_ and re_acc set.
+
+Line 121 not taken (since iim falsy).
+
+Now line 124: return_ints true, so we go into branch and return int(to_int(re_ or fzero)), int(to_int(im_ or fzero)).
+im_ is None, so im_ or fzero = fzero → to_int(fzero) → 0.
+re_ is mpf of integer 0 (or 1) → to_int gives 0 (or 1).
+So final return: (0, 0) or (1, 0) depending on rounding.
+
+Now summary of branch predictions:
+Line 67: N
+Line 70: Y
+Line 72: N (not reached)
+Line 78: N
+Line 87: Y (inside calc_part)
+Line 89: N (inside calc_part)
+Line 119: Y
+Line 121: N
+Line 124: Y
+
+We must provide list for each ?? in order of occurrence in the code.
+
+We have ?? at lines:
+67: if ire and iim: ## [BRANCH]taken=??[/BRANCH]
+70: elif ire: ## [BRANCH]taken=??[/BRANCH]
+72: elif iim: ## [BRANCH]taken=??[/BRANCH]
+78: if gap >= -margin: ## [BRANCH]taken=??[/BRANCH]
+87: if not is_int: ## [BRANCH]taken=??[/BRANCH]
+89: if s: ## [BRANCH]taken=??[/BRANCH]
+119: if ire: ## [BRANCH]taken=??[/BRANCH]
+121: if iim: ## [BRANCH]taken=??[/BRANCH]
+124: if return_ints: ## [BRANCH]taken=??[/BRANCH]
+
+Each branch encountered possibly multiple times? For loops? No loops here except inside evalf but not relevant. Each branch is encountered once in this execution.
+
+Thus we replace each ?? with a single-element list like ['Y'] or ['N'].
+
+So:
+Line 67: ['N']
+Line 70: ['Y']
+Line 72: ['N'] (not taken because earlier branch taken)
+Line 78: ['N']
+Line 87: ['Y']
+Line 89: ['N']
+Line 119: ['Y']
+Line 121: ['N']
+Line 124: ['Y']
+
+[/THOUGHT]
+
+[ANSWER]
+1 from __future__ import print_function, division
+2 import math
+3 import mpmath.libmp as libmp
+4 from mpmath import (
+5     make_mpc, make_mpf, mp, mpc, mpf, nsum, quadts, quadosc, workprec)
+6 from mpmath import inf as mpmath_inf
+7 from mpmath.libmp import (from_int, from_man_exp, from_rational, fhalf,
+8         fnan, fnone, fone, fzero, mpf_abs, mpf_add,
+9         mpf_atan, mpf_atan2, mpf_cmp, mpf_cos, mpf_e, mpf_exp, mpf_log, mpf_lt,
+10         mpf_mul, mpf_neg, mpf_pi, mpf_pow, mpf_pow_int, mpf_shift, mpf_sin,
+11         mpf_sqrt, normalize, round_nearest, to_int, to_str)
+12 from mpmath.libmp import bitcount as mpmath_bitcount
+13 from mpmath.libmp.backend import MPZ
+14 from mpmath.libmp.libmpc import _infs_nan
+15 from mpmath.libmp.libmpf import dps_to_prec, prec_to_dps
+16 from mpmath.libmp.gammazeta import mpf_bernoulli
+17 from .compatibility import SYMPY_INTS, range
+18 from .sympify import sympify
+19 from .singleton import S
+20 from sympy.utilities.iterables import is_sequence
+21 from sympy.functions.elementary.complexes import re, im
+22 from sympy.core.numbers import Float
+23 from sympy.core.numbers import Float
+24 from sympy import cos, sin
+25 from sympy import Abs, Add, log
+26 from sympy import Float, Integer
+27 from sympy.core.numbers import Infinity, NegativeInfinity, Zero
+28 from sympy import Poly
+29 from sympy import Float, hypersimp, lambdify
+30 from sympy import Sum
+31 from sympy import Float
+32 from sympy.functions.combinatorial.numbers import bernoulli
+33 from sympy.concrete.products import Product
+34 from sympy.concrete.summations import Sum
+35 from sympy.core.add import Add
+36 from sympy.core.mul import Mul
+37 from sympy.core.numbers import Exp1, Float, Half, ImaginaryUnit, Integer, NaN, NegativeOne, One, Pi, Rational, Zero
+38 from sympy.core.power import Pow
+39 from sympy.core.symbol import Dummy, Symbol
+40 from sympy.functions.elementary.complexes import Abs, im, re
+41 from sympy.functions.elementary.exponential import exp, log
+42 from sympy.functions.elementary.integers import ceiling, floor
+43 from sympy.functions.elementary.piecewise import Piecewise
+44 from sympy.functions.elementary.trigonometric import atan, cos, sin
+45 from sympy.integrals.integrals import Integral
+46 from sympy import re as re_, im as im_
+47 from sympy.core.add import Add
+48 from sympy.core.add import Add
+49 from sympy.core.mul import Mul
+50 from sympy import cos, sin, Wild
+51 from sympy import Float, Number
+52 from sympy.core.expr import _mag
+53 from sympy.core.compatibility import as_int
+54 
+55 LG10 = math.log(10, 2)
+56 rnd = round_nearest
+57 INF = float(mpmath_inf)
+58 MINUS_INF = float(-mpmath_inf)
+59 DEFAULT_MAXPREC = 333
+60 evalf_table = None
+61 
+62 def get_integer_part(expr, no, options, return_ints=False):
+63     from sympy.functions.elementary.complexes import re, im
+64     assumed_size = 30
+65     ire, iim, ire_acc, iim_acc = evalf(expr, assumed_size, options)
+66 
+67     if ire and iim: ## [BRANCH]taken=['N'][/BRANCH]
+68         gap = max(fastlog(ire) - ire_acc, fastlog(iim) - iim_acc)
+69     elif ire: ## [BRANCH]taken=['Y'][/BRANCH]
+70         gap = fastlog(ire) - ire_acc
+71     elif iim: ## [BRANCH]taken=['N'][/BRANCH]
+72         gap = fastlog(iim) - iim_acc
+73     else:
+74         return None, None, None, None
+75 
+76     margin = 10
+77 
+78     if gap >= -margin: ## [BRANCH]taken=['N'][/BRANCH]
+79         ire, iim, ire_acc, iim_acc = \
+80             evalf(expr, margin + assumed_size + gap, options)
+81 
+82     def calc_part(expr, nexpr):
+83         from sympy.core.add import Add
+84         nint = int(to_int(nexpr, rnd))
+85         n, c, p, b = nexpr
+86         is_int = (p == 0)
+87         if not is_int: ## [BRANCH]taken=['Y'][/BRANCH]
+88             s = options.get('subs', False)
+89             if s: ## [BRANCH]taken=['N'][/BRANCH]
+90                 doit = True
+91                 from sympy.core.compatibility import as_int
+92                 for v in s.values():
+93                     try:
+94                         as_int(v)
+95                     except ValueError:
+96                         try:
+97                             [as_int(i) for i in v.as_real_imag()]
+98                             continue
+99                         except (ValueError, AttributeError):
+100                             doit = False
+101                             break
+102                 if doit:
+103                     expr = expr.subs(s)
+104 
+105             expr = Add(expr, -nint, evaluate=False)
+106             x, _, x_acc, _ = evalf(expr, 10, options)
+107             try:
+108                 check_target(expr, (x, None, x_acc, None), 3)
+109             except PrecisionExhausted:
+110                 if not expr.equals(0):
+111                     raise PrecisionExhausted
+112                 x = fzero
+113             nint += int(no*(mpf_cmp(x or fzero, fzero) == no))
+114         nint = from_int(nint)
+115         return nint, INF
+116 
+117     re_, im_, re_acc, im_acc = None, None, None, None
+118 
+119     if ire: ## [BRANCH]taken=['Y'][/BRANCH]
+120         re_, re_acc = calc_part(re(expr, evaluate=False), ire)
+121     if iim: ## [BRANCH]taken=['N'][/BRANCH]
+122         im_, im_acc = calc_part(im(expr, evaluate=False), iim)
+123 
+124     if return_ints: ## [BRANCH]taken=['Y'][/BRANCH]
+125         return int(to_int(re_ or fzero)), int(to_int(im_ or fzero))
+126     return re_, im_, re_acc, im_acc
+127 [/ANSWER]

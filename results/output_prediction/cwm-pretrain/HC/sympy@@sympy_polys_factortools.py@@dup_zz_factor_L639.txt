@@ -1,0 +1,620 @@
+[/EXAMPLE]
+[PYTHON]
+from __future__ import annotations
+import builtins
+from __future__ import print_function, unicode_literals
+from os import getlogin
+from pathlib import Path
+from typing import TYPE_CHECKING
+from fme import Configuration as Configuration
+from fme import Bundle as Bundle
+from fme.utilities.env import sstr
+from fme.utilities.events import handlers, start_event
+from fme.workspace.workspace import FMEWorkspace
+
+if TYPE_CHECKING:
+    from fme.server.admin import FMEConnection
+    from fme.workspace.crud import FMECRUD
+    from requests import Response
+
+
+class FMEOfflineConfiguration(Configuration):
+    def __init__(self, server):
+        super().__init__()
+        self._server = server
+
+    def read(self, *args, **kwargs):
+        if 'remote_path' in kwargs:
+            path = kwargs['remote_path']
+        else:
+            raise ValueError('remote_path argument is required.')
+
+        _response = self._server.get(path)
+
+        self._workspace = FMEWorkspace(_response, self._server)
+        self._value = self._workspace.workspace.configuration
+
+
+class FMEConnection(object):
+    def __init__(self, server_url, username=None, password=None, admin=True):
+        """
+        :param server_url:
+        :type server_url: str
+        :param username:
+        :type username: str
+        :param password:
+        :type password: str
+        :param admin:
+        :type admin: bool
+        """
+        if admin and (username is None or password is None):
+            try:
+                username = builtins.__FME_CONNECTION__['username']
+                password = builtins.__FME_CONNECTION__['password']
+            except:
+                raise RuntimeError('You have to provide username and password when initializing as an admin.')
+
+        if username:
+            _response = self.get("info/session", auth=(username, password))
+
+            if _response.status_code != 200:
+                raise Exception("Server error: Failed to connect to the server.", _response.content)
+
+            _session = _response.json()
+
+            self._key = _session['key']
+
+            # store in builtins (no cookie object)
+            builtins.__FME_CONNECTION__ = {'key': self._key, 'username': username, 'password': password}
+        else:
+            try:
+                self._key = builtins.__FME_CONNECTION__['key']
+            except:
+                raise RuntimeError('You have to provide a username and password to connect.')
+
+        self._headers = {
+            'Authorization': 'FMEKey ' + self._key,
+            'Content-Type': 'application/json'
+        }
+
+        self._server_url = server_url
+
+        # self._admin = admin
+
+        # if admin:
+        #     # just log in once
+        #     self.get('/fmerest/info/session')
+
+        # if no cache for offline:
+        self._cache = FMEConnectionCache(self)
+        self._live = True
+
+    def _build_url(self, path, *args):
+        if args:
+            path += '/' + '/'.join(str(sstr(v)) for v in args)
+
+        return self._server_url + path
+
+    def _make_headers(self, _extra_headers=None):
+        # call this function every time you want to use it
+        # otherwise it would cause bug, because every time it calls we do have session id, so we need to add it to headers.
+
+        if _extra_headers is None:
+            _extra_headers = {}
+
+        _headers = dict(self._headers, **_extra_headers)
+
+        return _headers
+
+    def put(self, path, *args, **kwargs):
+        """
+        :param path:
+        :type path: str
+        :param args:
+        :type args: list
+        :param kwargs:
+        :type kwargs: dict
+        :return:
+        :rtype: requests.Response
+        """
+        _extra_headers = kwargs.pop('headers', {})
+
+        return self.request('PUT', path, *args, **kwargs, headers=_extra_headers)
+
+    def get(self, path, *args, **kwargs):
+        """
+        :param path:
+        :type path: str
+        :param args:
+        :type args: list
+        :param kwargs:
+        :type kwargs: dict
+        :return:
+        :rtype: requests.Response
+        """
+        _extra_headers = kwargs.pop('headers', {})
+
+        return self.request('GET', path, *args, **kwargs, headers=_extra_headers)
+
+    def post(self, path, *args, **kwargs):
+        """
+        :param path:
+        :type path: str
+        :param args:
+        :type args: list
+        :param kwargs:
+        :type kwargs: dict
+        :return:
+        :rtype: requests.Response
+        """
+        _extra_headers = kwargs.pop('headers', {})
+
+        return self.request('POST', path, *args, **kwargs, headers=_extra_headers)
+
+    def delete(self, path, *args, **kwargs):
+        """
+        :param path:
+        :type path: str
+        :param args:
+        :type args: list
+        :param kwargs:
+        :type kwargs: dict
+        :return:
+        :rtype: requests.Response
+        """
+        _extra_headers = kwargs.pop('headers', {})
+
+        return self.request('DELETE', path, *args, **kwargs, headers=_extra_headers)
+
+    def request(self, method, path, *args, **kwargs):
+        """
+        :param method:
+        :type method: str
+        :param path:
+        :type path: str
+        :param args:
+        :type args: list
+        :param kwargs:
+        :type kwargs: dict
+        :return:
+        :rtype: requests.Response
+        """
+        import requests
+
+        _data = kwargs.pop('data', None)
+        _headers = kwargs.pop('headers', {})
+
+        if _data:
+            _data = _data.encode('utf-8')
+
+        _url = self._build_url(path, *args)
+        _headers = self._make_headers(_headers)
+
+        _response = requests.request(method, _url, data=_data, headers=_headers, **kwargs)
+
+        if _response.status_code == 401:
+            raise Exception("You do not have permission to access " + path + ".")
+
+        if _response.status_code != 200:
+            raise Exception("An error occurred when accessing " + path + ". Response status code: " + str(_response.status_code) + ". Response content: " + _response.content.decode('utf-8') + ".")
+
+        return _response
+
+    def root_folder(self):
+        return FMECRUDRootFolder(self)
+
+    def user(self, user_name=None):
+        return FMECRUDUser(self, user_name)
+
+    def users(self):
+        return FMECRUDUsers(self)
+
+    def role(self, role_id=None):
+        return FMECRUDRole(self, role_id)
+
+    def roles(self):
+        return FMECRUDRoles(self)
+
+    def server_configuration(self):
+        return FMECRUDServerConfiguration(self)
+
+    def workspace(self, workspace_id=None):
+        return FMECRUDWorkspace(self, workspace_id)
+
+    def workspaces(self):
+        return FMECRUDWorkspaces(self)
+
+    def template(self, template_id=None):
+        return FMECRUDTemplate(self, template_id)
+
+    def templates(self):
+        return FMECRUDTemplates(self)
+
+    def job(self, job_id=None):
+        return FMECRUDJob(self, job_id)
+
+    def jobs(self):
+        return FMECRUDJobs(self)
+
+    def callback_rule(self, callback_rule_id=None):
+        return FMECRUDCallbackRule(self, callback_rule_id)
+
+    def callback_rules(self):
+        return FMECRUDCallbackRules(self)
+
+    def bundle(self, bundle_id=None):
+        return FMECRUDBundle(self, bundle_id)
+
+    def bundles(self):
+        return FMECRUDBundles(self)
+
+    def bundle_exe(self, bundle_id=None):
+        return FMECRUDBundleExe(self, bundle_id)
+
+    def bundle_exes(self):
+        return FMECRUDBundleExes(self)
+
+    def workspace_tags(self):
+        return FMECRUDWorkspaceTags(self)
+
+    def server_tags(self):
+        return FMECRUDServerTags(self)
+
+    def resources(self):
+        return FMECRUDResources(self)
+
+    def resource_container(self, resource_id=None):
+        return FMECRUDResourceContainer(self, resource_id)
+
+    def license_sfp(self, license_sfp_id=None):
+        return FMECRUDLicenseSFP(self, license_sfp_id)
+
+    def license_sfps(self):
+        return FMECRUDLicenseSFPs(self)
+
+    def feature_class(self, feature_class_id=None):
+        return FMECRUDFeatureClass(self, feature_class_id)
+
+    def feature_classes(self):
+        return FMECRUDFeatureClasses(self)
+
+    def configuration(self, path=None):
+        return FMECRUDConfiguration(self, path)
+
+    def workflow(self, workflow_id=None):
+        return FMECRUDWorkflow(self, workflow_id)
+
+    def workflows(self):
+        return FMECRUDWorkflows(self)
+
+    def mime_types(self):
+        return FMECRUDMimeTypes(self)
+
+    def mime_type(self, id=None):
+        return FMECRUDMimeType(self, id)
+
+    def contexts(self):
+        return FMECRUDContexts(self)
+
+    def context(self, id=None):
+        return FMECRUDContext(self, id)
+
+    def synchronization_callback_rules(self):
+        return FMECRUDSynchronizationCallbackRules(self)
+
+    def synchronization_callback_rule(self, id=None):
+        return FMECRUDSynchronizationCallbackRule(self, id)
+
+    def languages(self):
+        return FMECRUDLanguages(self)
+
+    def language(self, id=None):
+        return FMECRUDLanguage(self, id)
+
+    def storage_resource(self, id=None):
+        return FMECRUDStorageResource(self, id)
+
+    def storage_resources(self):
+        return FMECRUDStorageResources(self)
+
+    def activation_key(self, id=None):
+        return FMECRUDActivationKey(self, id)
+
+    def activation_keys(self):
+        return FMECRUDActivationKeys(self)
+
+    def service_provider(self, id=None):
+        return FMECRUDServiceProvider(self, id)
+
+    def service_providers(self):
+        return FMECRUDServiceProviders(self)
+
+    def adapter_settings(self, path=None):
+        return FMECRUDAdapterSettings(self, path)
+
+    def generate_activation_key(self, display_name, note=None):
+        """
+        :param display_name:
+        :type display_name: str
+        :param note:
+        :type note: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.post('fmerest/admin/activationKeys/generateActivationKey', data={
+            'displayName': display_name,
+            'note': note
+        })
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def send_activation_email(self, activation_key, email, admin_name=None):
+        """
+        :param activation_key:
+        :type activation_key: str
+        :param email:
+        :type email: str
+        :param admin_name:
+        :type admin_name: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.put('fmerest/admin/activationKeys/' + activation_key + '/sendActivationEmail', data={
+            'email': email,
+            'adminName': admin_name
+        })
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_activation_key(self, activation_key):
+        """
+        :param activation_key:
+        :type activation_key: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/activationKeys/' + activation_key)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def create_workspace_tags(self, display_name, note, workspace_ids):
+        """
+        :param display_name:
+        :type display_name: str
+        :param note:
+        :type note: str
+        :param workspace_ids:
+        :type workspace_ids: list
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.post('fmerest/admin/workspaceTags', data={
+            'displayName': display_name,
+            'note': note,
+            'workspaceIds': workspace_ids
+        })
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def create_server_tags(self, display_name, note, server_ids):
+        """
+        :param display_name:
+        :type display_name: str
+        :param note:
+        :type note: str
+        :param server_ids:
+        :type server_ids: list
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.post('fmerest/admin/serverTags', data={
+            'displayName': display_name,
+            'note': note,
+            'serverIds': server_ids
+        })
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_queue_item(self, queue_id):
+        """
+        :param queue_id:
+        :type queue_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/serverQueueItem/' + queue_id)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_running_jobs(self):
+        """
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/runningJobs')
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def stop_queue_item(self, queue_id):
+        """
+        :param queue_id:
+        :type queue_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.post('fmerest/admin/serverQueueItem/' + queue_id + '/stopJob')
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_file_server_queue_list(self, batch_id=None):
+        """
+        :param batch_id:
+        :type batch_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        if batch_id is None:
+            _response = self.get('fmerest/admin/serverQueue')
+        else:
+            _response = self.get('fmerest/admin/serverQueue/' + batch_id)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_remote_configuration(self, workspace_id, path):
+        """
+        :param workspace_id:
+        :type workspace_id: str
+        :param path:
+        :type path: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/workspaces/' + workspace_id + '/remoteConfiguration/' + path)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_configuration_from_file_server(self, workspace_id, path):
+        """
+        :param workspace_id:
+        :type workspace_id: str
+        :param path:
+        :type path: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/workspaces/' + workspace_id + '/fileServerConfiguration/' + path)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def create_license_sfp(self, server_id, license_string):
+        """
+        :param server_id:
+        :type server_id: str
+        :param license_string:
+        :type license_string: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.post('fmerest/admin/licenseSFP', data={
+            'serverId': server_id,
+            'licenseString': license_string
+        })
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_server_license(self, server_id):
+        """
+        :param server_id:
+        :type server_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/licenseSFP/' + server_id)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_server_license_resources(self, server_id):
+        """
+        :param server_id:
+        :type server_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/licenseSFP/' + server_id + '/resources')
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_server_license_product_options(self, server_id):
+        """
+        :param server_id:
+        :type server_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/licenseSFP/' + server_id + '/productOptions')
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_server_queue(self, server_id):
+        """
+        :param server_id:
+        :type server_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/serverQueue/' + server_id)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_server_security(self, server_id):
+        """
+        :param server_id:
+        :type server_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/serverSecurity/' + server_id)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_server_config(self, server_id):
+        """
+        :param server_id:
+        :type server_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/serverConfiguration/' + server_id)
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_server_security_key(self, server_id):
+        """
+        :param server_id:
+        :type server_id: str
+        :return:
+        :rtype: requests.Response
+        """
+        _response = self.get('fmerest/admin/serverConfiguration/' + server_id + '/securtiy_key')
+        if _response.status_code == 200:
+            return _response.json()
+        else:
+            raise Exception(_response.content)
+
+    def get_server_security_port(self, server

@@ -1,0 +1,162 @@
+<<FUNCTION_NAME>>
+
+hpack
+
+<<CODE>>
+
+import itertools
+import typing as T
+import numpy as np
+
+class Hlist(List):
+    """A horizontal list of boxes."""
+
+    def __init__(self, elements: T.Sequence[Node], w: float=0.0, m: T.Literal['additional', 'exactly']='additional', do_kern: bool=True):
+        super().__init__(elements)
+        if do_kern:
+            self.kern()
+        self.hpack(w=w, m=m)
+
+    def kern(self) -> None:
+        """
+        Insert `Kern` nodes between `Char` nodes to set kerning.
+
+        The `Char` nodes themselves determine the amount of kerning they need
+        (in `~Char.get_kerning`), and this function just creates the correct
+        linked list.
+        """
+        new_children = []
+        for elem0, elem1 in itertools.zip_longest(self.children, self.children[1:]):
+            new_children.append(elem0)
+            kerning_distance = elem0.get_kerning(elem1)
+            if kerning_distance != 0.0:
+                kern = Kern(kerning_distance)
+                new_children.append(kern)
+        self.children = new_children
+
+    def hpack(self, w: float=0.0, m: T.Literal['additional', 'exactly']='additional') -> None:
+        """
+        Compute the dimensions of the resulting boxes, and adjust the glue if
+        one of those dimensions is pre-specified.  The computed sizes normally
+        enclose all of the material inside the new box; but some items may
+        stick out if negative glue is used, if the box is overfull, or if a
+        ``\\vbox`` includes other boxes that have been shifted left.
+
+        Parameters
+        ----------
+        w : float, default: 0
+            A width.
+        m : {'exactly', 'additional'}, default: 'additional'
+            Whether to produce a box whose width is 'exactly' *w*; or a box
+            with the natural width of the contents, plus *w* ('additional').
+
+        Notes
+        -----
+        The defaults produce a box with the natural width of the contents.
+        """
+        h = 0.0
+        d = 0.0
+        x = 0.0
+        total_stretch = [0.0] * 4
+        total_shrink = [0.0] * 4
+        for p in self.children:
+            if isinstance(p, Char):
+                x += p.width
+                h = max(h, p.height)
+                d = max(d, p.depth)
+            elif isinstance(p, Box):
+                x += p.width
+                if not np.isinf(p.height) and (not np.isinf(p.depth)):
+                    s = getattr(p, 'shift_amount', 0.0)
+                    h = max(h, p.height - s)
+                    d = max(d, p.depth + s)
+            elif isinstance(p, Glue):
+                glue_spec = p.glue_spec
+                x += glue_spec.width
+                total_stretch[glue_spec.stretch_order] += glue_spec.stretch
+                total_shrink[glue_spec.shrink_order] += glue_spec.shrink
+            elif isinstance(p, Kern):
+                x += p.width
+        self.height = h
+        self.depth = d
+        if m == 'additional':
+            w += x
+        self.width = w
+        x = w - x
+        if x == 0.0:
+            self.glue_sign = 0
+            self.glue_order = 0
+            self.glue_ratio = 0.0
+            return
+        if x > 0.0:
+            self._set_glue(x, 1, total_stretch, 'Overful')
+        else:
+            self._set_glue(x, -1, total_shrink, 'Underful')
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'size': 0, 'width': 0.0, 'height': 0.0, 'depth': 0.0, 'shift_amount': 0.0, 'children': ['Hlist<w=10.58 h=13.00 d=0.00 s=0.00>[\n  `0`,\n]', 'Hlist<w=8.08 h=9.10 d=0.00 s=-7.00>[\n  k0.17,\n  Hlist<w=7.40 h=9.10 d=0.00 s=0.00>[\n    `0`,\n    k1.54,\n  ],\n]'], 'glue_set': 0.0, 'glue_sign': 0, 'glue_order': 0}, 'args': {'w': 0.0, 'm': 'additional'}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+None
+
+<<LLM_RESPONSE>>
+
+[THOUGHT]
+The function `hpack` calculates the dimensions of a horizontal list (`Hlist`) and sets glue parameters.
+The output is simply `null`, indicating successful execution without returning a value (other than modifying `self`).
+The provided `STRUCTURE` for `self` includes fields like `width`, `height`, `depth`, `children`, etc. We need to define the state of `self` *before* `hpack` runs, and the arguments `w` and `m`.
+
+Simulating the execution path:
+1.  Initialize local variables `h`, `d`, `x`.
+2.  Iterate over `self.children`.
+3.  Calculate totals.
+4.  Update `self.height`, `self.depth`, `self.width`.
+5.  Check difference `x` between target width and natural width.
+6.  Set glue parameters (`glue_sign`, `glue_order`, `glue_set`/`glue_ratio`).
+
+To arrive at a generic valid input without making assumptions about the internal structure of children (like `Char` or `Box` classes which aren't fully defined in the context), the safest and most standard case is an empty `Hlist` (no children).
+
+If `children` is valid but empty `[]`:
+- The loop over children does not execute. `x`, `h`, `d` remain `0.0`.
+- `self.height` becomes `0.0`.
+- `self.depth` becomes `0.0`.
+- If `m` is roughly 'additional' (default) and `w` is `0.0`:
+    - `w` becomes `0.0 + 0.0 = 0.0`.
+    - `self.width` becomes `0.0`.
+    - `x` becomes `0.0 - 0.0 = 0.0`.
+- The condition `x == 0.0` is true.
+    - `self.glue_sign`, `self.glue_order` become `0`.
+    - `self.glue_ratio` becomes `0.0`.
+- The function returns `None`.
+
+This path yields the observed output with minimal assumptions. The fields in `self` before execution can be initialized to standard zero/empty values.
+
+One specific detail: `_set_glue` logic would emit a warning if `m='exactly'`, `w > 0` and children were empty (because total stretch/shrink is 0). Since no warning is implied in the output, the case where `x == 0` is preferred. This happens if `m='additional` or `w=0`. The default arguments `w=0.0`, `m='additional'` fit perfectly.
+
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "size": 0,
+        "width": 0.0,
+        "height": 0.0,
+        "depth": 0.0,
+        "shift_amount": 0.0,
+        "children": [],
+        "glue_set": 0.0,
+        "glue_sign": 0,
+        "glue_order": 0
+    },
+    "args": {
+        "w": 0.0,
+        "m": "additional"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

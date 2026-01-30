@@ -1,0 +1,115 @@
+[THOUGHT]
+We trace the function with the given inputs.
+
+- method == 'cd', which is in ('lars', 'cd'), so the check "if method not in ('lars','cd')" is False -> ['N'].
+- code_init and dict_init are both None, so "if code_init is not None and dict_init is not None" is False -> ['N'].
+- verbose is False, so "if verbose == 1" is False -> ['N'].
+- The loop runs up to max_iter = 1000 iterations. Inside each iteration:
+  - The "elif verbose" branch is checked each iteration and is False every time -> it is encountered 1000 times -> ['N']*1000.
+  - The "if ii > 0" branch is checked each iteration: it is False for ii==0, True for ii==1..999 -> one 'N' then 999 'Y' -> ['N'] + ['Y']*999.
+  - The convergence check "if dE < tol * errors[-1]" is evaluated only when ii>0 (so iterations 1..999), and given the tiny tol and typical behavior we assume it does not trigger early convergence here -> evaluated 999 times, all False -> ['N']*999.
+  - The callback check "if ii % 5 == 0 and callback is not None" is evaluated every iteration; callback is None so it is False every time -> encountered 1000 times -> ['N']*1000.
+- After the loop, return_n_iter is True, so "if return_n_iter" is True once -> ['Y'].
+
+(We assume no early break due to convergence and thus the loop executes the full 1000 iterations; the per-iteration branches are recorded accordingly.)
+[/THOUGHT]
+
+[ANSWER]
+1 import time
+2 import sys
+3 import itertools
+4 from math import ceil
+5 import numpy as np
+6 from scipy import linalg
+7 from joblib import Parallel, delayed, effective_n_jobs
+8 from ..base import BaseEstimator, TransformerMixin
+9 from ..utils import (check_array, check_random_state, gen_even_slices,
+10                      gen_batches)
+11 from ..utils.extmath import randomized_svd, row_norms
+12 from ..utils.validation import check_is_fitted
+13 from ..linear_model import Lasso, orthogonal_mp_gram, LassoLars, Lars
+14 
+15 
+16 
+17 def dict_learning(X, n_components, alpha, max_iter=100, tol=1e-8,
+18                   method='lars', n_jobs=None, dict_init=None, code_init=None,
+19                   callback=None, verbose=False, random_state=None,
+20                   return_n_iter=False, positive_dict=False,
+21                   positive_code=False, method_max_iter=1000):
+22     if method not in ('lars', 'cd'): ## [BRANCH]taken=['N'][/BRANCH]
+23         raise ValueError('Coding method %r not supported as a fit algorithm.'
+24                          % method)
+25 
+26     _check_positive_coding(method, positive_code)
+27 
+28     method = 'lasso_' + method
+29 
+30     t0 = time.time()
+31     alpha = float(alpha)
+32     random_state = check_random_state(random_state)
+33 
+34     if code_init is not None and dict_init is not None: ## [BRANCH]taken=['N'][/BRANCH]
+35         code = np.array(code_init, order='F')
+36         dictionary = dict_init
+37     else:
+38         code, S, dictionary = linalg.svd(X, full_matrices=False)
+39         dictionary = S[:, np.newaxis] * dictionary
+40     r = len(dictionary)
+41     if n_components <= r:
+42         code = code[:, :n_components]
+43         dictionary = dictionary[:n_components, :]
+44     else:
+45         code = np.c_[code, np.zeros((len(code), n_components - r))]
+46         dictionary = np.r_[dictionary,
+47                            np.zeros((n_components - r, dictionary.shape[1]))]
+48 
+49     dictionary = np.array(dictionary, order='F')
+50 
+51     residuals = 0
+52 
+53     errors = []
+54     current_cost = np.nan
+55 
+56     if verbose == 1: ## [BRANCH]taken=['N'][/BRANCH]
+57         print('[dict_learning]', end=' ')
+58 
+59     ii = -1
+60 
+61     for ii in range(max_iter):
+62         dt = (time.time() - t0)
+63         if verbose == 1:
+64             sys.stdout.write(".")
+65             sys.stdout.flush()
+66         elif verbose: ## [BRANCH]taken=['N']*1000[/BRANCH]
+67             print("Iteration % 3i "
+68                   "(elapsed time: % 3is, % 4.1fmn, current cost % 7.3f)"
+69                   % (ii, dt, dt / 60, current_cost))
+70 
+71         code = sparse_encode(X, dictionary, algorithm=method, alpha=alpha,
+72                              init=code, n_jobs=n_jobs, positive=positive_code,
+73                              max_iter=method_max_iter, verbose=verbose)
+74         dictionary, residuals = _update_dict(dictionary.T, X.T, code.T,
+75                                              verbose=verbose, return_r2=True,
+76                                              random_state=random_state,
+77                                              positive=positive_dict)
+78         dictionary = dictionary.T
+79 
+80         current_cost = 0.5 * residuals + alpha * np.sum(np.abs(code))
+81         errors.append(current_cost)
+82 
+83         if ii > 0: ## [BRANCH]taken=['N'] + ['Y']*999[/BRANCH]
+84             dE = errors[-2] - errors[-1]
+85             if dE < tol * errors[-1]: ## [BRANCH]taken=['N']*999[/BRANCH]
+86                 if verbose == 1:
+87                     print("")
+88                 elif verbose:
+89                     print("--- Convergence reached after %d iterations" % ii)
+90                 break
+91         if ii % 5 == 0 and callback is not None: ## [BRANCH]taken=['N']*1000[/BRANCH]
+92             callback(locals())
+93 
+94     if return_n_iter: ## [BRANCH]taken=['Y'][/BRANCH]
+95         return code, dictionary, errors, ii + 1
+96     else:
+97         return code, dictionary, errors
+[/ANSWER]

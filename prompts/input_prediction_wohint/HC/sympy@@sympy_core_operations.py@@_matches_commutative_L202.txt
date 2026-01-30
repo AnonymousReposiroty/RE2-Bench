@@ -1,0 +1,1850 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from typing import overload, TYPE_CHECKING
+from .sympify import _sympify as _sympify_, sympify
+from .basic import Basic
+from .sorting import ordered
+from .logic import fuzzy_and
+from sympy.utilities.iterables import sift
+from sympy.core.expr import Expr
+from sympy.core.add import Add
+from sympy.core.mul import Mul
+from sympy.logic.boolalg import Boolean, And, Or
+from .function import _coeff_isneg
+from .expr import Expr
+from .function import WildFunction
+from .symbol import Wild
+from .add import Add
+from .mul import Mul
+from .mul import Mul
+from sympy.simplify.radsimp import collect
+from .add import Add
+
+class AssocOp(Basic):
+    __slots__: tuple[str, ...] = ('is_commutative',)
+    _args_type: type[Basic] | None = None
+
+    @classmethod
+    def _from_args(cls, args, is_commutative=None):
+        if len(args) == 0:
+            return cls.identity
+        elif len(args) == 1:
+            return args[0]
+        obj = super().__new__(cls, *args)
+        if is_commutative is None:
+            is_commutative = fuzzy_and((a.is_commutative for a in args))
+        obj.is_commutative = is_commutative
+        return obj
+
+    def _new_rawargs(self, *args, reeval=True, **kwargs):
+        if reeval and self.is_commutative is False:
+            is_commutative = None
+        else:
+            is_commutative = self.is_commutative
+        return self._from_args(args, is_commutative)
+
+    def _matches_commutative(self, expr, repl_dict=None, old=False):
+        from .function import _coeff_isneg
+        from .expr import Expr
+        if isinstance(self, Expr) and (not isinstance(expr, Expr)):
+            return None
+        if repl_dict is None:
+            repl_dict = {}
+        if self == expr:
+            return repl_dict
+        d = self._matches_simple(expr, repl_dict)
+        if d is not None:
+            return d
+        from .function import WildFunction
+        from .symbol import Wild
+        wild_part, exact_part = sift(self.args, lambda p: p.has(Wild, WildFunction) and (not expr.has(p)), binary=True)
+        if not exact_part:
+            wild_part = list(ordered(wild_part))
+            if self.is_Add:
+                wild_part = sorted(wild_part, key=lambda x: x.args[0] if x.is_Mul and x.args[0].is_Number else 0)
+        else:
+            exact = self._new_rawargs(*exact_part)
+            free = expr.free_symbols
+            if free and exact.free_symbols - free:
+                return None
+            newexpr = self._combine_inverse(expr, exact)
+            if not old and (expr.is_Add or expr.is_Mul):
+                check = newexpr
+                if _coeff_isneg(check):
+                    check = -check
+                if check.count_ops() > expr.count_ops():
+                    return None
+            newpattern = self._new_rawargs(*wild_part)
+            return newpattern.matches(newexpr, repl_dict)
+        i = 0
+        saw = set()
+        while expr not in saw:
+            saw.add(expr)
+            args = tuple(ordered(self.make_args(expr)))
+            if self.is_Add and expr.is_Add:
+                args = tuple(sorted(args, key=lambda x: x.args[0] if x.is_Mul and x.args[0].is_Number else 0))
+            expr_list = (self.identity,) + args
+            for last_op in reversed(expr_list):
+                for w in reversed(wild_part):
+                    d1 = w.matches(last_op, repl_dict)
+                    if d1 is not None:
+                        d2 = self.xreplace(d1).matches(expr, d1)
+                        if d2 is not None:
+                            return d2
+            if i == 0:
+                if self.is_Mul:
+                    if expr.is_Pow and expr.exp.is_Integer:
+                        from .mul import Mul
+                        if expr.exp > 0:
+                            expr = Mul(*[expr.base, expr.base ** (expr.exp - 1)], evaluate=False)
+                        else:
+                            expr = Mul(*[1 / expr.base, expr.base ** (expr.exp + 1)], evaluate=False)
+                        i += 1
+                        continue
+                elif self.is_Add:
+                    c, e = expr.as_coeff_Mul()
+                    if abs(c) > 1:
+                        from .add import Add
+                        if c > 0:
+                            expr = Add(*[e, (c - 1) * e], evaluate=False)
+                        else:
+                            expr = Add(*[-e, (c + 1) * e], evaluate=False)
+                        i += 1
+                        continue
+                    from sympy.simplify.radsimp import collect
+                    was = expr
+                    did = set()
+                    for w in reversed(wild_part):
+                        c, w = w.as_coeff_mul(Wild)
+                        free = c.free_symbols - did
+                        if free:
+                            did.update(free)
+                            expr = collect(expr, free)
+                    if expr != was:
+                        i += 0
+                        continue
+                break
+        return
+
+    @overload
+    @classmethod
+    def make_args(cls: type[Add], expr: Expr) -> tuple[Expr, ...]:
+        ...
+
+    @overload
+    @classmethod
+    def make_args(cls: type[Mul], expr: Expr) -> tuple[Expr, ...]:
+        ...
+
+    @overload
+    @classmethod
+    def make_args(cls: type[And], expr: Boolean) -> tuple[Boolean, ...]:
+        ...
+
+    @overload
+    @classmethod
+    def make_args(cls: type[Or], expr: Boolean) -> tuple[Boolean, ...]:
+        ...
+
+    @classmethod
+    def make_args(cls: type[Basic], expr: Basic) -> tuple[Basic, ...]:
+        if isinstance(expr, cls):
+            return expr.args
+        else:
+            return (sympify(expr),)
+
+    @property
+    def args(self) -> tuple[Basic, ...]:
+        return self._args
+
+    def xreplace(self, rule):
+        value, _ = self._xreplace(rule)
+        return value
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.concrete.expr_with_limits.free_symbols
+
+@property
+def free_symbols(self):
+    """
+    This method returns the symbols in the object, excluding those
+    that take on a specific value (i.e. the dummy symbols).
+
+    Examples
+    ========
+
+    >>> from sympy import Sum
+    >>> from sympy.abc import x, y
+    >>> Sum(x, (x, y, 1)).free_symbols
+    {y}
+    """
+    # don't test for any special values -- nominal free symbols
+    # should be returned, e.g. don't return set() if the
+    # function is zero -- treat it like an unevaluated expression.
+    function, limits = self.function, self.limits
+    # mask off non-symbol integration variables that have
+    # more than themself as a free symbol
+    reps = {i[0]: i[0] if i[0].free_symbols == {i[0]} else Dummy()
+        for i in self.limits}
+    function = function.xreplace(reps)
+    isyms = function.free_symbols
+    for xab in limits:
+        v = reps[xab[0]]
+        if len(xab) == 1:
+            isyms.add(v)
+            continue
+        # take out the target symbol
+        if v in isyms:
+            isyms.remove(v)
+        # add in the new symbols
+        for i in xab[1:]:
+            isyms.update(i.free_symbols)
+    reps = {v: k for k, v in reps.items()}
+    return {reps.get(_, _) for _ in isyms}
+
+sympy.sympy.core.add._matches_simple
+
+def _matches_simple(self, expr, repl_dict):
+    # handle (w+3).matches('x+5') -> {w: x+2}
+    coeff, terms = self.as_coeff_add()
+    if len(terms) == 1:
+        return terms[0].matches(expr - coeff, repl_dict)
+    return
+
+sympy.sympy.core.add.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    return self._matches_commutative(expr, repl_dict, old)
+
+sympy.sympy.core.add._combine_inverse
+
+@staticmethod
+def _combine_inverse(lhs, rhs):
+    """
+    Returns lhs - rhs, but treats oo like a symbol so oo - oo
+    returns 0, instead of a nan.
+    """
+    from sympy.simplify.simplify import signsimp
+    inf = (S.Infinity, S.NegativeInfinity)
+    if lhs.has(*inf) or rhs.has(*inf):
+        from .symbol import Dummy
+        oo = Dummy('oo')
+        reps = {
+            S.Infinity: oo,
+            S.NegativeInfinity: -oo}
+        ireps = {v: k for k, v in reps.items()}
+        eq = lhs.xreplace(reps) - rhs.xreplace(reps)
+        if eq.has(oo):
+            eq = eq.replace(
+                lambda x: x.is_Pow and x.base is oo,
+                lambda x: x.base)
+        rv = eq.xreplace(ireps)
+    else:
+        rv = lhs - rhs
+    srv = signsimp(rv)
+    return srv if srv.is_Number else rv
+
+sympy.sympy.core.basic.xreplace
+
+def xreplace(self, rule):
+    """
+    Replace occurrences of objects within the expression.
+
+    Parameters
+    ==========
+
+    rule : dict-like
+        Expresses a replacement rule
+
+    Returns
+    =======
+
+    xreplace : the result of the replacement
+
+    Examples
+    ========
+
+    >>> from sympy import symbols, pi, exp
+    >>> x, y, z = symbols('x y z')
+    >>> (1 + x*y).xreplace({x: pi})
+    pi*y + 1
+    >>> (1 + x*y).xreplace({x: pi, y: 2})
+    1 + 2*pi
+
+    Replacements occur only if an entire node in the expression tree is
+    matched:
+
+    >>> (x*y + z).xreplace({x*y: pi})
+    z + pi
+    >>> (x*y*z).xreplace({x*y: pi})
+    x*y*z
+    >>> (2*x).xreplace({2*x: y, x: z})
+    y
+    >>> (2*2*x).xreplace({2*x: y, x: z})
+    4*z
+    >>> (x + y + 2).xreplace({x + y: 2})
+    x + y + 2
+    >>> (x + 2 + exp(x + 2)).xreplace({x + 2: y})
+    x + exp(y) + 2
+
+    xreplace does not differentiate between free and bound symbols. In the
+    following, subs(x, y) would not change x since it is a bound symbol,
+    but xreplace does:
+
+    >>> from sympy import Integral
+    >>> Integral(x, (x, 1, 2*x)).xreplace({x: y})
+    Integral(y, (y, 1, 2*y))
+
+    Trying to replace x with an expression raises an error:
+
+    >>> Integral(x, (x, 1, 2*x)).xreplace({x: 2*y}) # doctest: +SKIP
+    ValueError: Invalid limits given: ((2*y, 1, 4*y),)
+
+    See Also
+    ========
+    replace: replacement capable of doing wildcard-like matching,
+             parsing of match, and conditional replacements
+    subs: substitution of subexpressions as defined by the objects
+          themselves.
+
+    """
+    value, _ = self._xreplace(rule)
+    return value
+
+sympy.sympy.core.basic.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    if self == expr:
+        if repl_dict is None:
+            return {}
+        return repl_dict.copy()
+
+sympy.sympy.core.basic.__hash__
+
+def __hash__(self) -> int:
+    # hash cannot be cached using cache_it because infinite recurrence
+    # occurs as hash is needed for setting cache dictionary keys
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+sympy.sympy.core.basic.__eq__
+
+def __eq__(self, other):
+    """Return a boolean indicating whether a == b on the basis of
+    their symbolic trees.
+
+    This is the same as a.compare(b) == 0 but faster.
+
+    Notes
+    =====
+
+    If a class that overrides __eq__() needs to retain the
+    implementation of __hash__() from a parent class, the
+    interpreter must be told this explicitly by setting
+    __hash__ : Callable[[object], int] = <ParentClass>.__hash__.
+    Otherwise the inheritance of __hash__() will be blocked,
+    just as if __hash__ had been explicitly set to None.
+
+    References
+    ==========
+
+    from https://docs.python.org/dev/reference/datamodel.html#object.__hash__
+    """
+    if self is other:
+        return True
+
+    if not isinstance(other, Basic):
+        return self._do_eq_sympify(other)
+
+    # check for pure number expr
+    if  not (self.is_Number and other.is_Number) and (
+            type(self) != type(other)):
+        return False
+    a, b = self._hashable_content(), other._hashable_content()
+    if a != b:
+        return False
+    # check number *in* an expression
+    for a, b in zip(a, b):
+        if not isinstance(a, Basic):
+            continue
+        if a.is_Number and type(a) != type(b):
+            return False
+    return True
+
+sympy.sympy.core.basic.__ne__
+
+def __ne__(self, other):
+    """``a != b``  -> Compare two symbolic trees and see whether they are different
+
+    this is the same as:
+
+    ``a.compare(b) != 0``
+
+    but faster
+    """
+    return not self == other
+
+sympy.sympy.core.basic.free_symbols
+
+@property
+def free_symbols(self) -> set[Basic]:
+    """Return from the atoms of self those which are free symbols.
+
+    Not all free symbols are ``Symbol`` (see examples)
+
+    For most expressions, all symbols are free symbols. For some classes
+    this is not true. e.g. Integrals use Symbols for the dummy variables
+    which are bound variables, so Integral has a method to return all
+    symbols except those. Derivative keeps track of symbols with respect
+    to which it will perform a derivative; those are
+    bound variables, too, so it has its own free_symbols method.
+
+    Any other method that uses bound variables should implement a
+    free_symbols method.
+
+    Examples
+    ========
+
+    >>> from sympy import Derivative, Integral, IndexedBase
+    >>> from sympy.abc import x, y, n
+    >>> (x + 1).free_symbols
+    {x}
+    >>> Integral(x, y).free_symbols
+    {x, y}
+
+    Not all free symbols are actually symbols:
+
+    >>> IndexedBase('F')[0].free_symbols
+    {F, F[0]}
+
+    The symbols of differentiation are not included unless they
+    appear in the expression being differentiated.
+
+    >>> Derivative(x + y, y).free_symbols
+    {x, y}
+    >>> Derivative(x, y).free_symbols
+    {x}
+    >>> Derivative(x, (y, n)).free_symbols
+    {n, x}
+
+    If you want to know if a symbol is in the variables of the
+    Derivative you can do so as follows:
+
+    >>> Derivative(x, y).has_free(y)
+    True
+    """
+    empty: set[Basic] = set()
+    return empty.union(*(a.free_symbols for a in self.args))
+
+sympy.sympy.core.basic.args
+
+@property
+def args(self) -> tuple[Basic, ...]:
+    """Returns a tuple of arguments of 'self'.
+
+    Examples
+    ========
+
+    >>> from sympy import cot
+    >>> from sympy.abc import x, y
+
+    >>> cot(x).args
+    (x,)
+
+    >>> cot(x).args[0]
+    x
+
+    >>> (x*y).args
+    (x, y)
+
+    >>> (x*y).args[1]
+    y
+
+    Notes
+    =====
+
+    Never use self._args, always use self.args.
+    Only use _args in __new__ when creating a new function.
+    Do not override .args() from Basic (so that it is easy to
+    change the interface in the future if needed).
+    """
+    return self._args
+
+sympy.sympy.core.cache.wrapper
+
+@wraps(func)
+def wrapper(*args, **kwargs):
+    try:
+        retval = cfunc(*args, **kwargs)
+    except TypeError as e:
+        if not e.args or not e.args[0].startswith('unhashable type:'):
+            raise
+        retval = func(*args, **kwargs)
+    return retval
+
+sympy.sympy.core.decorators._func
+
+@wraps(func)
+def _func(self, other):
+    # XXX: The check for _op_priority here should be removed. It is
+    # needed to stop mutable matrices from being sympified to
+    # immutable matrices which breaks things in quantum...
+    if not hasattr(other, '_op_priority'):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return retval
+    if not isinstance(other, expectedcls):
+        return retval
+    return func(self, other)
+
+sympy.sympy.core.decorators.__sympifyit_wrapper
+
+@wraps(func)
+def __sympifyit_wrapper(a, b):
+    try:
+        # If an external class has _op_priority, it knows how to deal
+        # with SymPy objects. Otherwise, it must be converted.
+        if not hasattr(b, '_op_priority'):
+            b = sympify(b, strict=True)
+        return func(a, b)
+    except SympifyError:
+        return retval
+
+sympy.sympy.core.expr.count_ops
+
+def count_ops(self, visual=False):
+    from .function import count_ops
+    return count_ops(self, visual)
+
+sympy.sympy.core.expr.as_coeff_mul
+
+def as_coeff_mul(self, *deps, **kwargs) -> tuple[Expr, tuple[Expr, ...]]:
+    """Return the tuple (c, args) where self is written as a Mul, ``m``.
+
+    c should be a Rational multiplied by any factors of the Mul that are
+    independent of deps.
+
+    args should be a tuple of all other factors of m; args is empty
+    if self is a Number or if self is independent of deps (when given).
+
+    This should be used when you do not know if self is a Mul or not but
+    you want to treat self as a Mul or if you want to process the
+    individual arguments of the tail of self as a Mul.
+
+    - if you know self is a Mul and want only the head, use self.args[0];
+    - if you do not want to process the arguments of the tail but need the
+      tail then use self.as_two_terms() which gives the head and tail;
+    - if you want to split self into an independent and dependent parts
+      use ``self.as_independent(*deps)``
+
+    >>> from sympy import S
+    >>> from sympy.abc import x, y
+    >>> (S(3)).as_coeff_mul()
+    (3, ())
+    >>> (3*x*y).as_coeff_mul()
+    (3, (x, y))
+    >>> (3*x*y).as_coeff_mul(x)
+    (3*y, (x,))
+    >>> (3*y).as_coeff_mul(x)
+    (3*y, ())
+    """
+    if deps:
+        if not self.has(*deps):
+            return self, ()
+    return S.One, (self,)
+
+sympy.sympy.core.expr.__neg__
+
+def __neg__(self) -> Expr:
+    # Mul has its own __neg__ routine, so we just
+    # create a 2-args Mul with the -1 in the canonical
+    # slot 0.
+    c = self.is_commutative
+    return Mul._from_args((S.NegativeOne, self), c)
+
+sympy.sympy.core.expr.__pow__
+
+def __pow__(self, other, mod=None) -> Expr:
+    power = self._pow(other)
+    if mod is None:
+        return power
+    else:
+        try:
+            return power % mod
+        except TypeError:
+            return NotImplemented
+
+sympy.sympy.core.expr.as_coeff_Mul
+
+def as_coeff_Mul(self, rational: bool = False) -> tuple['Number', Expr]:
+    """Efficiently extract the coefficient of a product."""
+    return S.One, self
+
+sympy.sympy.core.function.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    if not isinstance(expr, (AppliedUndef, Function)):
+        return None
+    if len(expr.args) not in self.nargs:
+        return None
+
+    if repl_dict is None:
+        repl_dict = {}
+    else:
+        repl_dict = repl_dict.copy()
+
+    repl_dict[self] = expr
+    return repl_dict
+
+sympy.sympy.core.function.free_symbols
+
+@property
+def free_symbols(self):
+    return (self.expr.free_symbols - set(self.variables) |
+        set(self.point.free_symbols))
+
+sympy.sympy.core.function._coeff_isneg
+
+def _coeff_isneg(a):
+    """Return True if the leading Number is negative.
+
+    Examples
+    ========
+
+    >>> from sympy.core.function import _coeff_isneg
+    >>> from sympy import S, Symbol, oo, pi
+    >>> _coeff_isneg(-3*pi)
+    True
+    >>> _coeff_isneg(S(3))
+    False
+    >>> _coeff_isneg(-oo)
+    True
+    >>> _coeff_isneg(Symbol('n', negative=True)) # coeff is 1
+    False
+
+    For matrix expressions:
+
+    >>> from sympy import MatrixSymbol, sqrt
+    >>> A = MatrixSymbol("A", 3, 3)
+    >>> _coeff_isneg(-sqrt(2)*A)
+    True
+    >>> _coeff_isneg(sqrt(2)*A)
+    False
+    """
+
+    if a.is_MatMul:
+        a = a.args[0]
+    if a.is_Mul:
+        a = a.args[0]
+    return a.is_Number and a.is_extended_negative
+
+sympy.sympy.core.mul._matches_simple
+
+def _matches_simple(self, expr, repl_dict):
+    # handle (w*3).matches('x*5') -> {w: x*5/3}
+    coeff, terms = self.as_coeff_Mul()
+    terms = Mul.make_args(terms)
+    if len(terms) == 1:
+        newexpr = self.__class__._combine_inverse(expr, coeff)
+        return terms[0].matches(newexpr, repl_dict)
+    return
+
+sympy.sympy.core.mul.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    expr = sympify(expr)
+    if self.is_commutative and expr.is_commutative:
+        return self._matches_commutative(expr, repl_dict, old)
+    elif self.is_commutative is not expr.is_commutative:
+        return None
+
+    # Proceed only if both both expressions are non-commutative
+    c1, nc1 = self.args_cnc()
+    c2, nc2 = expr.args_cnc()
+    c1, c2 = [c or [1] for c in [c1, c2]]
+
+    # TODO: Should these be self.func?
+    comm_mul_self = Mul(*c1)
+    comm_mul_expr = Mul(*c2)
+
+    repl_dict = comm_mul_self.matches(comm_mul_expr, repl_dict, old)
+
+    # If the commutative arguments didn't match and aren't equal, then
+    # then the expression as a whole doesn't match
+    if not repl_dict and c1 != c2:
+        return None
+
+    # Now match the non-commutative arguments, expanding powers to
+    # multiplications
+    nc1 = Mul._matches_expand_pows(nc1)
+    nc2 = Mul._matches_expand_pows(nc2)
+
+    repl_dict = Mul._matches_noncomm(nc1, nc2, repl_dict)
+
+    return repl_dict or None
+
+sympy.sympy.core.mul._combine_inverse
+
+@staticmethod
+def _combine_inverse(lhs, rhs):
+    """
+    Returns lhs/rhs, but treats arguments like symbols, so things
+    like oo/oo return 1 (instead of a nan) and ``I`` behaves like
+    a symbol instead of sqrt(-1).
+    """
+    from sympy.simplify.simplify import signsimp
+    from .symbol import Dummy
+    if lhs == rhs:
+        return S.One
+
+    def check(l, r):
+        if l.is_Float and r.is_comparable:
+            # if both objects are added to 0 they will share the same "normalization"
+            # and are more likely to compare the same. Since Add(foo, 0) will not allow
+            # the 0 to pass, we use __add__ directly.
+            return l.__add__(0) == r.evalf().__add__(0)
+        return False
+    if check(lhs, rhs) or check(rhs, lhs):
+        return S.One
+    if any(i.is_Pow or i.is_Mul for i in (lhs, rhs)):
+        # gruntz and limit wants a literal I to not combine
+        # with a power of -1
+        d = Dummy('I')
+        _i = {S.ImaginaryUnit: d}
+        i_ = {d: S.ImaginaryUnit}
+        a = lhs.xreplace(_i).as_powers_dict()
+        b = rhs.xreplace(_i).as_powers_dict()
+        blen = len(b)
+        for bi in tuple(b.keys()):
+            if bi in a:
+                a[bi] -= b.pop(bi)
+                if not a[bi]:
+                    a.pop(bi)
+        if len(b) != blen:
+            lhs = Mul(*[k**v for k, v in a.items()]).xreplace(i_)
+            rhs = Mul(*[k**v for k, v in b.items()]).xreplace(i_)
+    rv = lhs/rhs
+    srv = signsimp(rv)
+    return srv if srv.is_Number else rv
+
+sympy.sympy.core.mul.__neg__
+
+def __neg__(self):
+    c, args = self.as_coeff_mul()
+    if args[0] is not S.ComplexInfinity:
+        c = -c
+    if c is not S.One:
+        if args[0].is_Number:
+            args = list(args)
+            if c is S.NegativeOne:
+                args[0] = -args[0]
+            else:
+                args[0] *= c
+        else:
+            args = (c,) + args
+    return self._from_args(args, self.is_commutative)
+
+sympy.sympy.core.mul.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False) -> tuple['Number', Expr]:
+    """
+    Efficiently extract the coefficient of a product.
+    """
+    coeff, args = self.args[0], self.args[1:]
+
+    if coeff.is_Number:
+        if not rational or coeff.is_Rational:
+            if len(args) == 1:
+                return coeff, args[0] # type: ignore
+            else:
+                return coeff, self._new_rawargs(*args) # type: ignore
+        elif coeff.is_extended_negative:
+            return S.NegativeOne, self._new_rawargs(*((-coeff,) + args))
+    return S.One, self
+
+sympy.sympy.core.numbers.__neg__
+
+def __neg__(self):
+    return S.Infinity
+
+sympy.sympy.core.numbers.__abs__
+
+def __abs__(self):
+    return S.Infinity
+
+sympy.sympy.core.numbers.__ne__
+
+def __ne__(self, other):
+    return not self == other
+
+sympy.sympy.core.numbers.__hash__
+
+def __hash__(self):
+    return super().__hash__()
+
+sympy.sympy.core.numbers.__gt__
+
+def __gt__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p > other.p)
+    return Rational.__gt__(self, other)
+
+sympy.sympy.core.numbers.__lt__
+
+def __lt__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p < other.p)
+    return Rational.__lt__(self, other)
+
+sympy.sympy.core.numbers.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False):
+    """Efficiently extract the coefficient of a product."""
+    if not rational:
+        return self, S.One
+    return S.One, self
+
+sympy.sympy.core.numbers.__add__
+
+def __add__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p + other)
+        elif isinstance(other, Integer):
+            return Integer(self.p + other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.q + other.p, other.q, 1)
+        return Rational.__add__(self, other)
+    else:
+        return Add(self, other)
+
+sympy.sympy.core.numbers.__sub__
+
+def __sub__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p - other)
+        elif isinstance(other, Integer):
+            return Integer(self.p - other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.q - other.p, other.q, 1)
+        return Rational.__sub__(self, other)
+    return Rational.__sub__(self, other)
+
+sympy.sympy.core.numbers.__mul__
+
+def __mul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p*other)
+        elif isinstance(other, Integer):
+            return Integer(self.p*other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.p, other.q, igcd(self.p, other.q))
+        return Rational.__mul__(self, other)
+    return Rational.__mul__(self, other)
+
+sympy.sympy.core.numbers.__rmul__
+
+def __rmul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(other*self.p)
+        elif isinstance(other, Rational):
+            return Rational._new(other.p*self.p, other.q, igcd(self.p, other.q))
+        return Rational.__rmul__(self, other)
+    return Rational.__rmul__(self, other)
+
+sympy.sympy.core.operations._new_rawargs
+
+def _new_rawargs(self, *args, reeval=True, **kwargs):
+    """Create new instance of own class with args exactly as provided by
+    caller but returning the self class identity if args is empty.
+
+    Examples
+    ========
+
+       This is handy when we want to optimize things, e.g.
+
+           >>> from sympy import Mul, S
+           >>> from sympy.abc import x, y
+           >>> e = Mul(3, x, y)
+           >>> e.args
+           (3, x, y)
+           >>> Mul(*e.args[1:])
+           x*y
+           >>> e._new_rawargs(*e.args[1:])  # the same as above, but faster
+           x*y
+
+       Note: use this with caution. There is no checking of arguments at
+       all. This is best used when you are rebuilding an Add or Mul after
+       simply removing one or more args. If, for example, modifications,
+       result in extra 1s being inserted they will show up in the result:
+
+           >>> m = (x*y)._new_rawargs(S.One, x); m
+           1*x
+           >>> m == x
+           False
+           >>> m.is_Mul
+           True
+
+       Another issue to be aware of is that the commutativity of the result
+       is based on the commutativity of self. If you are rebuilding the
+       terms that came from a commutative object then there will be no
+       problem, but if self was non-commutative then what you are
+       rebuilding may now be commutative.
+
+       Although this routine tries to do as little as possible with the
+       input, getting the commutativity right is important, so this level
+       of safety is enforced: commutativity will always be recomputed if
+       self is non-commutative and kwarg `reeval=False` has not been
+       passed.
+    """
+    if reeval and self.is_commutative is False:
+        is_commutative = None
+    else:
+        is_commutative = self.is_commutative
+    return self._from_args(args, is_commutative)
+
+sympy.sympy.core.operations.<lambda>
+
+args = tuple(sorted(args, key=lambda x:
+    x.args[0] if x.is_Mul and x.args[0].is_Number else
+    0))
+
+
+sympy.sympy.core.operations.make_args
+
+@classmethod
+def make_args(cls: type[Basic], expr: Basic) -> tuple[Basic, ...]:
+    """
+    Return a sequence of elements `args` such that cls(*args) == expr
+
+    Examples
+    ========
+
+    >>> from sympy import Symbol, Mul, Add
+    >>> x, y = map(Symbol, 'xy')
+
+    >>> Mul.make_args(x*y)
+    (x, y)
+    >>> Add.make_args(x*y)
+    (x*y,)
+    >>> set(Add.make_args(x*y + y)) == set([y, x*y])
+    True
+
+    """
+    if isinstance(expr, cls):
+        return expr.args
+    else:
+        return (sympify(expr),)
+
+sympy.sympy.core.power.base
+
+@property
+def base(self) -> Expr:
+    return self.args[0]
+
+sympy.sympy.core.power.exp
+
+@property
+def exp(self) -> Expr:
+    return self.args[1]
+
+sympy.sympy.core.power.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    expr = _sympify(expr)
+    if repl_dict is None:
+        repl_dict = {}
+
+    # special case, pattern = 1 and expr.exp can match to 0
+    if expr is S.One:
+        d = self.exp.matches(S.Zero, repl_dict)
+        if d is not None:
+            return d
+
+    # make sure the expression to be matched is an Expr
+    if not isinstance(expr, Expr):
+        return None
+
+    b, e = expr.as_base_exp()
+
+    # special case number
+    sb, se = self.as_base_exp()
+    if sb.is_Symbol and se.is_Integer and expr:
+        if e.is_rational:
+            return sb.matches(b**(e/se), repl_dict)
+        return sb.matches(expr**(1/se), repl_dict)
+
+    d = repl_dict.copy()
+    d = self.base.matches(b, d)
+    if d is None:
+        return None
+
+    d = self.exp.xreplace(d).matches(e, d)
+    if d is None:
+        return Expr.matches(self, expr, repl_dict)
+    return d
+
+sympy.sympy.core.sorting.ordered
+
+def ordered(seq, keys=None, default=True, warn=False):
+    """Return an iterator of the seq where keys are used to break ties
+    in a conservative fashion: if, after applying a key, there are no
+    ties then no other keys will be computed.
+
+    Two default keys will be applied if 1) keys are not provided or
+    2) the given keys do not resolve all ties (but only if ``default``
+    is True). The two keys are ``_nodes`` (which places smaller
+    expressions before large) and ``default_sort_key`` which (if the
+    ``sort_key`` for an object is defined properly) should resolve
+    any ties. This strategy is similar to sorting done by
+    ``Basic.compare``, but differs in that ``ordered`` never makes a
+    decision based on an objects name.
+
+    If ``warn`` is True then an error will be raised if there were no
+    keys remaining to break ties. This can be used if it was expected that
+    there should be no ties between items that are not identical.
+
+    Examples
+    ========
+
+    >>> from sympy import ordered, count_ops
+    >>> from sympy.abc import x, y
+
+    The count_ops is not sufficient to break ties in this list and the first
+    two items appear in their original order (i.e. the sorting is stable):
+
+    >>> list(ordered([y + 2, x + 2, x**2 + y + 3],
+    ...    count_ops, default=False, warn=False))
+    ...
+    [y + 2, x + 2, x**2 + y + 3]
+
+    The default_sort_key allows the tie to be broken:
+
+    >>> list(ordered([y + 2, x + 2, x**2 + y + 3]))
+    ...
+    [x + 2, y + 2, x**2 + y + 3]
+
+    Here, sequences are sorted by length, then sum:
+
+    >>> seq, keys = [[[1, 2, 1], [0, 3, 1], [1, 1, 3], [2], [1]], [
+    ...    lambda x: len(x),
+    ...    lambda x: sum(x)]]
+    ...
+    >>> list(ordered(seq, keys, default=False, warn=False))
+    [[1], [2], [1, 2, 1], [0, 3, 1], [1, 1, 3]]
+
+    If ``warn`` is True, an error will be raised if there were not
+    enough keys to break ties:
+
+    >>> list(ordered(seq, keys, default=False, warn=True))
+    Traceback (most recent call last):
+    ...
+    ValueError: not enough keys to break ties
+
+
+    Notes
+    =====
+
+    The decorated sort is one of the fastest ways to sort a sequence for
+    which special item comparison is desired: the sequence is decorated,
+    sorted on the basis of the decoration (e.g. making all letters lower
+    case) and then undecorated. If one wants to break ties for items that
+    have the same decorated value, a second key can be used. But if the
+    second key is expensive to compute then it is inefficient to decorate
+    all items with both keys: only those items having identical first key
+    values need to be decorated. This function applies keys successively
+    only when needed to break ties. By yielding an iterator, use of the
+    tie-breaker is delayed as long as possible.
+
+    This function is best used in cases when use of the first key is
+    expected to be a good hashing function; if there are no unique hashes
+    from application of a key, then that key should not have been used. The
+    exception, however, is that even if there are many collisions, if the
+    first group is small and one does not need to process all items in the
+    list then time will not be wasted sorting what one was not interested
+    in. For example, if one were looking for the minimum in a list and
+    there were several criteria used to define the sort order, then this
+    function would be good at returning that quickly if the first group
+    of candidates is small relative to the number of items being processed.
+
+    """
+
+    d = defaultdict(list)
+    if keys:
+        if isinstance(keys, (list, tuple)):
+            keys = list(keys)
+            f = keys.pop(0)
+        else:
+            f = keys
+            keys = []
+        for a in seq:
+            d[f(a)].append(a)
+    else:
+        if not default:
+            raise ValueError('if default=False then keys must be provided')
+        d[None].extend(seq)
+
+    for k, value in sorted(d.items()):
+        if len(value) > 1:
+            if keys:
+                value = ordered(value, keys, default, warn)
+            elif default:
+                value = ordered(value, (_nodes, default_sort_key,),
+                               default=False, warn=warn)
+            elif warn:
+                u = list(uniq(value))
+                if len(u) > 1:
+                    raise ValueError(
+                        'not enough keys to break ties: %s' % u)
+        yield from value
+
+sympy.sympy.core.symbol.free_symbols
+
+@property
+def free_symbols(self) -> set[Basic]:
+    return {self}
+
+sympy.sympy.core.symbol.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    if any(expr.has(x) for x in self.exclude):
+        return None
+    if not all(f(expr) for f in self.properties):
+        return None
+    if repl_dict is None:
+        repl_dict = {}
+    else:
+        repl_dict = repl_dict.copy()
+    repl_dict[self] = expr
+    return repl_dict
+
+sympy.sympy.integrals.integrals.free_symbols
+
+@property
+def free_symbols(self):
+    """
+    This method returns the symbols that will exist when the
+    integral is evaluated. This is useful if one is trying to
+    determine whether an integral depends on a certain
+    symbol or not.
+
+    Examples
+    ========
+
+    >>> from sympy import Integral
+    >>> from sympy.abc import x, y
+    >>> Integral(x, (x, y, 1)).free_symbols
+    {y}
+
+    See Also
+    ========
+
+    sympy.concrete.expr_with_limits.ExprWithLimits.function
+    sympy.concrete.expr_with_limits.ExprWithLimits.limits
+    sympy.concrete.expr_with_limits.ExprWithLimits.variables
+    """
+    return super().free_symbols
+
+sympy.sympy.logic.boolalg.__bool__
+
+def __bool__(self):
+    return False
+
+sympy.sympy.simplify.radsimp.collect
+
+def collect(expr, syms, func=None, evaluate=None, exact=False, distribute_order_term=True):
+    """
+    Collect additive terms of an expression.
+
+    Explanation
+    ===========
+
+    This function collects additive terms of an expression with respect
+    to a list of expression up to powers with rational exponents. By the
+    term symbol here are meant arbitrary expressions, which can contain
+    powers, products, sums etc. In other words symbol is a pattern which
+    will be searched for in the expression's terms.
+
+    The input expression is not expanded by :func:`collect`, so user is
+    expected to provide an expression in an appropriate form. This makes
+    :func:`collect` more predictable as there is no magic happening behind the
+    scenes. However, it is important to note, that powers of products are
+    converted to products of powers using the :func:`~.expand_power_base`
+    function.
+
+    There are two possible types of output. First, if ``evaluate`` flag is
+    set, this function will return an expression with collected terms or
+    else it will return a dictionary with expressions up to rational powers
+    as keys and collected coefficients as values.
+
+    Examples
+    ========
+
+    >>> from sympy import S, collect, expand, factor, Wild
+    >>> from sympy.abc import a, b, c, x, y
+
+    This function can collect symbolic coefficients in polynomials or
+    rational expressions. It will manage to find all integer or rational
+    powers of collection variable::
+
+        >>> collect(a*x**2 + b*x**2 + a*x - b*x + c, x)
+        c + x**2*(a + b) + x*(a - b)
+
+    The same result can be achieved in dictionary form::
+
+        >>> d = collect(a*x**2 + b*x**2 + a*x - b*x + c, x, evaluate=False)
+        >>> d[x**2]
+        a + b
+        >>> d[x]
+        a - b
+        >>> d[S.One]
+        c
+
+    You can also work with multivariate polynomials. However, remember that
+    this function is greedy so it will care only about a single symbol at time,
+    in specification order::
+
+        >>> collect(x**2 + y*x**2 + x*y + y + a*y, [x, y])
+        x**2*(y + 1) + x*y + y*(a + 1)
+
+    Also more complicated expressions can be used as patterns::
+
+        >>> from sympy import sin, log
+        >>> collect(a*sin(2*x) + b*sin(2*x), sin(2*x))
+        (a + b)*sin(2*x)
+
+        >>> collect(a*x*log(x) + b*(x*log(x)), x*log(x))
+        x*(a + b)*log(x)
+
+    You can use wildcards in the pattern::
+
+        >>> w = Wild('w1')
+        >>> collect(a*x**y - b*x**y, w**y)
+        x**y*(a - b)
+
+    It is also possible to work with symbolic powers, although it has more
+    complicated behavior, because in this case power's base and symbolic part
+    of the exponent are treated as a single symbol::
+
+        >>> collect(a*x**c + b*x**c, x)
+        a*x**c + b*x**c
+        >>> collect(a*x**c + b*x**c, x**c)
+        x**c*(a + b)
+
+    However if you incorporate rationals to the exponents, then you will get
+    well known behavior::
+
+        >>> collect(a*x**(2*c) + b*x**(2*c), x**c)
+        x**(2*c)*(a + b)
+
+    Note also that all previously stated facts about :func:`collect` function
+    apply to the exponential function, so you can get::
+
+        >>> from sympy import exp
+        >>> collect(a*exp(2*x) + b*exp(2*x), exp(x))
+        (a + b)*exp(2*x)
+
+    If you are interested only in collecting specific powers of some symbols
+    then set ``exact`` flag to True::
+
+        >>> collect(a*x**7 + b*x**7, x, exact=True)
+        a*x**7 + b*x**7
+        >>> collect(a*x**7 + b*x**7, x**7, exact=True)
+        x**7*(a + b)
+
+    If you want to collect on any object containing symbols, set
+    ``exact`` to None:
+
+        >>> collect(x*exp(x) + sin(x)*y + sin(x)*2 + 3*x, x, exact=None)
+        x*exp(x) + 3*x + (y + 2)*sin(x)
+        >>> collect(a*x*y + x*y + b*x + x, [x, y], exact=None)
+        x*y*(a + 1) + x*(b + 1)
+
+    You can also apply this function to differential equations, where
+    derivatives of arbitrary order can be collected. Note that if you
+    collect with respect to a function or a derivative of a function, all
+    derivatives of that function will also be collected. Use
+    ``exact=True`` to prevent this from happening::
+
+        >>> from sympy import Derivative as D, collect, Function
+        >>> f = Function('f') (x)
+
+        >>> collect(a*D(f,x) + b*D(f,x), D(f,x))
+        (a + b)*Derivative(f(x), x)
+
+        >>> collect(a*D(D(f,x),x) + b*D(D(f,x),x), f)
+        (a + b)*Derivative(f(x), (x, 2))
+
+        >>> collect(a*D(D(f,x),x) + b*D(D(f,x),x), D(f,x), exact=True)
+        a*Derivative(f(x), (x, 2)) + b*Derivative(f(x), (x, 2))
+
+        >>> collect(a*D(f,x) + b*D(f,x) + a*f + b*f, f)
+        (a + b)*f(x) + (a + b)*Derivative(f(x), x)
+
+    Or you can even match both derivative order and exponent at the same time::
+
+        >>> collect(a*D(D(f,x),x)**2 + b*D(D(f,x),x)**2, D(f,x))
+        (a + b)*Derivative(f(x), (x, 2))**2
+
+    Finally, you can apply a function to each of the collected coefficients.
+    For example you can factorize symbolic coefficients of polynomial::
+
+        >>> f = expand((x + a + 1)**3)
+
+        >>> collect(f, x, factor)
+        x**3 + 3*x**2*(a + 1) + 3*x*(a + 1)**2 + (a + 1)**3
+
+    .. note:: Arguments are expected to be in expanded form, so you might have
+              to call :func:`~.expand` prior to calling this function.
+
+    See Also
+    ========
+
+    collect_const, collect_sqrt, rcollect
+    """
+    expr = sympify(expr)
+    syms = [sympify(i) for i in (syms if iterable(syms) else [syms])]
+
+    # replace syms[i] if it is not x, -x or has Wild symbols
+    cond = lambda x: x.is_Symbol or (-x).is_Symbol or bool(
+        x.atoms(Wild))
+    _, nonsyms = sift(syms, cond, binary=True)
+    if nonsyms:
+        reps = dict(zip(nonsyms, [Dummy(**assumptions(i)) for i in nonsyms]))
+        syms = [reps.get(s, s) for s in syms]
+        rv = collect(expr.subs(reps), syms,
+            func=func, evaluate=evaluate, exact=exact,
+            distribute_order_term=distribute_order_term)
+        urep = {v: k for k, v in reps.items()}
+        if not isinstance(rv, dict):
+            return rv.xreplace(urep)
+        else:
+            return {urep.get(k, k).xreplace(urep): v.xreplace(urep)
+                    for k, v in rv.items()}
+
+    # see if other expressions should be considered
+    if exact is None:
+        _syms = set()
+        for i in Add.make_args(expr):
+            if not i.has_free(*syms) or i in syms:
+                continue
+            if not i.is_Mul and i not in syms:
+                _syms.add(i)
+            else:
+                # identify compound generators
+                g = i._new_rawargs(*i.as_coeff_mul(*syms)[1])
+                if g not in syms:
+                    _syms.add(g)
+        simple = all(i.is_Pow and i.base in syms for i in _syms)
+        syms = syms + list(ordered(_syms))
+        if not simple:
+            return collect(expr, syms,
+            func=func, evaluate=evaluate, exact=False,
+            distribute_order_term=distribute_order_term)
+
+    if evaluate is None:
+        evaluate = global_parameters.evaluate
+
+    def make_expression(terms):
+        product = []
+
+        for term, rat, sym, deriv in terms:
+            if deriv is not None:
+                var, order = deriv
+                for _ in range(order):
+                    term = Derivative(term, var)
+
+            if sym is None:
+                if rat is S.One:
+                    product.append(term)
+                else:
+                    product.append(Pow(term, rat))
+            else:
+                product.append(Pow(term, rat*sym))
+
+        return Mul(*product)
+
+    def parse_derivative(deriv):
+        # scan derivatives tower in the input expression and return
+        # underlying function and maximal differentiation order
+        expr, sym, order = deriv.expr, deriv.variables[0], 1
+
+        for s in deriv.variables[1:]:
+            if s == sym:
+                order += 1
+            else:
+                raise NotImplementedError(
+                    'Improve MV Derivative support in collect')
+
+        while isinstance(expr, Derivative):
+            s0 = expr.variables[0]
+
+            if any(s != s0 for s in expr.variables):
+                raise NotImplementedError(
+                    'Improve MV Derivative support in collect')
+
+            if s0 == sym:
+                expr, order = expr.expr, order + len(expr.variables)
+            else:
+                break
+
+        return expr, (sym, Rational(order))
+
+    def parse_term(expr):
+        """Parses expression expr and outputs tuple (sexpr, rat_expo,
+        sym_expo, deriv)
+        where:
+         - sexpr is the base expression
+         - rat_expo is the rational exponent that sexpr is raised to
+         - sym_expo is the symbolic exponent that sexpr is raised to
+         - deriv contains the derivatives of the expression
+
+         For example, the output of x would be (x, 1, None, None)
+         the output of 2**x would be (2, 1, x, None).
+        """
+        rat_expo, sym_expo = S.One, None
+        sexpr, deriv = expr, None
+
+        if expr.is_Pow:
+            if isinstance(expr.base, Derivative):
+                sexpr, deriv = parse_derivative(expr.base)
+            else:
+                sexpr = expr.base
+
+            if expr.base == S.Exp1:
+                arg = expr.exp
+                if arg.is_Rational:
+                    sexpr, rat_expo = S.Exp1, arg
+                elif arg.is_Mul:
+                    coeff, tail = arg.as_coeff_Mul(rational=True)
+                    sexpr, rat_expo = exp(tail), coeff
+
+            elif expr.exp.is_Number:
+                rat_expo = expr.exp
+            else:
+                coeff, tail = expr.exp.as_coeff_Mul()
+
+                if coeff.is_Number:
+                    rat_expo, sym_expo = coeff, tail
+                else:
+                    sym_expo = expr.exp
+        elif isinstance(expr, exp):
+            arg = expr.exp
+            if arg.is_Rational:
+                sexpr, rat_expo = S.Exp1, arg
+            elif arg.is_Mul:
+                coeff, tail = arg.as_coeff_Mul(rational=True)
+                sexpr, rat_expo = exp(tail), coeff
+        elif isinstance(expr, Derivative):
+            sexpr, deriv = parse_derivative(expr)
+
+        return sexpr, rat_expo, sym_expo, deriv
+
+    def parse_expression(terms, pattern):
+        """Parse terms searching for a pattern.
+        Terms is a list of tuples as returned by parse_terms;
+        Pattern is an expression treated as a product of factors.
+        """
+        pattern = Mul.make_args(pattern)
+
+        if len(terms) < len(pattern):
+            # pattern is longer than matched product
+            # so no chance for positive parsing result
+            return None
+        else:
+            pattern = [parse_term(elem) for elem in pattern]
+
+            terms = terms[:]  # need a copy
+            elems, common_expo, has_deriv = [], None, False
+
+            for elem, e_rat, e_sym, e_ord in pattern:
+
+                if elem.is_Number and e_rat == 1 and e_sym is None:
+                    # a constant is a match for everything
+                    continue
+
+                for j in range(len(terms)):
+                    if terms[j] is None:
+                        continue
+
+                    term, t_rat, t_sym, t_ord = terms[j]
+
+                    # keeping track of whether one of the terms had
+                    # a derivative or not as this will require rebuilding
+                    # the expression later
+                    if t_ord is not None:
+                        has_deriv = True
+
+                    if (term.match(elem) is not None and
+                            (t_sym == e_sym or t_sym is not None and
+                            e_sym is not None and
+                            t_sym.match(e_sym) is not None)):
+                        if exact is False:
+                            # we don't have to be exact so find common exponent
+                            # for both expression's term and pattern's element
+                            expo = t_rat / e_rat
+
+                            if common_expo is None:
+                                # first time
+                                common_expo = expo
+                            else:
+                                # common exponent was negotiated before so
+                                # there is no chance for a pattern match unless
+                                # common and current exponents are equal
+                                if common_expo != expo:
+                                    common_expo = 1
+                        else:
+                            # we ought to be exact so all fields of
+                            # interest must match in every details
+                            if e_rat != t_rat or e_ord != t_ord:
+                                continue
+
+                        # found common term so remove it from the expression
+                        # and try to match next element in the pattern
+                        elems.append(terms[j])
+                        terms[j] = None
+
+                        break
+
+                else:
+                    # pattern element not found
+                    return None
+
+            return [_f for _f in terms if _f], elems, common_expo, has_deriv
+
+    if evaluate:
+        if expr.is_Add:
+            o = expr.getO() or 0
+            expr = expr.func(*[
+                    collect(a, syms, func, True, exact, distribute_order_term)
+                    for a in expr.args if a != o]) + o
+        elif expr.is_Mul:
+            return expr.func(*[
+                collect(term, syms, func, True, exact, distribute_order_term)
+                for term in expr.args])
+        elif expr.is_Pow:
+            b = collect(
+                expr.base, syms, func, True, exact, distribute_order_term)
+            return Pow(b, expr.exp)
+
+    syms = [expand_power_base(i, deep=False) for i in syms]
+
+    order_term = None
+
+    if distribute_order_term:
+        order_term = expr.getO()
+
+        if order_term is not None:
+            if order_term.has(*syms):
+                order_term = None
+            else:
+                expr = expr.removeO()
+
+    summa = [expand_power_base(i, deep=False) for i in Add.make_args(expr)]
+
+    collected, disliked = defaultdict(list), S.Zero
+    for product in summa:
+        c, nc = product.args_cnc(split_1=False)
+        args = list(ordered(c)) + nc
+        terms = [parse_term(i) for i in args]
+        small_first = True
+
+        for symbol in syms:
+            if isinstance(symbol, Derivative) and small_first:
+                terms = list(reversed(terms))
+                small_first = not small_first
+            result = parse_expression(terms, symbol)
+
+            if result is not None:
+                if not symbol.is_commutative:
+                    raise AttributeError("Can not collect noncommutative symbol")
+
+                terms, elems, common_expo, has_deriv = result
+
+                # when there was derivative in current pattern we
+                # will need to rebuild its expression from scratch
+                if not has_deriv:
+                    margs = []
+                    for elem in elems:
+                        if elem[2] is None:
+                            e = elem[1]
+                        else:
+                            e = elem[1]*elem[2]
+                        margs.append(Pow(elem[0], e))
+                    index = Mul(*margs)
+                else:
+                    index = make_expression(elems)
+                terms = expand_power_base(make_expression(terms), deep=False)
+                index = expand_power_base(index, deep=False)
+                collected[index].append(terms)
+                break
+        else:
+            # none of the patterns matched
+            disliked += product
+    # add terms now for each key
+    collected = {k: Add(*v) for k, v in collected.items()}
+
+    if disliked is not S.Zero:
+        collected[S.One] = disliked
+
+    if order_term is not None:
+        for key, val in collected.items():
+            collected[key] = val + order_term
+
+    if func is not None:
+        collected = {
+            key: func(val) for key, val in collected.items()}
+
+    if evaluate:
+        return Add(*[key*val for key, val in collected.items()])
+    else:
+        return collected
+
+sympy.sympy.tensor.indexed.free_symbols
+
+@property
+def free_symbols(self):
+    base_free_symbols = self.base.free_symbols
+    indices_free_symbols = {
+        fs for i in self.indices for fs in i.free_symbols}
+    if base_free_symbols:
+        return {self} | base_free_symbols | indices_free_symbols
+    else:
+        return indices_free_symbols
+
+sympy.sympy.utilities.iterables.sift
+
+def sift(seq, keyfunc, binary=False):
+    """
+    Sift the sequence, ``seq`` according to ``keyfunc``.
+
+    Returns
+    =======
+
+    When ``binary`` is ``False`` (default), the output is a dictionary
+    where elements of ``seq`` are stored in a list keyed to the value
+    of keyfunc for that element. If ``binary`` is True then a tuple
+    with lists ``T`` and ``F`` are returned where ``T`` is a list
+    containing elements of seq for which ``keyfunc`` was ``True`` and
+    ``F`` containing those elements for which ``keyfunc`` was ``False``;
+    a ValueError is raised if the ``keyfunc`` is not binary.
+
+    Examples
+    ========
+
+    >>> from sympy.utilities import sift
+    >>> from sympy.abc import x, y
+    >>> from sympy import sqrt, exp, pi, Tuple
+
+    >>> sift(range(5), lambda x: x % 2)
+    {0: [0, 2, 4], 1: [1, 3]}
+
+    sift() returns a defaultdict() object, so any key that has no matches will
+    give [].
+
+    >>> sift([x], lambda x: x.is_commutative)
+    {True: [x]}
+    >>> _[False]
+    []
+
+    Sometimes you will not know how many keys you will get:
+
+    >>> sift([sqrt(x), exp(x), (y**x)**2],
+    ...      lambda x: x.as_base_exp()[0])
+    {E: [exp(x)], x: [sqrt(x)], y: [y**(2*x)]}
+
+    Sometimes you expect the results to be binary; the
+    results can be unpacked by setting ``binary`` to True:
+
+    >>> sift(range(4), lambda x: x % 2, binary=True)
+    ([1, 3], [0, 2])
+    >>> sift(Tuple(1, pi), lambda x: x.is_rational, binary=True)
+    ([1], [pi])
+
+    A ValueError is raised if the predicate was not actually binary
+    (which is a good test for the logic where sifting is used and
+    binary results were expected):
+
+    >>> unknown = exp(1) - pi  # the rationality of this is unknown
+    >>> args = Tuple(1, pi, unknown)
+    >>> sift(args, lambda x: x.is_rational, binary=True)
+    Traceback (most recent call last):
+    ...
+    ValueError: keyfunc gave non-binary output
+
+    The non-binary sifting shows that there were 3 keys generated:
+
+    >>> set(sift(args, lambda x: x.is_rational).keys())
+    {None, False, True}
+
+    If you need to sort the sifted items it might be better to use
+    ``ordered`` which can economically apply multiple sort keys
+    to a sequence while sorting.
+
+    See Also
+    ========
+
+    ordered
+
+    """
+    if not binary:
+        m = defaultdict(list)
+        for i in seq:
+            m[keyfunc(i)].append(i)
+        return m
+    sift = F, T = [], []
+    for i in seq:
+        try:
+            sift[keyfunc(i)].append(i)
+        except (IndexError, TypeError):
+            raise ValueError('keyfunc gave non-binary output')
+    return T, F
+
+sympy.sympy.vector.scalar.free_symbols
+
+@property
+def free_symbols(self):
+    return {self}
+
+
+[/PYTHON]
+What will be the input of `_matches_commutative`, given the following input:
+[OUTPUT]
+```
+{
+    "a_": "1",
+    "n_": "1",
+    "m_": "0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

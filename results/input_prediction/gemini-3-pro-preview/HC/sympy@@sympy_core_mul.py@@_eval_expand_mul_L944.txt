@@ -1,0 +1,94 @@
+The objective is to determine the input state of the `Mul` object (`self`) and the arguments passed to `_eval_expand_mul`, such that the returned value is `-sin(phi)**2`.
+
+**Reasoning:**
+
+1.  **Analyze the Output:** The output is a simple expression: `-sin(phi)**2`. In SymPy, this looks like a multiplication `Mul(-1, Pow(sin(phi), 2))`.
+
+2.  **Analyze the `_eval_expand_mul` method:**
+    *   This method is primarily capable of expanding products of sums (e.g., `(x+y)*(a+b) -> ax + ay + bx + by`).
+    *   It calls `fraction` to split numerator and denominator.
+    *   It separates factors into `sums` (Add instances) and `plain` (commutative factors) or non-commutative factors.
+    *   If `sums` is not empty, it calls `_expandsums` to perform the distribution.
+
+3.  **Trace backwards from Output:**
+    *   If the input expression does not contain any `Add` terms (sums), the method returns `expr` (the input) unchanged.
+    *   A simple input like `Mul(-1, Pow(sin(phi), 2))` contains no `Add` components in its top-level factors.
+    *   Therefore, the simplest input that produces `-sin(phi)**2` is simply `-sin(phi)**2` itself, assuming no expansion logic is actually triggered.
+    *   However, usually, test cases for `_eval_expand_mul` involve something that *needs* expanding or simplification. Let's look for a case where the expansion results in `-sin(phi)**2`.
+    *   Consider the identity: `cos(phi)**2 - 1 = -sin(phi)**2`.
+    *   Or `(sin(phi))*( -sin(phi) )`.
+    *   Or `(1 - cos(phi))*(1 + cos(phi))`? No, that is `1 - cos^2 = sin^2`.
+    *   How about `(cos(phi) + 1)*(cos(phi) - 1)`?
+        *   `plain` = []
+        *   `sums` = `[cos(phi) + 1, cos(phi) - 1]`
+        *   `_expandsums` computes the cross product: `cos(phi)*cos(phi) - cos(phi) + cos(phi) - 1`.
+        *   Simplifying this yields `cos(phi)**2 - 1`.
+        *   `cos(phi)**2 - 1` simplifies to `-sin(phi)**2`.
+
+4.  **Confirming the `Expr` construction:**
+    *   Input: `(cos(phi) - 1) * (cos(phi) + 1)`
+    *   In SymPy, this is `Mul(Add(cos(phi), -1), Add(cos(phi), 1))`.
+    *   When `_eval_expand_mul` is called:
+        *   `sums` list gets `[cos(phi) - 1, cos(phi) + 1]`.
+        *   `_expandsums` creates terms: `cos(phi)**2, cos(phi), -cos(phi), -1`.
+        *   It sums them: `cos(phi)**2 - 1`.
+        *   While SymPy's `Add` usually simplifies automatically, the sheer `Add(*args)` might return `cos(phi)**2 - 1`.
+        *   Does `cos(phi)**2 - 1` automatically become `-sin(phi)**2`?
+        *   Standard SymPy simplification `simplify(cos(x)**2 - 1)` does, but raw construction might not unless specific trig simplification flags are on or if the user provided logical input specifically constructed to equal `-sin(phi)**2` after expansion of `(i*sin(phi))**2` or something similar?
+    *   Let's look at the exact output string provided: `"-sin(phi)**2"`.
+    *   If I pass `(-sin(phi)) * sin(phi)`, `plain` has `-1` (if extracted) or `sums` is empty? `sin(phi)` is not `Add`. So it returns immediately.
+    *   If I pass `-(1 - cos(phi)**2)`? No `_eval_expand_mul` doesn't do trigsimp.
+    *   Wait, the provided output is just the string representation.
+    *   Maybe the input is something like `(-sin(phi)) * (sin(phi))`.
+        *   `Mul(-1, sin(phi), sin(phi))`
+        *   Number of Adds: 0.
+        *   Returns original expr: `-sin(phi)**2`.
+    *   This is a trivial case. Is there a case involving `Add`?
+        *   `(sin(phi)) * (-sin(phi))` -> no Adds.
+    *   Let's check if there is a scenario where `_eval_expand_mul` does simplification. It largely just expands polynomials.
+    *   Perhaps the input is `Mul(sin(phi), -sin(phi))`.
+    *   Or perhaps the input is `Mul(-1, sin(phi), sin(phi))`.
+    *   In both cases, `_eval_expand_mul` returns `self` because there are no `Add` terms.
+
+    Let's reconsider the complex expansion path.
+    If input is `(cos(phi) + 1) * (cos(phi) - 1)`.
+    Result of expansion: `cos(phi)**2 - 1`.
+    Does this equal `-sin(phi)**2`? Mathematically yes, but structural `_eval_expand_mul` returns `Add` of terms. It doesn't perform trigonometric simplification to convert `cos**2 - 1` to `-sin**2`. The output of `_eval_expand_mul` on that input would likely be `"cos(phi)**2 - 1"`.
+
+    Therefore, the input must structurally resemble the output or be a trivial product that doesn't expand further but results in that string.
+    Input: `-(sin(phi)**2)` which is `Mul(-1, Pow(sin(phi), 2))`.
+    Steps:
+    1. `fraction` -> `n = -sin(phi)**2`, `d = 1`.
+    2. Loop over args: `[-1, sin(phi)**2]`.
+    3. `factor.is_Add` is False for both.
+    4. `rewrite` is False.
+    5. Returns `expr`.
+
+    Is there any other combination?
+    What if inputs are `sin(phi)` and `-sin(phi)`?
+    Input: `Mul(sin(phi), -sin(phi))`. args: `(sin(phi), -sin(phi))`.
+    Since `-sin(phi)` is `Mul(-1, sin(phi))`, SymPy flattens this on creation to `Mul(-1, sin(phi), sin(phi))`.
+    So the object `self` is `Mul(-1, sin(phi)**2)`.
+    Calling `_eval_expand_mul` on this returns it unchanged.
+
+    This seems the most plausible scenario: we are testing the function's behavior on an expression that doesn't need expansion, or the identity operation.
+
+    Let's check the kwargs. The structure usually implies specific placeholder usage. The placeholders are boolean flags for expansion hints (`deep`, `multinomial`, etc., typically passed to `expand` which calls this). The default for `expand` sends specific flags.
+    If the output is exactly `-sin(phi)**2`, input likely is `-sin(phi)**2`.
+
+[INPUT]
+```
+{
+    "self": "-sin(phi)**2",
+    "args": {},
+    "kwargs": {
+        "power_base": false,
+        "power_exp": false,
+        "mul": true,
+        "log": false,
+        "multinomial": true,
+        "basic": true
+    }
+}
+```
+[/INPUT]

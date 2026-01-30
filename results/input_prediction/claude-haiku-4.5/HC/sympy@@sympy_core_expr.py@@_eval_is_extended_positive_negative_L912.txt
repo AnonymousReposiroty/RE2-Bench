@@ -1,0 +1,121 @@
+[THOUGHT]
+Let me trace through the `_eval_is_extended_positive_negative` method to understand what inputs would produce `False` as output.
+
+Looking at the method:
+```python
+def _eval_is_extended_positive_negative(self, positive):
+    from sympy.polys.numberfields import minimal_polynomial
+    from sympy.polys.polyerrors import NotAlgebraic
+    if self.is_number:
+        try:
+            n2 = self._eval_evalf(2)
+        except ValueError:
+            return None
+        if n2 is None:
+            return None
+        if getattr(n2, '_prec', 1) == 1:
+            return None
+        if n2 is S.NaN:
+            return None
+        f = self.evalf(2)
+        if f.is_Float:
+            match = (f, S.Zero)
+        else:
+            match = pure_complex(f)
+        if match is None:
+            return False
+        r, i = match
+        if not (i.is_Number and r.is_Number):
+            return False
+        if r._prec != 1 and i._prec != 1:
+            return bool(not i and (r > 0 if positive else r < 0))
+        elif r._prec == 1 and (not i or i._prec == 1) and self._eval_is_algebraic() and (not self.has(Function)):
+            try:
+                if minimal_polynomial(self).is_Symbol:
+                    return False
+            except (NotAlgebraic, NotImplementedError):
+                pass
+```
+
+The function returns `False` in several places:
+1. `if match is None: return False` - when `pure_complex` returns None and `f.is_Float` is False
+2. `if not (i.is_Number and r.is_Number): return False` - when either i or r is not a Number
+3. `if minimal_polynomial(self).is_Symbol: return False` - in the try block
+
+The most straightforward path to return `False` is when `match is None` after checking it's not a Float.
+
+Let me trace a simple case:
+- `self` must be a number (pass `if self.is_number`)
+- `self._eval_evalf(2)` should not raise ValueError and not be None
+- `getattr(n2, '_prec', 1) != 1` (precision is not 1)
+- `n2 is not S.NaN`
+- `self.evalf(2)` returns something that is not a Float
+- `pure_complex(f)` returns None
+
+For `pure_complex` to return None, `v` must not be decomposable as `a + I*b` form.
+
+A simple case: `self` could be a symbol like `x` which has no value, or we could use something like the integer `2` or a simple number.
+
+Actually, looking more carefully: if `self.is_number` is True (meaning self has no free symbols), then when we call `self.evalf(2)`, it should return a Float. So `f.is_Float` should be True, meaning `match = (f, S.Zero)`.
+
+Wait, but if `match = (f, S.Zero)`, then `match is not None`, so we don't hit the `return False` at `if match is None`.
+
+Let me reconsider. If `f.is_Float` is False (when `self` is not purely numeric after evalf), then `pure_complex(f)` is called. If that returns None, we get `False`.
+
+For a simple approach: if `self` is something like a Symbol `x` that has free symbols, then `self.is_number` would be False, so we never enter the if block and the function returns None implicitly.
+
+But the output is `False`, not `None`. So we need to go through the if block and hit one of the `return False` statements.
+
+The simplest path: `self` is a number, evalf works, but the result when converted via `pure_complex` gives None (meaning `match is None`), so we return `False`.
+
+This could happen if `self.evalf(2)` returns something that's not a pure complex number and not a Float.
+
+Actually, let me look at when `f.is_Float` is False. This would happen when `self.evalf(2)` doesn't return a Float object. 
+
+Let me try: `self = S(2)` (the number 2), `positive = True`.
+- `self.is_number` = True (a number has no free symbols)
+- `self._eval_evalf(2)` should work
+- Result should have _prec != 1
+- `self.evalf(2)` returns a Float
+- So `match = (f, S.Zero)`
+- Both are Numbers
+- But then we'd return `bool(not i and (r > 0 if positive else r < 0))`
+
+Let me try `self` being a non-number expression that somehow gets through. Actually, if `self.is_number` is False, the whole if block is skipped and None is returned.
+
+The simplest case to get `False`: if `match is None` when `f.is_Float` is False.
+
+Let me use `self = Symbol('x')` and `positive = True`:
+- `self.is_number` = False, so we don't enter the if block, return None
+
+That doesn't work. We need `self.is_number = True`.
+
+Looking at the code again more carefully: maybe if we use a Float that's NaN or something special?
+
+Actually, the simplest: use `self` as some basic number like `2` or `pi`, with `positive = True` or `False`. Going through the logic, if everything works out such that `not i` is True (imaginary part is 0) and the real part comparison fails (r > 0 is False when positive=True), then we'd return False.
+
+For example: `self = -2` (negative number), `positive = True`:
+- `self.is_number` = True
+- `self._eval_evalf(2)` works, not None, not NaN
+- `self.evalf(2)` = Float(-2)
+- `f.is_Float` = True, so `match = (f, S.Zero)`
+- `i = S.Zero`, `r = Float(-2)`
+- Both are Numbers
+- `r._prec != 1 and i._prec != 1` might be True or False depending on Float internals
+- If True: `bool(not i and (r > 0 if positive else r < 0))` = `bool(True and False)` = `False` ✓
+
+So if `self` is a negative number and `positive` is True, we get False.
+
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": -2,
+    "args": {
+        "positive": true
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

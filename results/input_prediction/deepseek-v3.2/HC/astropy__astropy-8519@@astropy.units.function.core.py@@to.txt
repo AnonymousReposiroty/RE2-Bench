@@ -1,0 +1,115 @@
+Let’s trace through the provided `to` method.
+
+The given output is `{"output": 100.0}`. That means the call `self.to(...)` returned `100.0`.  
+Looking at the code:
+
+1. First, `if other is self.physical_unit:` — if `other` is the same object as `self.physical_unit`, it returns `self.to_physical(value)`. We don't know `to_physical`, but it likely returns a scalar number after converting from function-unit space to physical-unit space. But output `100.0` could come from there.
+
+2. If not that, `other_function_unit = getattr(other, 'function_unit', other)`.  
+Then check `if self.function_unit.is_equivalent(other_function_unit)`. If equivalent, it does conversions possibly via physical units, and returns `self.function_unit.to(...)` — but that would probably be dimensionless if they are equivalent, but output is just `100.0`, so maybe it's just going through the physical-unit conversion branch later.
+
+3. If `self.function_unit.is_equivalent(other_function_unit)` is false, it falls back to:
+```python
+try:
+    return self.physical_unit.to(other, self.to_physical(value), equivalencies)
+```
+That’s a standard `astropy.units.Unit.to()` call: converts from `self.physical_unit` to `other`, using `self.to_physical(value)` as the starting value. So `self.to_physical` turns `value` from function-unit representation to physical-unit representation, then `Unit.to` converts to `other`.
+
+The output `100.0` is a plain number, so `other` is probably dimensionless (`dimensionless_unscaled`), because `Unit.to` returns a float if `other` is dimensionless.
+
+So likely scenario:  
+- `self` is a function unit like `mag` (magnitude) or `dB`, and `self.physical_unit` is dimensionless.  
+- `value` in function-unit space (e.g., `0.0` in mag = 1 in linear) gets turned into physical-unit space with `to_physical`.  
+- Then converting to dimensionless unit `other` yields a plain number.
+
+Let’s guess:  
+Let `self.physical_unit` be dimensionless (`dimensionless_unscaled`).  
+`self.function_unit` maybe `Unit('dB')`?  
+But `dB` → physical conversion: `physical = 10**(value/10)` for power quantities? Or simpler, `mag` → physical: `physical = 10**(-0.4*value)` for magnitudes. But in `astropy`, `mag` function unit: `mag.to_physical` does `10**(-0.4*value)`.
+
+If we want final `output = 100.0`:
+
+Say `self.function_unit` is `Unit('mag')`.  
+If `value = -5.0`, `to_physical(value)` = `10**(-0.4*(-5))` = `10**2` = `100.0`.  
+Then `self.physical_unit` is dimensionless, `other` also dimensionless.  
+Since `self.physical_unit.to(other, ...)` with both dimensionless just returns the number `100.0`.
+
+So set `self._physical_unit` = dimensionless_unscaled (`Unit(dimensionless_unscaled)`), `self._function_unit` = `Unit('mag')`.
+
+Then args:  
+`other` = dimensionless_unscaled,  
+`value` = `-5.0`,  
+`equivalencies` = `[]`.
+
+We need to confirm `self.function_unit.is_equivalent(other_function_unit)` would be false if `self.function_unit` is `mag` and `other` is dimensionless? Actually `Unit('mag').is_equivalent(dimensionless_unscaled)` returns `False` in astropy (mag is logarithmic, not directly equivalent to dimensionless). So we take the branch `try: self.physical_unit.to(...)`.
+
+Everything fits.
+
+[THOUGHT]
+To get output `100.0`:
+- The `to` method must take the branch converting via `self.physical_unit.to(other, self.to_physical(value), equivalencies)`.
+- For that branch to be taken, `self.function_unit.is_equivalent(other_function_unit)` must be False.
+- `self.physical_unit` and `other` could both be dimensionless_unscaled, so conversion is just multiplication by scale factor 1, yielding `self.to_physical(value)`.
+- If `self.function_unit` is `Unit('mag')`, then `self.to_physical(-5.0)` equals `10**(-0.4*(-5))` = `100.0`.
+- So `self._function_unit` should represent `mag` unit (bases/powers/scale as in astropy), `self._physical_unit` dimensionless, `other` dimensionless, `value = -5.0`.
+- `equivalencies` empty list.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_physical_unit": {
+            "_names": [],
+            "_short_names": [],
+            "_long_names": [],
+            "_format": {},
+            "__doc__": "dimensionless_unscaled",
+            "_hash": 840094242
+        },
+        "_function_unit": {
+            "_bases": [
+                {
+                    "_names": ["mag"],
+                    "_short_names": ["mag"],
+                    "_long_names": ["mag"],
+                    "_format": {},
+                    "__doc__": "mag",
+                    "_hash": 1057869663
+                }
+            ],
+            "_powers": [1],
+            "_scale": 1.0,
+            "_decomposed_cache": {
+                "_scale": 1.0,
+                "_bases": [
+                    {
+                        "_names": ["mag"],
+                        "_short_names": ["mag"],
+                        "_long_names": ["mag"],
+                        "_format": {},
+                        "__doc__": "mag",
+                        "_hash": 1057869663
+                    }
+                ],
+                "_powers": [1]
+            }
+        }
+    },
+    "args": {
+        "other": {
+            "_names": [],
+            "_short_names": [],
+            "_long_names": [],
+            "_format": {},
+            "__doc__": "dimensionless_unscaled",
+            "_hash": 840094242
+        },
+        "value": -5.0
+    },
+    "kwargs": {
+        "equivalencies": []
+    }
+}
+```
+[/INPUT]

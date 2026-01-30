@@ -1,0 +1,1667 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from collections import defaultdict
+from itertools import islice
+import numpy as np
+from scipy import sparse
+from joblib import Parallel, delayed
+from .base import clone, TransformerMixin
+from .utils.metaestimators import if_delegate_has_method
+from .utils import Bunch, _print_elapsed_time
+from .utils.validation import check_memory
+from .utils.metaestimators import _BaseComposition
+__all__ = ['Pipeline', 'FeatureUnion', 'make_pipeline', 'make_union']
+
+class FeatureUnion(TransformerMixin, _BaseComposition):
+    _required_parameters = ['transformer_list']
+
+    def __init__(self, transformer_list, n_jobs=None, transformer_weights=None, verbose=False):
+        self.transformer_list = transformer_list
+        self.n_jobs = n_jobs
+        self.transformer_weights = transformer_weights
+        self.verbose = verbose
+        self._validate_transformers()
+
+    def get_params(self, deep=True):
+        return self._get_params('transformer_list', deep=deep)
+
+    def set_params(self, **kwargs):
+        self._set_params('transformer_list', **kwargs)
+        return self
+
+    def _validate_transformers(self):
+        names, transformers = zip(*self.transformer_list)
+        self._validate_names(names)
+        for t in transformers:
+            if t is None or t == 'drop':
+                continue
+            if not (hasattr(t, 'fit') or hasattr(t, 'fit_transform')) or not hasattr(t, 'transform'):
+                raise TypeError("All estimators should implement fit and transform. '%s' (type %s) doesn't" % (t, type(t)))
+
+    def _iter(self):
+        get_weight = (self.transformer_weights or {}).get
+        return ((name, trans, get_weight(name)) for name, trans in self.transformer_list if trans is not None and trans != 'drop')
+
+    def get_feature_names(self):
+        feature_names = []
+        for name, trans, weight in self._iter():
+            if not hasattr(trans, 'get_feature_names'):
+                raise AttributeError('Transformer %s (type %s) does not provide get_feature_names.' % (str(name), type(trans).__name__))
+            feature_names.extend([name + '__' + f for f in trans.get_feature_names()])
+        return feature_names
+
+    def fit(self, X, y=None, **fit_params):
+        transformers = self._parallel_func(X, y, fit_params, _fit_one)
+        if not transformers:
+            return self
+        self._update_transformer_list(transformers)
+        return self
+
+    def fit_transform(self, X, y=None, **fit_params):
+        results = self._parallel_func(X, y, fit_params, _fit_transform_one)
+        if not results:
+            return np.zeros((X.shape[0], 0))
+        Xs, transformers = zip(*results)
+        self._update_transformer_list(transformers)
+        if any((sparse.issparse(f) for f in Xs)):
+            Xs = sparse.hstack(Xs).tocsr()
+        else:
+            Xs = np.hstack(Xs)
+        return Xs
+
+    def _log_message(self, name, idx, total):
+        if not self.verbose:
+            return None
+        return '(step %d of %d) Processing %s' % (idx, total, name)
+
+    def _parallel_func(self, X, y, fit_params, func):
+        self.transformer_list = list(self.transformer_list)
+        self._validate_transformers()
+        transformers = list(self._iter())
+        return Parallel(n_jobs=self.n_jobs)((delayed(func)(transformer, X, y, weight, message_clsname='FeatureUnion', message=self._log_message(name, idx, len(transformers)), **fit_params) for idx, (name, transformer, weight) in enumerate(transformers, 1)))
+
+    def transform(self, X):
+        Xs = Parallel(n_jobs=self.n_jobs)((delayed(_transform_one)(trans, X, None, weight) for name, trans, weight in self._iter()))
+        if not Xs:
+            return np.zeros((X.shape[0], 0))
+        if any((sparse.issparse(f) for f in Xs)):
+            Xs = sparse.hstack(Xs).tocsr()
+        else:
+            Xs = np.hstack(Xs)
+        return Xs
+
+    def _update_transformer_list(self, transformers):
+        transformers = iter(transformers)
+        self.transformer_list[:] = [(name, old if old is None or old == 'drop' else next(transformers)) for name, old in self.transformer_list]
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.sklearn.utils.metaestimators._BaseComposition._validate_names
+
+def _validate_names(self, names):
+    if len(set(names)) != len(names):
+        raise ValueError('Names provided are not unique: {0!r}'.format(list(names)))
+    invalid_names = set(names).intersection(self.get_params(deep=False))
+    if invalid_names:
+        raise ValueError('Estimator names conflict with constructor arguments: {0!r}'.format(sorted(invalid_names)))
+    invalid_names = [name for name in names if '__' in name]
+    if invalid_names:
+        raise ValueError('Estimator names must not contain __: got {0!r}'.format(invalid_names))
+
+.sklearn.utils.metaestimators._BaseComposition._get_params
+
+def _get_params(self, attr, deep=True):
+    out = super().get_params(deep=deep)
+    if not deep:
+        return out
+    estimators = getattr(self, attr)
+    out.update(estimators)
+    for name, estimator in estimators:
+        if hasattr(estimator, 'get_params'):
+            for key, value in estimator.get_params(deep=True).items():
+                out['%s__%s' % (name, key)] = value
+    return out
+
+.sklearn.base.BaseEstimator.get_params
+
+def get_params(self, deep=True):
+    out = dict()
+    for key in self._get_param_names():
+        try:
+            value = getattr(self, key)
+        except AttributeError:
+            warnings.warn('From version 0.24, get_params will raise an AttributeError if a parameter cannot be retrieved as an instance attribute. Previously it would return None.', FutureWarning)
+            value = None
+        if deep and hasattr(value, 'get_params'):
+            deep_items = value.get_params().items()
+            out.update(((key + '__' + k, val) for k, val in deep_items))
+        out[key] = value
+    return out
+
+.sklearn.base.BaseEstimator._get_param_names
+
+def _get_param_names(cls):
+    init = getattr(cls.__init__, 'deprecated_original', cls.__init__)
+    if init is object.__init__:
+        return []
+    init_signature = inspect.signature(init)
+    parameters = [p for p in init_signature.parameters.values() if p.name != 'self' and p.kind != p.VAR_KEYWORD]
+    for p in parameters:
+        if p.kind == p.VAR_POSITIONAL:
+            raise RuntimeError("scikit-learn estimators should always specify their parameters in the signature of their __init__ (no varargs). %s with constructor %s doesn't  follow this convention." % (cls, init_signature))
+    return sorted([p.name for p in parameters])
+
+.sklearn.pipeline._fit_one
+
+def _fit_one(transformer, X, y, weight, message_clsname='', message=None, **fit_params):
+    with _print_elapsed_time(message_clsname, message):
+        return transformer.fit(X, y, **fit_params)
+
+.sklearn.utils.__init__._print_elapsed_time
+
+def _print_elapsed_time(source, message=None):
+    if message is None:
+        yield
+    else:
+        start = timeit.default_timer()
+        yield
+        print(_message_with_time(source, message, timeit.default_timer() - start))
+
+.sklearn.decomposition.truncated_svd.TruncatedSVD.fit
+
+def fit(self, X, y=None):
+    self.fit_transform(X)
+    return self
+
+.sklearn.decomposition.truncated_svd.TruncatedSVD.fit_transform
+
+def fit_transform(self, X, y=None):
+    X = check_array(X, accept_sparse=['csr', 'csc'], ensure_min_features=2)
+    random_state = check_random_state(self.random_state)
+    if self.algorithm == 'arpack':
+        U, Sigma, VT = svds(X, k=self.n_components, tol=self.tol)
+        Sigma = Sigma[::-1]
+        U, VT = svd_flip(U[:, ::-1], VT[::-1])
+    elif self.algorithm == 'randomized':
+        k = self.n_components
+        n_features = X.shape[1]
+        if k >= n_features:
+            raise ValueError('n_components must be < n_features; got %d >= %d' % (k, n_features))
+        U, Sigma, VT = randomized_svd(X, self.n_components, n_iter=self.n_iter, random_state=random_state)
+    else:
+        raise ValueError('unknown algorithm %r' % self.algorithm)
+    self.components_ = VT
+    X_transformed = U * Sigma
+    self.explained_variance_ = exp_var = np.var(X_transformed, axis=0)
+    if sp.issparse(X):
+        _, full_var = mean_variance_axis(X, axis=0)
+        full_var = full_var.sum()
+    else:
+        full_var = np.var(X, axis=0).sum()
+    self.explained_variance_ratio_ = exp_var / full_var
+    self.singular_values_ = Sigma
+    return X_transformed
+
+.sklearn.utils.validation.check_array
+
+def check_array(array, accept_sparse=False, accept_large_sparse=True, dtype='numeric', order=None, copy=False, force_all_finite=True, ensure_2d=True, allow_nd=False, ensure_min_samples=1, ensure_min_features=1, warn_on_dtype=None, estimator=None):
+    if warn_on_dtype is not None:
+        warnings.warn("'warn_on_dtype' is deprecated in version 0.21 and will be removed in 0.23. Don't set `warn_on_dtype` to remove this warning.", DeprecationWarning, stacklevel=2)
+    array_orig = array
+    dtype_numeric = isinstance(dtype, str) and dtype == 'numeric'
+    dtype_orig = getattr(array, 'dtype', None)
+    if not hasattr(dtype_orig, 'kind'):
+        dtype_orig = None
+    dtypes_orig = None
+    if hasattr(array, 'dtypes') and hasattr(array.dtypes, '__array__'):
+        dtypes_orig = np.array(array.dtypes)
+    if dtype_numeric:
+        if dtype_orig is not None and dtype_orig.kind == 'O':
+            dtype = np.float64
+        else:
+            dtype = None
+    if isinstance(dtype, (list, tuple)):
+        if dtype_orig is not None and dtype_orig in dtype:
+            dtype = None
+        else:
+            dtype = dtype[0]
+    if force_all_finite not in (True, False, 'allow-nan'):
+        raise ValueError('force_all_finite should be a bool or "allow-nan". Got {!r} instead'.format(force_all_finite))
+    if estimator is not None:
+        if isinstance(estimator, str):
+            estimator_name = estimator
+        else:
+            estimator_name = estimator.__class__.__name__
+    else:
+        estimator_name = 'Estimator'
+    context = ' by %s' % estimator_name if estimator is not None else ''
+    if sp.issparse(array):
+        _ensure_no_complex_data(array)
+        array = _ensure_sparse_format(array, accept_sparse=accept_sparse, dtype=dtype, copy=copy, force_all_finite=force_all_finite, accept_large_sparse=accept_large_sparse)
+    else:
+        with warnings.catch_warnings():
+            try:
+                warnings.simplefilter('error', ComplexWarning)
+                if dtype is not None and np.dtype(dtype).kind in 'iu':
+                    array = np.asarray(array, order=order)
+                    if array.dtype.kind == 'f':
+                        _assert_all_finite(array, allow_nan=False, msg_dtype=dtype)
+                    array = array.astype(dtype, casting='unsafe', copy=False)
+                else:
+                    array = np.asarray(array, order=order, dtype=dtype)
+            except ComplexWarning:
+                raise ValueError('Complex data not supported\n{}\n'.format(array))
+        _ensure_no_complex_data(array)
+        if ensure_2d:
+            if array.ndim == 0:
+                raise ValueError('Expected 2D array, got scalar array instead:\narray={}.\nReshape your data either using array.reshape(-1, 1) if your data has a single feature or array.reshape(1, -1) if it contains a single sample.'.format(array))
+            if array.ndim == 1:
+                raise ValueError('Expected 2D array, got 1D array instead:\narray={}.\nReshape your data either using array.reshape(-1, 1) if your data has a single feature or array.reshape(1, -1) if it contains a single sample.'.format(array))
+        if dtype_numeric and np.issubdtype(array.dtype, np.flexible):
+            warnings.warn("Beginning in version 0.22, arrays of bytes/strings will be converted to decimal numbers if dtype='numeric'. It is recommended that you convert the array to a float dtype before using it in scikit-learn, for example by using your_array = your_array.astype(np.float64).", FutureWarning, stacklevel=2)
+        if dtype_numeric and array.dtype.kind == 'O':
+            array = array.astype(np.float64)
+        if not allow_nd and array.ndim >= 3:
+            raise ValueError('Found array with dim %d. %s expected <= 2.' % (array.ndim, estimator_name))
+        if force_all_finite:
+            _assert_all_finite(array, allow_nan=force_all_finite == 'allow-nan')
+    if ensure_min_samples > 0:
+        n_samples = _num_samples(array)
+        if n_samples < ensure_min_samples:
+            raise ValueError('Found array with %d sample(s) (shape=%s) while a minimum of %d is required%s.' % (n_samples, array.shape, ensure_min_samples, context))
+    if ensure_min_features > 0 and array.ndim == 2:
+        n_features = array.shape[1]
+        if n_features < ensure_min_features:
+            raise ValueError('Found array with %d feature(s) (shape=%s) while a minimum of %d is required%s.' % (n_features, array.shape, ensure_min_features, context))
+    if warn_on_dtype and dtype_orig is not None and (array.dtype != dtype_orig):
+        msg = 'Data with input dtype %s was converted to %s%s.' % (dtype_orig, array.dtype, context)
+        warnings.warn(msg, DataConversionWarning, stacklevel=2)
+    if copy and np.may_share_memory(array, array_orig):
+        array = np.array(array, dtype=dtype, order=order)
+    if warn_on_dtype and dtypes_orig is not None and ({array.dtype} != set(dtypes_orig)):
+        msg = 'Data with input dtype %s were all converted to %s%s.' % (', '.join(map(str, sorted(set(dtypes_orig)))), array.dtype, context)
+        warnings.warn(msg, DataConversionWarning, stacklevel=3)
+    return array
+
+.sklearn.utils.validation._ensure_no_complex_data
+
+def _ensure_no_complex_data(array):
+    if hasattr(array, 'dtype') and array.dtype is not None and hasattr(array.dtype, 'kind') and (array.dtype.kind == 'c'):
+        raise ValueError('Complex data not supported\n{}\n'.format(array))
+
+.sklearn.utils.validation._assert_all_finite
+
+def _assert_all_finite(X, allow_nan=False, msg_dtype=None):
+    from .extmath import _safe_accumulator_op
+    if _get_config()['assume_finite']:
+        return
+    X = np.asanyarray(X)
+    is_float = X.dtype.kind in 'fc'
+    if is_float and np.isfinite(_safe_accumulator_op(np.sum, X)):
+        pass
+    elif is_float:
+        msg_err = 'Input contains {} or a value too large for {!r}.'
+        if allow_nan and np.isinf(X).any() or (not allow_nan and (not np.isfinite(X).all())):
+            type_err = 'infinity' if allow_nan else 'NaN, infinity'
+            raise ValueError(msg_err.format(type_err, msg_dtype if msg_dtype is not None else X.dtype))
+    elif X.dtype == np.dtype('object') and (not allow_nan):
+        if _object_dtype_isnan(X).any():
+            raise ValueError('Input contains NaN')
+
+.sklearn._config.get_config
+
+def get_config():
+    return _global_config.copy()
+
+.sklearn.utils.extmath._safe_accumulator_op
+
+def _safe_accumulator_op(op, x, *args, **kwargs):
+    if np.issubdtype(x.dtype, np.floating) and x.dtype.itemsize < 8:
+        result = op(x, *args, **kwargs, dtype=np.float64)
+    else:
+        result = op(x, *args, **kwargs)
+    return result
+
+.sklearn.utils.validation._num_samples
+
+def _num_samples(x):
+    message = 'Expected sequence or array-like, got %s' % type(x)
+    if hasattr(x, 'fit') and callable(x.fit):
+        raise TypeError(message)
+    if not hasattr(x, '__len__') and (not hasattr(x, 'shape')):
+        if hasattr(x, '__array__'):
+            x = np.asarray(x)
+        else:
+            raise TypeError(message)
+    if hasattr(x, 'shape') and x.shape is not None:
+        if len(x.shape) == 0:
+            raise TypeError('Singleton array %r cannot be considered a valid collection.' % x)
+        if isinstance(x.shape[0], numbers.Integral):
+            return x.shape[0]
+    try:
+        return len(x)
+    except TypeError:
+        raise TypeError(message)
+
+.sklearn.utils.validation.check_random_state
+
+def check_random_state(seed):
+    if seed is None or seed is np.random:
+        return np.random.mtrand._rand
+    if isinstance(seed, numbers.Integral):
+        return np.random.RandomState(seed)
+    if isinstance(seed, np.random.RandomState):
+        return seed
+    raise ValueError('%r cannot be used to seed a numpy.random.RandomState instance' % seed)
+
+.sklearn.utils.extmath.randomized_svd
+
+def randomized_svd(M, n_components, n_oversamples=10, n_iter='auto', power_iteration_normalizer='auto', transpose='auto', flip_sign=True, random_state=0):
+    if isinstance(M, (sparse.lil_matrix, sparse.dok_matrix)):
+        warnings.warn('Calculating SVD of a {} is expensive. csr_matrix is more efficient.'.format(type(M).__name__), sparse.SparseEfficiencyWarning)
+    random_state = check_random_state(random_state)
+    n_random = n_components + n_oversamples
+    n_samples, n_features = M.shape
+    if n_iter == 'auto':
+        n_iter = 7 if n_components < 0.1 * min(M.shape) else 4
+    if transpose == 'auto':
+        transpose = n_samples < n_features
+    if transpose:
+        M = M.T
+    Q = randomized_range_finder(M, n_random, n_iter, power_iteration_normalizer, random_state)
+    B = safe_sparse_dot(Q.T, M)
+    Uhat, s, V = linalg.svd(B, full_matrices=False)
+    del B
+    U = np.dot(Q, Uhat)
+    if flip_sign:
+        if not transpose:
+            U, V = svd_flip(U, V)
+        else:
+            U, V = svd_flip(U, V, u_based_decision=False)
+    if transpose:
+        return (V[:n_components, :].T, s[:n_components], U[:, :n_components].T)
+    else:
+        return (U[:, :n_components], s[:n_components], V[:n_components, :])
+
+.sklearn.utils.extmath.randomized_range_finder
+
+def randomized_range_finder(A, size, n_iter, power_iteration_normalizer='auto', random_state=None):
+    random_state = check_random_state(random_state)
+    Q = random_state.normal(size=(A.shape[1], size))
+    if A.dtype.kind == 'f':
+        Q = Q.astype(A.dtype, copy=False)
+    if power_iteration_normalizer == 'auto':
+        if n_iter <= 2:
+            power_iteration_normalizer = 'none'
+        else:
+            power_iteration_normalizer = 'LU'
+    for i in range(n_iter):
+        if power_iteration_normalizer == 'none':
+            Q = safe_sparse_dot(A, Q)
+            Q = safe_sparse_dot(A.T, Q)
+        elif power_iteration_normalizer == 'LU':
+            Q, _ = linalg.lu(safe_sparse_dot(A, Q), permute_l=True)
+            Q, _ = linalg.lu(safe_sparse_dot(A.T, Q), permute_l=True)
+        elif power_iteration_normalizer == 'QR':
+            Q, _ = linalg.qr(safe_sparse_dot(A, Q), mode='economic')
+            Q, _ = linalg.qr(safe_sparse_dot(A.T, Q), mode='economic')
+    Q, _ = linalg.qr(safe_sparse_dot(A, Q), mode='economic')
+    return Q
+
+.sklearn.utils.extmath.safe_sparse_dot
+
+def safe_sparse_dot(a, b, dense_output=False):
+    if a.ndim > 2 or b.ndim > 2:
+        if sparse.issparse(a):
+            b_ = np.rollaxis(b, -2)
+            b_2d = b_.reshape((b.shape[-2], -1))
+            ret = a @ b_2d
+            ret = ret.reshape(a.shape[0], *b_.shape[1:])
+        elif sparse.issparse(b):
+            a_2d = a.reshape(-1, a.shape[-1])
+            ret = a_2d @ b
+            ret = ret.reshape(*a.shape[:-1], b.shape[1])
+        else:
+            ret = np.dot(a, b)
+    else:
+        ret = a @ b
+    if sparse.issparse(a) and sparse.issparse(b) and dense_output and hasattr(ret, 'toarray'):
+        return ret.toarray()
+    return ret
+
+.sklearn.utils.extmath.svd_flip
+
+def svd_flip(u, v, u_based_decision=True):
+    if u_based_decision:
+        max_abs_cols = np.argmax(np.abs(u), axis=0)
+        signs = np.sign(u[max_abs_cols, range(u.shape[1])])
+        u *= signs
+        v *= signs[:, np.newaxis]
+    else:
+        max_abs_rows = np.argmax(np.abs(v), axis=1)
+        signs = np.sign(v[range(v.shape[0]), max_abs_rows])
+        u *= signs
+        v *= signs[:, np.newaxis]
+    return (u, v)
+
+.sklearn.feature_selection.univariate_selection._BaseFilter.fit
+
+def fit(self, X, y):
+    X, y = check_X_y(X, y, ['csr', 'csc'], multi_output=True)
+    if not callable(self.score_func):
+        raise TypeError('The score function should be a callable, %s (%s) was passed.' % (self.score_func, type(self.score_func)))
+    self._check_params(X, y)
+    score_func_ret = self.score_func(X, y)
+    if isinstance(score_func_ret, (list, tuple)):
+        self.scores_, self.pvalues_ = score_func_ret
+        self.pvalues_ = np.asarray(self.pvalues_)
+    else:
+        self.scores_ = score_func_ret
+        self.pvalues_ = None
+    self.scores_ = np.asarray(self.scores_)
+    return self
+
+.sklearn.utils.validation.check_X_y
+
+def check_X_y(X, y, accept_sparse=False, accept_large_sparse=True, dtype='numeric', order=None, copy=False, force_all_finite=True, ensure_2d=True, allow_nd=False, multi_output=False, ensure_min_samples=1, ensure_min_features=1, y_numeric=False, warn_on_dtype=None, estimator=None):
+    if y is None:
+        raise ValueError('y cannot be None')
+    X = check_array(X, accept_sparse=accept_sparse, accept_large_sparse=accept_large_sparse, dtype=dtype, order=order, copy=copy, force_all_finite=force_all_finite, ensure_2d=ensure_2d, allow_nd=allow_nd, ensure_min_samples=ensure_min_samples, ensure_min_features=ensure_min_features, warn_on_dtype=warn_on_dtype, estimator=estimator)
+    if multi_output:
+        y = check_array(y, 'csr', force_all_finite=True, ensure_2d=False, dtype=None)
+    else:
+        y = column_or_1d(y, warn=True)
+        _assert_all_finite(y)
+    if y_numeric and y.dtype.kind == 'O':
+        y = y.astype(np.float64)
+    check_consistent_length(X, y)
+    return (X, y)
+
+.sklearn.utils.validation.check_consistent_length
+
+def check_consistent_length(*arrays):
+    lengths = [_num_samples(X) for X in arrays if X is not None]
+    uniques = np.unique(lengths)
+    if len(uniques) > 1:
+        raise ValueError('Found input variables with inconsistent numbers of samples: %r' % [int(l) for l in lengths])
+
+.sklearn.feature_selection.univariate_selection.SelectKBest._check_params
+
+def _check_params(self, X, y):
+    if not (self.k == 'all' or 0 <= self.k <= X.shape[1]):
+        raise ValueError("k should be >=0, <= n_features = %d; got %r. Use k='all' to return all features." % (X.shape[1], self.k))
+
+.sklearn.feature_selection.univariate_selection.f_classif
+
+def f_classif(X, y):
+    X, y = check_X_y(X, y, ['csr', 'csc', 'coo'])
+    args = [X[safe_mask(X, y == k)] for k in np.unique(y)]
+    return f_oneway(*args)
+
+.sklearn.utils.validation.column_or_1d
+
+def column_or_1d(y, warn=False):
+    shape = np.shape(y)
+    if len(shape) == 1:
+        return np.ravel(y)
+    if len(shape) == 2 and shape[1] == 1:
+        if warn:
+            warnings.warn('A column-vector y was passed when a 1d array was expected. Please change the shape of y to (n_samples, ), for example using ravel().', DataConversionWarning, stacklevel=2)
+        return np.ravel(y)
+    raise ValueError('bad input shape {0}'.format(shape))
+
+.sklearn.utils.__init__.safe_mask
+
+def safe_mask(X, mask):
+    mask = np.asarray(mask)
+    if np.issubdtype(mask.dtype, np.signedinteger):
+        return mask
+    if hasattr(X, 'toarray'):
+        ind = np.arange(mask.shape[0])
+        mask = ind[mask]
+    return mask
+
+.sklearn.feature_selection.univariate_selection.f_oneway
+
+def f_oneway(*args):
+    n_classes = len(args)
+    args = [as_float_array(a) for a in args]
+    n_samples_per_class = np.array([a.shape[0] for a in args])
+    n_samples = np.sum(n_samples_per_class)
+    ss_alldata = sum((safe_sqr(a).sum(axis=0) for a in args))
+    sums_args = [np.asarray(a.sum(axis=0)) for a in args]
+    square_of_sums_alldata = sum(sums_args) ** 2
+    square_of_sums_args = [s ** 2 for s in sums_args]
+    sstot = ss_alldata - square_of_sums_alldata / float(n_samples)
+    ssbn = 0.0
+    for k, _ in enumerate(args):
+        ssbn += square_of_sums_args[k] / n_samples_per_class[k]
+    ssbn -= square_of_sums_alldata / float(n_samples)
+    sswn = sstot - ssbn
+    dfbn = n_classes - 1
+    dfwn = n_samples - n_classes
+    msb = ssbn / float(dfbn)
+    msw = sswn / float(dfwn)
+    constant_features_idx = np.where(msw == 0.0)[0]
+    if np.nonzero(msb)[0].size != msb.size and constant_features_idx.size:
+        warnings.warn('Features %s are constant.' % constant_features_idx, UserWarning)
+    f = msb / msw
+    f = np.asarray(f).ravel()
+    prob = special.fdtrc(dfbn, dfwn, f)
+    return (f, prob)
+
+.sklearn.utils.validation.as_float_array
+
+def as_float_array(X, copy=True, force_all_finite=True):
+    if isinstance(X, np.matrix) or (not isinstance(X, np.ndarray) and (not sp.issparse(X))):
+        return check_array(X, ['csr', 'csc', 'coo'], dtype=np.float64, copy=copy, force_all_finite=force_all_finite, ensure_2d=False)
+    elif sp.issparse(X) and X.dtype in [np.float32, np.float64]:
+        return X.copy() if copy else X
+    elif X.dtype in [np.float32, np.float64]:
+        return X.copy('F' if X.flags['F_CONTIGUOUS'] else 'C') if copy else X
+    else:
+        if X.dtype.kind in 'uib' and X.dtype.itemsize <= 4:
+            return_dtype = np.float32
+        else:
+            return_dtype = np.float64
+        return X.astype(return_dtype)
+
+.sklearn.utils.__init__.safe_sqr
+
+def safe_sqr(X, copy=True):
+    X = check_array(X, accept_sparse=['csr', 'csc', 'coo'], ensure_2d=False)
+    if issparse(X):
+        if copy:
+            X = X.copy()
+        X.data **= 2
+    elif copy:
+        X = X ** 2
+    else:
+        X **= 2
+    return X
+
+.sklearn.decomposition.pca.PCA.fit
+
+def fit(self, X, y=None):
+    self._fit(X)
+    return self
+
+.sklearn.decomposition.pca.PCA._fit
+
+def _fit(self, X):
+    if issparse(X):
+        raise TypeError('PCA does not support sparse input. See TruncatedSVD for a possible alternative.')
+    X = check_array(X, dtype=[np.float64, np.float32], ensure_2d=True, copy=self.copy)
+    if self.n_components is None:
+        if self.svd_solver != 'arpack':
+            n_components = min(X.shape)
+        else:
+            n_components = min(X.shape) - 1
+    else:
+        n_components = self.n_components
+    self._fit_svd_solver = self.svd_solver
+    if self._fit_svd_solver == 'auto':
+        if max(X.shape) <= 500 or n_components == 'mle':
+            self._fit_svd_solver = 'full'
+        elif n_components >= 1 and n_components < 0.8 * min(X.shape):
+            self._fit_svd_solver = 'randomized'
+        else:
+            self._fit_svd_solver = 'full'
+    if self._fit_svd_solver == 'full':
+        return self._fit_full(X, n_components)
+    elif self._fit_svd_solver in ['arpack', 'randomized']:
+        return self._fit_truncated(X, n_components, self._fit_svd_solver)
+    else:
+        raise ValueError("Unrecognized svd_solver='{0}'".format(self._fit_svd_solver))
+
+.sklearn.decomposition.pca.PCA._fit_truncated
+
+def _fit_truncated(self, X, n_components, svd_solver):
+    n_samples, n_features = X.shape
+    if isinstance(n_components, str):
+        raise ValueError("n_components=%r cannot be a string with svd_solver='%s'" % (n_components, svd_solver))
+    elif not 1 <= n_components <= min(n_samples, n_features):
+        raise ValueError("n_components=%r must be between 1 and min(n_samples, n_features)=%r with svd_solver='%s'" % (n_components, min(n_samples, n_features), svd_solver))
+    elif not isinstance(n_components, numbers.Integral):
+        raise ValueError('n_components=%r must be of type int when greater than or equal to 1, was of type=%r' % (n_components, type(n_components)))
+    elif svd_solver == 'arpack' and n_components == min(n_samples, n_features):
+        raise ValueError("n_components=%r must be strictly less than min(n_samples, n_features)=%r with svd_solver='%s'" % (n_components, min(n_samples, n_features), svd_solver))
+    random_state = check_random_state(self.random_state)
+    self.mean_ = np.mean(X, axis=0)
+    X -= self.mean_
+    if svd_solver == 'arpack':
+        v0 = random_state.uniform(-1, 1, size=min(X.shape))
+        U, S, V = svds(X, k=n_components, tol=self.tol, v0=v0)
+        S = S[::-1]
+        U, V = svd_flip(U[:, ::-1], V[::-1])
+    elif svd_solver == 'randomized':
+        U, S, V = randomized_svd(X, n_components=n_components, n_iter=self.iterated_power, flip_sign=True, random_state=random_state)
+    self.n_samples_, self.n_features_ = (n_samples, n_features)
+    self.components_ = V
+    self.n_components_ = n_components
+    self.explained_variance_ = S ** 2 / (n_samples - 1)
+    total_var = np.var(X, ddof=1, axis=0)
+    self.explained_variance_ratio_ = self.explained_variance_ / total_var.sum()
+    self.singular_values_ = S.copy()
+    if self.n_components_ < min(n_features, n_samples):
+        self.noise_variance_ = total_var.sum() - self.explained_variance_.sum()
+        self.noise_variance_ /= min(n_features, n_samples) - n_components
+    else:
+        self.noise_variance_ = 0.0
+    return (U, S, V)
+
+.sklearn.feature_extraction.text.CountVectorizer.fit
+
+def fit(self, raw_documents, y=None):
+    self._warn_for_unused_params()
+    self.fit_transform(raw_documents)
+    return self
+
+.sklearn.feature_extraction.text.VectorizerMixin._warn_for_unused_params
+
+def _warn_for_unused_params(self):
+    if self.tokenizer is not None and self.token_pattern is not None:
+        warnings.warn("The parameter 'token_pattern' will not be used since 'tokenizer' is not None'")
+    if self.preprocessor is not None and callable(self.analyzer):
+        warnings.warn("The parameter 'preprocessor' will not be used since 'analyzer' is callable'")
+    if self.ngram_range != (1, 1) and self.ngram_range is not None and callable(self.analyzer):
+        warnings.warn("The parameter 'ngram_range' will not be used since 'analyzer' is callable'")
+    if self.analyzer != 'word' or callable(self.analyzer):
+        if self.stop_words is not None:
+            warnings.warn("The parameter 'stop_words' will not be used since 'analyzer' != 'word'")
+        if self.token_pattern is not None and self.token_pattern != '(?u)\\b\\w\\w+\\b':
+            warnings.warn("The parameter 'token_pattern' will not be used since 'analyzer' != 'word'")
+        if self.tokenizer is not None:
+            warnings.warn("The parameter 'tokenizer' will not be used since 'analyzer' != 'word'")
+
+.sklearn.feature_extraction.text.CountVectorizer.fit_transform
+
+def fit_transform(self, raw_documents, y=None):
+    if isinstance(raw_documents, str):
+        raise ValueError('Iterable over raw text documents expected, string object received.')
+    self._validate_params()
+    self._validate_vocabulary()
+    max_df = self.max_df
+    min_df = self.min_df
+    max_features = self.max_features
+    vocabulary, X = self._count_vocab(raw_documents, self.fixed_vocabulary_)
+    if self.binary:
+        X.data.fill(1)
+    if not self.fixed_vocabulary_:
+        X = self._sort_features(X, vocabulary)
+        n_doc = X.shape[0]
+        max_doc_count = max_df if isinstance(max_df, numbers.Integral) else max_df * n_doc
+        min_doc_count = min_df if isinstance(min_df, numbers.Integral) else min_df * n_doc
+        if max_doc_count < min_doc_count:
+            raise ValueError('max_df corresponds to < documents than min_df')
+        X, self.stop_words_ = self._limit_features(X, vocabulary, max_doc_count, min_doc_count, max_features)
+        self.vocabulary_ = vocabulary
+    return X
+
+.sklearn.feature_extraction.text.VectorizerMixin._validate_params
+
+def _validate_params(self):
+    min_n, max_m = self.ngram_range
+    if min_n > max_m:
+        raise ValueError('Invalid value for ngram_range=%s lower boundary larger than the upper boundary.' % str(self.ngram_range))
+
+.sklearn.feature_extraction.text.VectorizerMixin._validate_vocabulary
+
+def _validate_vocabulary(self):
+    vocabulary = self.vocabulary
+    if vocabulary is not None:
+        if isinstance(vocabulary, set):
+            vocabulary = sorted(vocabulary)
+        if not isinstance(vocabulary, Mapping):
+            vocab = {}
+            for i, t in enumerate(vocabulary):
+                if vocab.setdefault(t, i) != i:
+                    msg = 'Duplicate term in vocabulary: %r' % t
+                    raise ValueError(msg)
+            vocabulary = vocab
+        else:
+            indices = set(vocabulary.values())
+            if len(indices) != len(vocabulary):
+                raise ValueError('Vocabulary contains repeated indices.')
+            for i in range(len(vocabulary)):
+                if i not in indices:
+                    msg = "Vocabulary of size %d doesn't contain index %d." % (len(vocabulary), i)
+                    raise ValueError(msg)
+        if not vocabulary:
+            raise ValueError('empty vocabulary passed to fit')
+        self.fixed_vocabulary_ = True
+        self.vocabulary_ = dict(vocabulary)
+    else:
+        self.fixed_vocabulary_ = False
+
+.sklearn.feature_extraction.text.CountVectorizer._count_vocab
+
+def _count_vocab(self, raw_documents, fixed_vocab):
+    if fixed_vocab:
+        vocabulary = self.vocabulary_
+    else:
+        vocabulary = defaultdict()
+        vocabulary.default_factory = vocabulary.__len__
+    analyze = self.build_analyzer()
+    j_indices = []
+    indptr = []
+    values = _make_int_array()
+    indptr.append(0)
+    for doc in raw_documents:
+        feature_counter = {}
+        for feature in analyze(doc):
+            try:
+                feature_idx = vocabulary[feature]
+                if feature_idx not in feature_counter:
+                    feature_counter[feature_idx] = 1
+                else:
+                    feature_counter[feature_idx] += 1
+            except KeyError:
+                continue
+        j_indices.extend(feature_counter.keys())
+        values.extend(feature_counter.values())
+        indptr.append(len(j_indices))
+    if not fixed_vocab:
+        vocabulary = dict(vocabulary)
+        if not vocabulary:
+            raise ValueError('empty vocabulary; perhaps the documents only contain stop words')
+    if indptr[-1] > 2147483648:
+        if _IS_32BIT:
+            raise ValueError('sparse CSR array has {} non-zero elements and requires 64 bit indexing, which is unsupported with 32 bit Python.'.format(indptr[-1]))
+        indices_dtype = np.int64
+    else:
+        indices_dtype = np.int32
+    j_indices = np.asarray(j_indices, dtype=indices_dtype)
+    indptr = np.asarray(indptr, dtype=indices_dtype)
+    values = np.frombuffer(values, dtype=np.intc)
+    X = sp.csr_matrix((values, j_indices, indptr), shape=(len(indptr) - 1, len(vocabulary)), dtype=self.dtype)
+    X.sort_indices()
+    return (vocabulary, X)
+
+.sklearn.feature_extraction.text.VectorizerMixin.build_analyzer
+
+def build_analyzer(self):
+    if callable(self.analyzer):
+        if self.input in ['file', 'filename']:
+            self._validate_custom_analyzer()
+        return partial(_analyze, analyzer=self.analyzer, decoder=self.decode)
+    preprocess = self.build_preprocessor()
+    if self.analyzer == 'char':
+        return partial(_analyze, ngrams=self._char_ngrams, preprocessor=preprocess, decoder=self.decode)
+    elif self.analyzer == 'char_wb':
+        return partial(_analyze, ngrams=self._char_wb_ngrams, preprocessor=preprocess, decoder=self.decode)
+    elif self.analyzer == 'word':
+        stop_words = self.get_stop_words()
+        tokenize = self.build_tokenizer()
+        self._check_stop_words_consistency(stop_words, preprocess, tokenize)
+        return partial(_analyze, ngrams=self._word_ngrams, tokenizer=tokenize, preprocessor=preprocess, decoder=self.decode, stop_words=stop_words)
+    else:
+        raise ValueError('%s is not a valid tokenization scheme/analyzer' % self.analyzer)
+
+.sklearn.feature_extraction.text.VectorizerMixin.build_preprocessor
+
+def build_preprocessor(self):
+    if self.preprocessor is not None:
+        return self.preprocessor
+    if not self.strip_accents:
+        strip_accents = None
+    elif callable(self.strip_accents):
+        strip_accents = self.strip_accents
+    elif self.strip_accents == 'ascii':
+        strip_accents = strip_accents_ascii
+    elif self.strip_accents == 'unicode':
+        strip_accents = strip_accents_unicode
+    else:
+        raise ValueError('Invalid value for "strip_accents": %s' % self.strip_accents)
+    return partial(_preprocess, accent_function=strip_accents, lower=self.lowercase)
+
+.sklearn.feature_extraction.text.VectorizerMixin.get_stop_words
+
+def get_stop_words(self):
+    return _check_stop_list(self.stop_words)
+
+.sklearn.feature_extraction.text._check_stop_list
+
+def _check_stop_list(stop):
+    if stop == 'english':
+        return ENGLISH_STOP_WORDS
+    elif isinstance(stop, str):
+        raise ValueError('not a built-in stop list: %s' % stop)
+    elif stop is None:
+        return None
+    else:
+        return frozenset(stop)
+
+.sklearn.feature_extraction.text.VectorizerMixin.build_tokenizer
+
+def build_tokenizer(self):
+    if self.tokenizer is not None:
+        return self.tokenizer
+    token_pattern = re.compile(self.token_pattern)
+    return token_pattern.findall
+
+.sklearn.feature_extraction.text.VectorizerMixin._check_stop_words_consistency
+
+def _check_stop_words_consistency(self, stop_words, preprocess, tokenize):
+    if id(self.stop_words) == getattr(self, '_stop_words_id', None):
+        return None
+    try:
+        inconsistent = set()
+        for w in stop_words or ():
+            tokens = list(tokenize(preprocess(w)))
+            for token in tokens:
+                if token not in stop_words:
+                    inconsistent.add(token)
+        self._stop_words_id = id(self.stop_words)
+        if inconsistent:
+            warnings.warn('Your stop_words may be inconsistent with your preprocessing. Tokenizing the stop words generated tokens %r not in stop_words.' % sorted(inconsistent))
+        return not inconsistent
+    except Exception:
+        self._stop_words_id = id(self.stop_words)
+        return 'error'
+
+.sklearn.feature_extraction.text._make_int_array
+
+def _make_int_array():
+    return array.array(str('i'))
+
+.sklearn.feature_extraction.text._analyze
+
+def _analyze(doc, analyzer=None, tokenizer=None, ngrams=None, preprocessor=None, decoder=None, stop_words=None):
+    if decoder is not None:
+        doc = decoder(doc)
+    if analyzer is not None:
+        doc = analyzer(doc)
+    else:
+        if preprocessor is not None:
+            doc = preprocessor(doc)
+        if tokenizer is not None:
+            doc = tokenizer(doc)
+        if ngrams is not None:
+            if stop_words is not None:
+                doc = ngrams(doc, stop_words)
+            else:
+                doc = ngrams(doc)
+    return doc
+
+.sklearn.feature_extraction.text.VectorizerMixin.decode
+
+def decode(self, doc):
+    if self.input == 'filename':
+        with open(doc, 'rb') as fh:
+            doc = fh.read()
+    elif self.input == 'file':
+        doc = doc.read()
+    if isinstance(doc, bytes):
+        doc = doc.decode(self.encoding, self.decode_error)
+    if doc is np.nan:
+        raise ValueError('np.nan is an invalid document, expected byte or unicode string.')
+    return doc
+
+.sklearn.feature_extraction.text._preprocess
+
+def _preprocess(doc, accent_function=None, lower=False):
+    if lower:
+        doc = doc.lower()
+    if accent_function is not None:
+        doc = accent_function(doc)
+    return doc
+
+.sklearn.feature_extraction.text.VectorizerMixin._word_ngrams
+
+def _word_ngrams(self, tokens, stop_words=None):
+    if stop_words is not None:
+        tokens = [w for w in tokens if w not in stop_words]
+    min_n, max_n = self.ngram_range
+    if max_n != 1:
+        original_tokens = tokens
+        if min_n == 1:
+            tokens = list(original_tokens)
+            min_n += 1
+        else:
+            tokens = []
+        n_original_tokens = len(original_tokens)
+        tokens_append = tokens.append
+        space_join = ' '.join
+        for n in range(min_n, min(max_n + 1, n_original_tokens + 1)):
+            for i in range(n_original_tokens - n + 1):
+                tokens_append(space_join(original_tokens[i:i + n]))
+    return tokens
+
+.sklearn.feature_extraction.text.CountVectorizer._sort_features
+
+def _sort_features(self, X, vocabulary):
+    sorted_features = sorted(vocabulary.items())
+    map_index = np.empty(len(sorted_features), dtype=X.indices.dtype)
+    for new_val, (term, old_val) in enumerate(sorted_features):
+        vocabulary[term] = new_val
+        map_index[old_val] = new_val
+    X.indices = map_index.take(X.indices, mode='clip')
+    return X
+
+.sklearn.feature_extraction.text.CountVectorizer._limit_features
+
+def _limit_features(self, X, vocabulary, high=None, low=None, limit=None):
+    if high is None and low is None and (limit is None):
+        return (X, set())
+    dfs = _document_frequency(X)
+    mask = np.ones(len(dfs), dtype=bool)
+    if high is not None:
+        mask &= dfs <= high
+    if low is not None:
+        mask &= dfs >= low
+    if limit is not None and mask.sum() > limit:
+        tfs = np.asarray(X.sum(axis=0)).ravel()
+        mask_inds = (-tfs[mask]).argsort()[:limit]
+        new_mask = np.zeros(len(dfs), dtype=bool)
+        new_mask[np.where(mask)[0][mask_inds]] = True
+        mask = new_mask
+    new_indices = np.cumsum(mask) - 1
+    removed_terms = set()
+    for term, old_index in list(vocabulary.items()):
+        if mask[old_index]:
+            vocabulary[term] = new_indices[old_index]
+        else:
+            del vocabulary[term]
+            removed_terms.add(term)
+    kept_indices = np.where(mask)[0]
+    if len(kept_indices) == 0:
+        raise ValueError('After pruning, no terms remain. Try a lower min_df or a higher max_df.')
+    return (X[:, kept_indices], removed_terms)
+
+.sklearn.feature_extraction.text._document_frequency
+
+def _document_frequency(X):
+    if sp.isspmatrix_csr(X):
+        return np.bincount(X.indices, minlength=X.shape[1])
+    else:
+        return np.diff(X.indptr)
+
+.sklearn.feature_extraction.text.VectorizerMixin._char_ngrams
+
+def _char_ngrams(self, text_document):
+    text_document = self._white_spaces.sub(' ', text_document)
+    text_len = len(text_document)
+    min_n, max_n = self.ngram_range
+    if min_n == 1:
+        ngrams = list(text_document)
+        min_n += 1
+    else:
+        ngrams = []
+    ngrams_append = ngrams.append
+    for n in range(min_n, min(max_n + 1, text_len + 1)):
+        for i in range(text_len - n + 1):
+            ngrams_append(text_document[i:i + n])
+    return ngrams
+
+.sklearn.base.BaseEstimator.__getstate__
+
+def __getstate__(self):
+    try:
+        state = super().__getstate__()
+    except AttributeError:
+        state = self.__dict__.copy()
+    if type(self).__module__.startswith('sklearn.'):
+        return dict(state.items(), _sklearn_version=__version__)
+    else:
+        return state
+
+.sklearn.utils.fixes._parse_version
+
+def _parse_version(version_string):
+    version = []
+    for x in version_string.split('.'):
+        try:
+            version.append(int(x))
+        except ValueError:
+            version.append(x)
+    return tuple(version)
+
+.sklearn.utils.deprecation.deprecated.__init__
+
+def __init__(self, extra=''):
+    self.extra = extra
+
+.sklearn.utils.deprecation.deprecated.__call__
+
+def __call__(self, obj):
+    if isinstance(obj, type):
+        return self._decorate_class(obj)
+    elif isinstance(obj, property):
+        return self._decorate_property(obj)
+    else:
+        return self._decorate_fun(obj)
+
+.sklearn.utils.deprecation.deprecated._decorate_fun
+
+def _decorate_fun(self, fun):
+    msg = 'Function %s is deprecated' % fun.__name__
+    if self.extra:
+        msg += '; %s' % self.extra
+
+    @functools.wraps(fun)
+    def wrapped(*args, **kwargs):
+        warnings.warn(msg, category=DeprecationWarning)
+        return fun(*args, **kwargs)
+    wrapped.__doc__ = self._update_doc(wrapped.__doc__)
+    wrapped.__wrapped__ = fun
+    return wrapped
+
+.sklearn.utils.deprecation.deprecated._update_doc
+
+def _update_doc(self, olddoc):
+    newdoc = 'DEPRECATED'
+    if self.extra:
+        newdoc = '%s: %s' % (newdoc, self.extra)
+    if olddoc:
+        newdoc = '%s\n\n%s' % (newdoc, olddoc)
+    return newdoc
+
+.sklearn.utils.deprecation.deprecated._decorate_class
+
+def _decorate_class(self, cls):
+    msg = 'Class %s is deprecated' % cls.__name__
+    if self.extra:
+        msg += '; %s' % self.extra
+    init = cls.__init__
+
+    def wrapped(*args, **kwargs):
+        warnings.warn(msg, category=DeprecationWarning)
+        return init(*args, **kwargs)
+    cls.__init__ = wrapped
+    wrapped.__name__ = '__init__'
+    wrapped.__doc__ = self._update_doc(init.__doc__)
+    wrapped.deprecated_original = init
+    return cls
+
+.sklearn.utils.metaestimators.if_delegate_has_method
+
+def if_delegate_has_method(delegate):
+    if isinstance(delegate, list):
+        delegate = tuple(delegate)
+    if not isinstance(delegate, tuple):
+        delegate = (delegate,)
+    return lambda fn: _IffHasAttrDescriptor(fn, delegate, attribute_name=fn.__name__)
+
+.sklearn.utils.metaestimators._IffHasAttrDescriptor.__init__
+
+def __init__(self, fn, delegate_names, attribute_name):
+    self.fn = fn
+    self.delegate_names = delegate_names
+    self.attribute_name = attribute_name
+    update_wrapper(self, fn)
+
+.sklearn.base.BaseEstimator.__setstate__
+
+def __setstate__(self, state):
+    if type(self).__module__.startswith('sklearn.'):
+        pickle_version = state.pop('_sklearn_version', 'pre-0.18')
+        if pickle_version != __version__:
+            warnings.warn('Trying to unpickle estimator {0} from version {1} when using version {2}. This might lead to breaking code or invalid results. Use at your own risk.'.format(self.__class__.__name__, pickle_version, __version__), UserWarning)
+    try:
+        super().__setstate__(state)
+    except AttributeError:
+        self.__dict__.update(state)
+
+.sklearn.feature_extraction.text.VectorizerMixin._char_wb_ngrams
+
+def _char_wb_ngrams(self, text_document):
+    text_document = self._white_spaces.sub(' ', text_document)
+    min_n, max_n = self.ngram_range
+    ngrams = []
+    ngrams_append = ngrams.append
+    for w in text_document.split():
+        w = ' ' + w + ' '
+        w_len = len(w)
+        for n in range(min_n, max_n + 1):
+            offset = 0
+            ngrams_append(w[offset:offset + n])
+            while offset + n < w_len:
+                offset += 1
+                ngrams_append(w[offset:offset + n])
+            if offset == 0:
+                break
+    return ngrams
+
+.sklearn.utils.testing.assert_raise_message
+
+def assert_raise_message(exceptions, message, function, *args, **kwargs):
+    try:
+        function(*args, **kwargs)
+    except exceptions as e:
+        error_message = str(e)
+        if message not in error_message:
+            raise AssertionError('Error message does not include the expected string: %r. Observed error message: %r' % (message, error_message))
+    else:
+        if isinstance(exceptions, tuple):
+            names = ' or '.join((e.__name__ for e in exceptions))
+        else:
+            names = exceptions.__name__
+        raise AssertionError('%s not raised by %s' % (names, function.__name__))
+
+.sklearn.dummy.DummyRegressor.__init__
+
+def __init__(self, strategy='mean', constant=None, quantile=None):
+    self.strategy = strategy
+    self.constant = constant
+    self.quantile = quantile
+
+.sklearn.pipeline.Pipeline.__init__
+
+def __init__(self, steps, memory=None, verbose=False):
+    self.steps = steps
+    self.memory = memory
+    self.verbose = verbose
+    self._validate_steps()
+
+.sklearn.pipeline.Pipeline._validate_steps
+
+def _validate_steps(self):
+    names, estimators = zip(*self.steps)
+    self._validate_names(names)
+    transformers = estimators[:-1]
+    estimator = estimators[-1]
+    for t in transformers:
+        if t is None or t == 'passthrough':
+            continue
+        if not (hasattr(t, 'fit') or hasattr(t, 'fit_transform')) or not hasattr(t, 'transform'):
+            raise TypeError("All intermediate steps should be transformers and implement fit and transform or be the string 'passthrough' '%s' (type %s) doesn't" % (t, type(t)))
+    if estimator is not None and estimator != 'passthrough' and (not hasattr(estimator, 'fit')):
+        raise TypeError("Last step of Pipeline should implement fit or be the string 'passthrough'. '%s' (type %s) doesn't" % (estimator, type(estimator)))
+
+.sklearn.pipeline.Pipeline.get_params
+
+def get_params(self, deep=True):
+    return self._get_params('steps', deep=deep)
+
+.sklearn.linear_model.coordinate_descent.Lasso.__init__
+
+def __init__(self, alpha=1.0, fit_intercept=True, normalize=False, precompute=False, copy_X=True, max_iter=1000, tol=0.0001, warm_start=False, positive=False, random_state=None, selection='cyclic'):
+    super().__init__(alpha=alpha, l1_ratio=1.0, fit_intercept=fit_intercept, normalize=normalize, precompute=precompute, copy_X=copy_X, max_iter=max_iter, tol=tol, warm_start=warm_start, positive=positive, random_state=random_state, selection=selection)
+
+.sklearn.linear_model.coordinate_descent.ElasticNet.__init__
+
+def __init__(self, alpha=1.0, l1_ratio=0.5, fit_intercept=True, normalize=False, precompute=False, max_iter=1000, copy_X=True, tol=0.0001, warm_start=False, positive=False, random_state=None, selection='cyclic'):
+    self.alpha = alpha
+    self.l1_ratio = l1_ratio
+    self.fit_intercept = fit_intercept
+    self.normalize = normalize
+    self.precompute = precompute
+    self.max_iter = max_iter
+    self.copy_X = copy_X
+    self.tol = tol
+    self.warm_start = warm_start
+    self.positive = positive
+    self.random_state = random_state
+    self.selection = selection
+
+.sklearn.pipeline.Pipeline.set_params
+
+def set_params(self, **kwargs):
+    self._set_params('steps', **kwargs)
+    return self
+
+.sklearn.utils.metaestimators._BaseComposition._set_params
+
+def _set_params(self, attr, **params):
+    if attr in params:
+        setattr(self, attr, params.pop(attr))
+    items = getattr(self, attr)
+    names = []
+    if items:
+        names, _ = zip(*items)
+    for name in list(params.keys()):
+        if '__' not in name and name in names:
+            self._replace_estimator(attr, name, params.pop(name))
+    super().set_params(**params)
+    return self
+
+.sklearn.base.BaseEstimator.set_params
+
+def set_params(self, **params):
+    if not params:
+        return self
+    valid_params = self.get_params(deep=True)
+    nested_params = defaultdict(dict)
+    for key, value in params.items():
+        key, delim, sub_key = key.partition('__')
+        if key not in valid_params:
+            raise ValueError('Invalid parameter %s for estimator %s. Check the list of available parameters with `estimator.get_params().keys()`.' % (key, self))
+        if delim:
+            nested_params[key][sub_key] = value
+        else:
+            setattr(self, key, value)
+            valid_params[key] = value
+    for key, sub_params in nested_params.items():
+        valid_params[key].set_params(**sub_params)
+    return self
+
+.sklearn.utils.metaestimators._BaseComposition._replace_estimator
+
+def _replace_estimator(self, attr, name, new_val):
+    new_estimators = list(getattr(self, attr))
+    for i, (estimator_name, _) in enumerate(new_estimators):
+        if estimator_name == name:
+            new_estimators[i] = (name, new_val)
+            break
+    setattr(self, attr, new_estimators)
+
+.sklearn.linear_model.logistic.LogisticRegression.__init__
+
+def __init__(self, penalty='l2', dual=False, tol=0.0001, C=1.0, fit_intercept=True, intercept_scaling=1, class_weight=None, random_state=None, solver='lbfgs', max_iter=100, multi_class='auto', verbose=0, warm_start=False, n_jobs=None, l1_ratio=None):
+    self.penalty = penalty
+    self.dual = dual
+    self.tol = tol
+    self.C = C
+    self.fit_intercept = fit_intercept
+    self.intercept_scaling = intercept_scaling
+    self.class_weight = class_weight
+    self.random_state = random_state
+    self.solver = solver
+    self.max_iter = max_iter
+    self.multi_class = multi_class
+    self.verbose = verbose
+    self.warm_start = warm_start
+    self.n_jobs = n_jobs
+    self.l1_ratio = l1_ratio
+
+.sklearn.utils.__init__.Bunch.__getattr__
+
+def __getattr__(self, key):
+    try:
+        return self[key]
+    except KeyError:
+        raise AttributeError(key)
+
+.sklearn.svm.classes.SVC.__init__
+
+def __init__(self, C=1.0, kernel='rbf', degree=3, gamma='scale', coef0=0.0, shrinking=True, probability=False, tol=0.001, cache_size=200, class_weight=None, verbose=False, max_iter=-1, decision_function_shape='ovr', break_ties=False, random_state=None):
+    super().__init__(kernel=kernel, degree=degree, gamma=gamma, coef0=coef0, tol=tol, C=C, nu=0.0, shrinking=shrinking, probability=probability, cache_size=cache_size, class_weight=class_weight, verbose=verbose, max_iter=max_iter, decision_function_shape=decision_function_shape, break_ties=break_ties, random_state=random_state)
+
+.sklearn.svm.base.BaseSVC.__init__
+
+def __init__(self, kernel, degree, gamma, coef0, tol, C, nu, shrinking, probability, cache_size, class_weight, verbose, max_iter, decision_function_shape, random_state, break_ties):
+    self.decision_function_shape = decision_function_shape
+    self.break_ties = break_ties
+    super().__init__(kernel=kernel, degree=degree, gamma=gamma, coef0=coef0, tol=tol, C=C, nu=nu, epsilon=0.0, shrinking=shrinking, probability=probability, cache_size=cache_size, class_weight=class_weight, verbose=verbose, max_iter=max_iter, random_state=random_state)
+
+.sklearn.svm.base.BaseLibSVM.__init__
+
+def __init__(self, kernel, degree, gamma, coef0, tol, C, nu, epsilon, shrinking, probability, cache_size, class_weight, verbose, max_iter, random_state):
+    if self._impl not in LIBSVM_IMPL:
+        raise ValueError('impl should be one of %s, %s was given' % (LIBSVM_IMPL, self._impl))
+    if gamma == 0:
+        msg = "The gamma value of 0.0 is invalid. Use 'auto' to set gamma to a value of 1 / n_features."
+        raise ValueError(msg)
+    self.kernel = kernel
+    self.degree = degree
+    self.gamma = gamma
+    self.coef0 = coef0
+    self.tol = tol
+    self.C = C
+    self.nu = nu
+    self.epsilon = epsilon
+    self.shrinking = shrinking
+    self.probability = probability
+    self.cache_size = cache_size
+    self.class_weight = class_weight
+    self.verbose = verbose
+    self.max_iter = max_iter
+    self.random_state = random_state
+
+.sklearn.utils._unittest_backport.TestCase.assertRaisesRegex
+
+def assertRaisesRegex(self, expected_exception, expected_regex, *args, **kwargs):
+    context = _AssertRaisesContext(expected_exception, self, expected_regex)
+    return context.handle('assertRaisesRegex', args, kwargs)
+
+.sklearn.utils._unittest_backport._AssertRaisesBaseContext.__init__
+
+def __init__(self, expected, test_case, expected_regex=None):
+    _BaseTestCaseContext.__init__(self, test_case)
+    self.expected = expected
+    self.test_case = test_case
+    if expected_regex is not None:
+        expected_regex = re.compile(expected_regex)
+    self.expected_regex = expected_regex
+    self.obj_name = None
+    self.msg = None
+
+.sklearn.utils._unittest_backport._BaseTestCaseContext.__init__
+
+def __init__(self, test_case):
+    self.test_case = test_case
+
+.sklearn.utils._unittest_backport._AssertRaisesBaseContext.handle
+
+def handle(self, name, args, kwargs):
+    try:
+        if not _is_subtype(self.expected, self._base_type):
+            raise TypeError('%s() arg 1 must be %s' % (name, self._base_type_str))
+        if args and args[0] is None:
+            warnings.warn('callable is None', DeprecationWarning, 3)
+            args = ()
+        if not args:
+            self.msg = kwargs.pop('msg', None)
+            if kwargs:
+                warnings.warn('%r is an invalid keyword argument for this function' % next(iter(kwargs)), DeprecationWarning, 3)
+            return self
+        callable_obj, args = (args[0], args[1:])
+        try:
+            self.obj_name = callable_obj.__name__
+        except AttributeError:
+            self.obj_name = str(callable_obj)
+        with self:
+            callable_obj(*args, **kwargs)
+    finally:
+        self = None
+
+.sklearn.utils._unittest_backport._is_subtype
+
+def _is_subtype(expected, basetype):
+    if isinstance(expected, tuple):
+        return all((_is_subtype(e, basetype) for e in expected))
+    return isinstance(expected, type) and issubclass(expected, basetype)
+
+.sklearn.utils._unittest_backport._AssertRaisesContext.__enter__
+
+def __enter__(self):
+    return self
+
+.sklearn.pipeline.Pipeline.fit
+
+def fit(self, X, y=None, **fit_params):
+    Xt, fit_params = self._fit(X, y, **fit_params)
+    with _print_elapsed_time('Pipeline', self._log_message(len(self.steps) - 1)):
+        if self._final_estimator != 'passthrough':
+            self._final_estimator.fit(Xt, y, **fit_params)
+    return self
+
+.sklearn.pipeline.Pipeline._fit
+
+def _fit(self, X, y=None, **fit_params):
+    self.steps = list(self.steps)
+    self._validate_steps()
+    memory = check_memory(self.memory)
+    fit_transform_one_cached = memory.cache(_fit_transform_one)
+    fit_params_steps = {name: {} for name, step in self.steps if step is not None}
+    for pname, pval in fit_params.items():
+        if '__' not in pname:
+            raise ValueError('Pipeline.fit does not accept the {} parameter. You can pass parameters to specific steps of your pipeline using the stepname__parameter format, e.g. `Pipeline.fit(X, y, logisticregression__sample_weight=sample_weight)`.'.format(pname))
+        step, param = pname.split('__', 1)
+        fit_params_steps[step][param] = pval
+    for step_idx, name, transformer in self._iter(with_final=False, filter_passthrough=False):
+        if transformer is None or transformer == 'passthrough':
+            with _print_elapsed_time('Pipeline', self._log_message(step_idx)):
+                continue
+        if hasattr(memory, 'location'):
+            if memory.location is None:
+                cloned_transformer = transformer
+            else:
+                cloned_transformer = clone(transformer)
+        elif hasattr(memory, 'cachedir'):
+            if memory.cachedir is None:
+                cloned_transformer = transformer
+            else:
+                cloned_transformer = clone(transformer)
+        else:
+            cloned_transformer = clone(transformer)
+        X, fitted_transformer = fit_transform_one_cached(cloned_transformer, X, y, None, message_clsname='Pipeline', message=self._log_message(step_idx), **fit_params_steps[name])
+        self.steps[step_idx] = (name, fitted_transformer)
+    if self._final_estimator == 'passthrough':
+        return (X, {})
+    return (X, fit_params_steps[self.steps[-1][0]])
+
+.sklearn.utils.validation.check_memory
+
+def check_memory(memory):
+    if memory is None or isinstance(memory, str):
+        if LooseVersion(joblib.__version__) < '0.12':
+            memory = joblib.Memory(cachedir=memory, verbose=0)
+        else:
+            memory = joblib.Memory(location=memory, verbose=0)
+    elif not hasattr(memory, 'cache'):
+        raise ValueError("'memory' should be None, a string or have the same interface as joblib.Memory. Got memory='{}' instead.".format(memory))
+    return memory
+
+.sklearn.utils._unittest_backport._AssertRaisesContext.__exit__
+
+def __exit__(self, exc_type, exc_value, tb):
+    if exc_type is None:
+        try:
+            exc_name = self.expected.__name__
+        except AttributeError:
+            exc_name = str(self.expected)
+        if self.obj_name:
+            self._raiseFailure('{} not raised by {}'.format(exc_name, self.obj_name))
+        else:
+            self._raiseFailure('{} not raised'.format(exc_name))
+    if not issubclass(exc_type, self.expected):
+        return False
+    if self.expected_regex is None:
+        return True
+    expected_regex = self.expected_regex
+    if not expected_regex.search(str(exc_value)):
+        self._raiseFailure('"{}" does not match "{}"'.format(expected_regex.pattern, str(exc_value)))
+    return True
+
+.sklearn.pipeline.Pipeline._iter
+
+def _iter(self, with_final=True, filter_passthrough=True):
+    stop = len(self.steps)
+    if not with_final:
+        stop -= 1
+    for idx, (name, trans) in enumerate(islice(self.steps, 0, stop)):
+        if not filter_passthrough:
+            yield (idx, name, trans)
+        elif trans is not None and trans != 'passthrough':
+            yield (idx, name, trans)
+
+.sklearn.base.clone
+
+def clone(estimator, safe=True):
+    estimator_type = type(estimator)
+    if estimator_type in (list, tuple, set, frozenset):
+        return estimator_type([clone(e, safe=safe) for e in estimator])
+    elif not hasattr(estimator, 'get_params') or isinstance(estimator, type):
+        if not safe:
+            return copy.deepcopy(estimator)
+        else:
+            raise TypeError("Cannot clone object '%s' (type %s): it does not seem to be a scikit-learn estimator as it does not implement a 'get_params' methods." % (repr(estimator), type(estimator)))
+    klass = estimator.__class__
+    new_object_params = estimator.get_params(deep=False)
+    for name, param in new_object_params.items():
+        new_object_params[name] = clone(param, safe=False)
+    new_object = klass(**new_object_params)
+    params_set = new_object.get_params(deep=False)
+    for name in new_object_params:
+        param1 = new_object_params[name]
+        param2 = params_set[name]
+        if param1 is not param2:
+            raise RuntimeError('Cannot clone object %s, as the constructor either does not set or modifies parameter %s' % (estimator, name))
+    return new_object
+
+.sklearn.pipeline.Pipeline._log_message
+
+def _log_message(self, step_idx):
+    if not self.verbose:
+        return None
+    name, step = self.steps[step_idx]
+    return '(step %d of %d) Processing %s' % (step_idx + 1, len(self.steps), name)
+
+.sklearn.pipeline._fit_transform_one
+
+def _fit_transform_one(transformer, X, y, weight, message_clsname='', message=None, **fit_params):
+    with _print_elapsed_time(message_clsname, message):
+        if hasattr(transformer, 'fit_transform'):
+            res = transformer.fit_transform(X, y, **fit_params)
+        else:
+            res = transformer.fit(X, y, **fit_params).transform(X)
+    if weight is None:
+        return (res, transformer)
+    return (res * weight, transformer)
+
+.sklearn.pipeline.Pipeline._final_estimator
+
+def _final_estimator(self):
+    estimator = self.steps[-1][1]
+    return 'passthrough' if estimator is None else estimator
+
+
+[/PYTHON]
+What will be the output of `fit`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "transformer_list": null,
+        "n_jobs": null,
+        "transformer_weights": null,
+        "verbose": false
+    },
+    "args": {
+        "X": "[[-7.43333333e-01  4.42666667e-01 -2.35800000e+00 -9.99333333e-01]\n [-9.43333333e-01 -5.73333333e-02 -2.35800000e+00 -9.99333333e-01]\n [-1.14333333e+00  1.42666667e-01 -2.45800000e+00 -9.99333333e-01]\n [-1.24333333e+00  4.26666667e-02 -2.25800000e+00 -9.99333333e-01]\n [-8.43333333e-01  5.42666667e-01 -2.35800000e+00 -9.99333333e-01]\n [-4.43333333e-01  8.42666667e-01 -2.05800000e+00 -7.99333333e-01]\n [-1.24333333e+00  3.42666667e-01 -2.35800000e+00 -8.99333333e-01]\n [-8.43333333e-01  3.42666667e-01 -2.25800000e+00 -9.99333333e-01]\n [-1.44333333e+00 -1.57333333e-01 -2.35800000e+00 -9.99333333e-01]\n [-9.43333333e-01  4.26666667e-02 -2.25800000e+00 -1.09933333e+00]\n [-4.43333333e-01  6.42666667e-01 -2.25800000e+00 -9.99333333e-01]\n [-1.04333333e+00  3.42666667e-01 -2.15800000e+00 -9.99333333e-01]\n [-1.04333333e+00 -5.73333333e-02 -2.35800000e+00 -1.09933333e+00]\n [-1.54333333e+00 -5.73333333e-02 -2.65800000e+00 -1.09933333e+00]\n [-4.33333333e-02  9.42666667e-01 -2.55800000e+00 -9.99333333e-01]\n [-1.43333333e-01  1.34266667e+00 -2.25800000e+00 -7.99333333e-01]\n [-4.43333333e-01  8.42666667e-01 -2.45800000e+00 -7.99333333e-01]\n [-7.43333333e-01  4.42666667e-01 -2.35800000e+00 -8.99333333e-01]\n [-1.43333333e-01  7.42666667e-01 -2.05800000e+00 -8.99333333e-01]\n [-7.43333333e-01  7.42666667e-01 -2.25800000e+00 -8.99333333e-01]\n [-4.43333333e-01  3.42666667e-01 -2.05800000e+00 -9.99333333e-01]\n [-7.43333333e-01  6.42666667e-01 -2.25800000e+00 -7.99333333e-01]\n [-1.24333333e+00  5.42666667e-01 -2.75800000e+00 -9.99333333e-01]\n [-7.43333333e-01  2.42666667e-01 -2.05800000e+00 -6.99333333e-01]\n [-1.04333333e+00  3.42666667e-01 -1.85800000e+00 -9.99333333e-01]\n [-8.43333333e-01 -5.73333333e-02 -2.15800000e+00 -9.99333333e-01]\n [-8.43333333e-01  3.42666667e-01 -2.15800000e+00 -7.99333333e-01]\n [-6.43333333e-01  4.42666667e-01 -2.25800000e+00 -9.99333333e-01]\n [-6.43333333e-01  3.42666667e-01 -2.35800000e+00 -9.99333333e-01]\n [-1.14333333e+00  1.42666667e-01 -2.15800000e+00 -9.99333333e-01]\n [-1.04333333e+00  4.26666667e-02 -2.15800000e+00 -9.99333333e-01]\n [-4.43333333e-01  3.42666667e-01 -2.25800000e+00 -7.99333333e-01]\n [-6.43333333e-01  1.04266667e+00 -2.25800000e+00 -1.09933333e+00]\n [-3.43333333e-01  1.14266667e+00 -2.35800000e+00 -9.99333333e-01]\n [-9.43333333e-01  4.26666667e-02 -2.25800000e+00 -9.99333333e-01]\n [-8.43333333e-01  1.42666667e-01 -2.55800000e+00 -9.99333333e-01]\n [-3.43333333e-01  4.42666667e-01 -2.45800000e+00 -9.99333333e-01]\n [-9.43333333e-01  5.42666667e-01 -2.35800000e+00 -1.09933333e+00]\n [-1.44333333e+00 -5.73333333e-02 -2.45800000e+00 -9.99333333e-01]\n [-7.43333333e-01  3.42666667e-01 -2.25800000e+00 -9.99333333e-01]\n [-8.43333333e-01  4.42666667e-01 -2.45800000e+00 -8.99333333e-01]\n [-1.34333333e+00 -7.57333333e-01 -2.45800000e+00 -8.99333333e-01]\n [-1.44333333e+00  1.42666667e-01 -2.45800000e+00 -9.99333333e-01]\n [-8.43333333e-01  4.42666667e-01 -2.15800000e+00 -5.99333333e-01]\n [-7.43333333e-01  7.42666667e-01 -1.85800000e+00 -7.99333333e-01]\n [-1.04333333e+00 -5.73333333e-02 -2.35800000e+00 -8.99333333e-01]\n [-7.43333333e-01  7.42666667e-01 -2.15800000e+00 -9.99333333e-01]\n [-1.24333333e+00  1.42666667e-01 -2.35800000e+00 -9.99333333e-01]\n [-5.43333333e-01  6.42666667e-01 -2.25800000e+00 -9.99333333e-01]\n [-8.43333333e-01  2.42666667e-01 -2.35800000e+00 -9.99333333e-01]\n [ 1.15666667e+00  1.42666667e-01  9.42000000e-01  2.00666667e-01]\n [ 5.56666667e-01  1.42666667e-01  7.42000000e-01  3.00666667e-01]\n [ 1.05666667e+00  4.26666667e-02  1.14200000e+00  3.00666667e-01]\n [-3.43333333e-01 -7.57333333e-01  2.42000000e-01  1.00666667e-01]\n [ 6.56666667e-01 -2.57333333e-01  8.42000000e-01  3.00666667e-01]\n [-1.43333333e-01 -2.57333333e-01  7.42000000e-01  1.00666667e-01]\n [ 4.56666667e-01  2.42666667e-01  9.42000000e-01  4.00666667e-01]\n [-9.43333333e-01 -6.57333333e-01 -4.58000000e-01 -1.99333333e-01]\n [ 7.56666667e-01 -1.57333333e-01  8.42000000e-01  1.00666667e-01]\n [-6.43333333e-01 -3.57333333e-01  1.42000000e-01  2.00666667e-01]\n [-8.43333333e-01 -1.05733333e+00 -2.58000000e-01 -1.99333333e-01]\n [ 5.66666667e-02 -5.73333333e-02  4.42000000e-01  3.00666667e-01]\n [ 1.56666667e-01 -8.57333333e-01  2.42000000e-01 -1.99333333e-01]\n [ 2.56666667e-01 -1.57333333e-01  9.42000000e-01  2.00666667e-01]\n [-2.43333333e-01 -1.57333333e-01 -1.58000000e-01  1.00666667e-01]\n [ 8.56666667e-01  4.26666667e-02  6.42000000e-01  2.00666667e-01]\n [-2.43333333e-01 -5.73333333e-02  7.42000000e-01  3.00666667e-01]\n [-4.33333333e-02 -3.57333333e-01  3.42000000e-01 -1.99333333e-01]\n [ 3.56666667e-01 -8.57333333e-01  7.42000000e-01  3.00666667e-01]\n [-2.43333333e-01 -5.57333333e-01  1.42000000e-01 -9.93333333e-02]\n [ 5.66666667e-02  1.42666667e-01  1.04200000e+00  6.00666667e-01]\n [ 2.56666667e-01 -2.57333333e-01  2.42000000e-01  1.00666667e-01]\n [ 4.56666667e-01 -5.57333333e-01  1.14200000e+00  3.00666667e-01]\n [ 2.56666667e-01 -2.57333333e-01  9.42000000e-01  6.66666667e-04]\n [ 5.56666667e-01 -1.57333333e-01  5.42000000e-01  1.00666667e-01]\n [ 7.56666667e-01 -5.73333333e-02  6.42000000e-01  2.00666667e-01]\n [ 9.56666667e-01 -2.57333333e-01  1.04200000e+00  2.00666667e-01]\n [ 8.56666667e-01 -5.73333333e-02  1.24200000e+00  5.00666667e-01]\n [ 1.56666667e-01 -1.57333333e-01  7.42000000e-01  3.00666667e-01]\n [-1.43333333e-01 -4.57333333e-01 -2.58000000e-01 -1.99333333e-01]\n [-3.43333333e-01 -6.57333333e-01  4.20000000e-02 -9.93333333e-02]\n [-3.43333333e-01 -6.57333333e-01 -5.80000000e-02 -1.99333333e-01]\n [-4.33333333e-02 -3.57333333e-01  1.42000000e-01  6.66666667e-04]\n [ 1.56666667e-01 -3.57333333e-01  1.34200000e+00  4.00666667e-01]\n [-4.43333333e-01 -5.73333333e-02  7.42000000e-01  3.00666667e-01]\n [ 1.56666667e-01  3.42666667e-01  7.42000000e-01  4.00666667e-01]\n [ 8.56666667e-01  4.26666667e-02  9.42000000e-01  3.00666667e-01]\n [ 4.56666667e-01 -7.57333333e-01  6.42000000e-01  1.00666667e-01]\n [-2.43333333e-01 -5.73333333e-02  3.42000000e-01  1.00666667e-01]\n [-3.43333333e-01 -5.57333333e-01  2.42000000e-01  1.00666667e-01]\n [-3.43333333e-01 -4.57333333e-01  6.42000000e-01  6.66666667e-04]\n [ 2.56666667e-01 -5.73333333e-02  8.42000000e-01  2.00666667e-01]\n [-4.33333333e-02 -4.57333333e-01  2.42000000e-01  6.66666667e-04]\n [-8.43333333e-01 -7.57333333e-01 -4.58000000e-01 -1.99333333e-01]\n [-2.43333333e-01 -3.57333333e-01  4.42000000e-01  1.00666667e-01]\n [-1.43333333e-01 -5.73333333e-02  4.42000000e-01  6.66666667e-04]\n [-1.43333333e-01 -1.57333333e-01  4.42000000e-01  1.00666667e-01]\n [ 3.56666667e-01 -1.57333333e-01  5.42000000e-01  1.00666667e-01]\n [-7.43333333e-01 -5.57333333e-01 -7.58000000e-01 -9.93333333e-02]\n [-1.43333333e-01 -2.57333333e-01  3.42000000e-01  1.00666667e-01]\n [ 4.56666667e-01  2.42666667e-01  2.24200000e+00  1.30066667e+00]\n [-4.33333333e-02 -3.57333333e-01  1.34200000e+00  7.00666667e-01]\n [ 1.25666667e+00 -5.73333333e-02  2.14200000e+00  9.00666667e-01]\n [ 4.56666667e-01 -1.57333333e-01  1.84200000e+00  6.00666667e-01]\n [ 6.56666667e-01 -5.73333333e-02  2.04200000e+00  1.00066667e+00]\n [ 1.75666667e+00 -5.73333333e-02  2.84200000e+00  9.00666667e-01]\n [-9.43333333e-01 -5.57333333e-01  7.42000000e-01  5.00666667e-01]\n [ 1.45666667e+00 -1.57333333e-01  2.54200000e+00  6.00666667e-01]\n [ 8.56666667e-01 -5.57333333e-01  2.04200000e+00  6.00666667e-01]\n [ 1.35666667e+00  5.42666667e-01  2.34200000e+00  1.30066667e+00]\n [ 6.56666667e-01  1.42666667e-01  1.34200000e+00  8.00666667e-01]\n [ 5.56666667e-01 -3.57333333e-01  1.54200000e+00  7.00666667e-01]\n [ 9.56666667e-01 -5.73333333e-02  1.74200000e+00  9.00666667e-01]\n [-1.43333333e-01 -5.57333333e-01  1.24200000e+00  8.00666667e-01]\n [-4.33333333e-02 -2.57333333e-01  1.34200000e+00  1.20066667e+00]\n [ 5.56666667e-01  1.42666667e-01  1.54200000e+00  1.10066667e+00]\n [ 6.56666667e-01 -5.73333333e-02  1.74200000e+00  6.00666667e-01]\n [ 1.85666667e+00  7.42666667e-01  2.94200000e+00  1.00066667e+00]\n [ 1.85666667e+00 -4.57333333e-01  3.14200000e+00  1.10066667e+00]\n [ 1.56666667e-01 -8.57333333e-01  1.24200000e+00  3.00666667e-01]\n [ 1.05666667e+00  1.42666667e-01  1.94200000e+00  1.10066667e+00]\n [-2.43333333e-01 -2.57333333e-01  1.14200000e+00  8.00666667e-01]\n [ 1.85666667e+00 -2.57333333e-01  2.94200000e+00  8.00666667e-01]\n [ 4.56666667e-01 -3.57333333e-01  1.14200000e+00  6.00666667e-01]\n [ 8.56666667e-01  2.42666667e-01  1.94200000e+00  9.00666667e-01]\n [ 1.35666667e+00  1.42666667e-01  2.24200000e+00  6.00666667e-01]\n [ 3.56666667e-01 -2.57333333e-01  1.04200000e+00  6.00666667e-01]\n [ 2.56666667e-01 -5.73333333e-02  1.14200000e+00  6.00666667e-01]\n [ 5.56666667e-01 -2.57333333e-01  1.84200000e+00  9.00666667e-01]\n [ 1.35666667e+00 -5.73333333e-02  2.04200000e+00  4.00666667e-01]\n [ 1.55666667e+00 -2.57333333e-01  2.34200000e+00  7.00666667e-01]\n [ 2.05666667e+00  7.42666667e-01  2.64200000e+00  8.00666667e-01]\n [ 5.56666667e-01 -2.57333333e-01  1.84200000e+00  1.00066667e+00]\n [ 4.56666667e-01 -2.57333333e-01  1.34200000e+00  3.00666667e-01]\n [ 2.56666667e-01 -4.57333333e-01  1.84200000e+00  2.00666667e-01]\n [ 1.85666667e+00 -5.73333333e-02  2.34200000e+00  1.10066667e+00]\n [ 4.56666667e-01  3.42666667e-01  1.84200000e+00  1.20066667e+00]\n [ 5.56666667e-01  4.26666667e-02  1.74200000e+00  6.00666667e-01]\n [ 1.56666667e-01 -5.73333333e-02  1.04200000e+00  6.00666667e-01]\n [ 1.05666667e+00  4.26666667e-02  1.64200000e+00  9.00666667e-01]\n [ 8.56666667e-01  4.26666667e-02  1.84200000e+00  1.20066667e+00]\n [ 1.05666667e+00  4.26666667e-02  1.34200000e+00  1.10066667e+00]\n [-4.33333333e-02 -3.57333333e-01  1.34200000e+00  7.00666667e-01]\n [ 9.56666667e-01  1.42666667e-01  2.14200000e+00  1.10066667e+00]\n [ 8.56666667e-01  2.42666667e-01  1.94200000e+00  1.30066667e+00]\n [ 8.56666667e-01 -5.73333333e-02  1.44200000e+00  1.10066667e+00]\n [ 4.56666667e-01 -5.57333333e-01  1.24200000e+00  7.00666667e-01]\n [ 6.56666667e-01 -5.73333333e-02  1.44200000e+00  8.00666667e-01]\n [ 3.56666667e-01  3.42666667e-01  1.64200000e+00  1.10066667e+00]\n [ 5.66666667e-02 -5.73333333e-02  1.34200000e+00  6.00666667e-01]]",
+        "y": "[0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1\n 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2\n 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2\n 2 2]"
+    },
+    "kwargs": {
+        "a": 0
+    }
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "transformer_list": XXX,
+    "n_jobs": XXX,
+    "transformer_weights": XXX,
+    "verbose": XXX
+}
+```
+[/STRUCTURE]
+
+[THOUGHT]

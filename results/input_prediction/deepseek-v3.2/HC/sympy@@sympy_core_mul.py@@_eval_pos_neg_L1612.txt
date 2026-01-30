@@ -1,0 +1,124 @@
+Let’s simulate the method step-by-step.  
+
+The `_eval_pos_neg` method returns:  
+- `True` (if it determines the product is positive)  
+- `False` (if negative)  
+- `None` (if sign can’t be determined)  
+
+Given `output: null` means the method returned `None`.  
+
+Looking at the code:  
+The loop runs through `self.args`.  
+For each term `t`:  
+- If `t.is_extended_positive`: continue  
+- If `t.is_extended_negative`: `sign = -sign`  
+- If `t.is_zero`: check if all args are finite → return `False`, else return `None`  
+- If `t.is_extended_nonpositive`: `sign = -sign`, `saw_NON = True`  
+- If `t.is_extended_nonnegative`: `saw_NON = True`  
+- If `t.is_positive is False`: `sign = -sign`, and if `saw_NOT` already True → return `None`, else `saw_NOT = True`  
+- If `t.is_negative is False`: if `saw_NOT` already True → return `None`, else `saw_NOT = True`  
+- Otherwise (`t.is_positive` or `t.is_negative` not known) → return `None`  
+
+At the end:  
+If `sign == 1` and `saw_NON is False` and `saw_NOT is False` → return `True`  
+If `sign < 0` → return `False`  
+Otherwise → returns `None` implicitly.  
+
+So to get `None`:  
+We need the loop to finish without hitting the early `return False` or early `return None` inside `t.is_zero` branch, and final conditions not satisfied.  
+
+Possibilities:  
+1. Loop finishes with `sign == 1` but `saw_NON = True` or `saw_NOT = True`.  
+2. Loop finishes with `sign == 1` and `saw_NON`/`saw_NOT` both False — would return True — so not this.  
+3. Loop finishes with `sign` possibly not 1 but not < 0 (i.e., `sign == 1` but saw flags True).  
+
+Actually `sign` variable starts as the argument `sign` (either `1` or `-1` from earlier `sign()` call?). We need to see argument `sign` is probably `1` (from `sign=1` call?) but check:  
+The method is called from `is_extended_positive` or `is_extended_negative`? Possibly `_eval_is_extended_positive` calls `self._eval_pos_neg(1)`. So `sign` arg could be `1` for `_eval_is_extended_positive` and `-1` for `_eval_is_extended_negative`.  
+
+Output `null` happens if can’t determine.  
+
+We need a simple example:  
+If `self` is `x*y` where `x` is `is_extended_nonnegative` and `y` is `is_extended_nonpositive`, then `saw_NON = True`, `sign` flips once → ends `sign = -1`? Wait:  
+
+Let’s test:  
+Start `sign = 1`.  
+Term1 `x` is extended_nonnegative → `saw_NON = True`, no sign change.  
+Term2 `y` is extended_nonpositive → `sign = -sign` = -1, `saw_NON = True`.  
+
+Loop ends, `sign < 0` → return `False`. That’s not `null`.  
+
+So to avoid final `sign < 0` and avoid final `sign == 1` with flags False, we can have:  
+Term1 `x` where `x.is_positive is False` → `sign = -1`, `saw_NOT = True`.  
+Term2 `y` where `y.is_negative is False` → already `saw_NOT` True → return `None` early in loop.  
+
+Thus to get early return `None`: have two args:  
+First: `t.is_positive is False` → changes sign, sets `saw_NOT=True`.  
+Second: `t.is_negative is False` → sees `saw_NOT=True` → returns `None`.  
+
+So `self` should be `Mul(x, y)` where:  
+`x.is_positive = False` (but not negative? that’s ok)  
+`y.is_negative = False` (but not positive? that’s ok)  
+
+Also `x` and `y` not zero, not extended_nonnegative etc. in order not to hit earlier cases.  
+
+Also `sign` param must be `1` or `-1`? It doesn’t matter for early return because `saw_NOT` triggers `None` only if both terms trigger `saw_NOT` branch. If `sign = -1` initially, still same logic.  
+
+Let’s pick `sign = 1`.  
+`self = Mul(x, y)` with `x.is_positive=False`, `y.is_negative=False`, and `x.is_negative` unknown, `y.is_positive` unknown.  
+
+We can represent `self` as `Mul(Symbol('x'), Symbol('y'))` but must embed assumptions `is_positive=False` etc. We’d need to specify objects with those exact assumptions.  
+
+In the `STRUCTURE`, `self` is `XXX` meaning we can give a SymPy expression: maybe `Mul(Symbol('x', positive=False, negative=None), Symbol('y', negative=False, positive=None))`.  
+
+But since assumptions are internal, maybe easier: Use `Mul(0, oo)`? Wait, `t.is_zero` branch: if `t.is_zero` and all finite → `False`, else `None`.  
+
+`Mul(0, oo)` → first arg `0.is_zero` True, check `all(a.is_finite for a in self.args)` → `oo.is_finite` is False → so `None` early.  
+
+That’s even simpler: `self = Mul(0, oo)`.  
+
+Input `sign` can be `1`.  
+
+Check: `self.args[0].is_zero` True → `all(a.is_finite for a in self.args)` is `False` → returns `None`.  
+
+Yes, output would be `null`.  
+
+So:  
+`self = Mul(0, oo)`  
+`sign = 1`  
+
+In SymPy terms: `Mul(S(0), oo)` gives `nan`? Wait no, `0*oo` is `nan`, but `Mul(0, oo)` is `nan` in evaluation, but here `evaluate=False`? But `Mul` is not evaluated in the method call because `_eval_pos_neg` uses `self.args` directly. So we can use `Mul(0, oo, evaluate=False)` to keep structure.  
+
+But simpler: We can just say `self` is `Mul(0, oo)`.  
+
+Given `STRUCTURE`:  
+```json
+{
+    "self": XXX,
+    "args": {
+        "sign": XXX
+    },
+    "kwargs": {}
+}
+```
+
+We fill:  
+`self` = `Mul(0, oo)`  
+`sign` = `1`  
+
+That should produce `null`.  
+
+[THOUGHT]  
+`self = Mul(0, oo)` with `sign=1`.  
+Loop: first arg `0` → `t.is_zero` True → check `all(a.is_finite for a in self.args)` → `oo.is_finite` False → returns `None`.  
+
+[INPUT]  
+```
+{
+    "self": "Mul(0, oo)",
+    "args": {
+        "sign": 1
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

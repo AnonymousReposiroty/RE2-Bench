@@ -1,0 +1,130 @@
+<<FUNCTION_NAME>>
+
+_get_params
+
+<<CODE>>
+
+from abc import ABCMeta, abstractmethod
+from operator import attrgetter
+from functools import update_wrapper
+import numpy as np
+from ..utils import safe_indexing
+from ..externals import six
+from ..base import BaseEstimator
+
+__all__ = ['if_delegate_has_method']
+
+class _BaseComposition(six.with_metaclass(ABCMeta, BaseEstimator)):
+    """Handles parameter management for classifiers composed of named estimators.
+    """
+    @abstractmethod
+    def __init__(self):
+        pass
+
+    def _get_params(self, attr, deep=True):
+        out = super(_BaseComposition, self).get_params(deep=deep)
+        if not deep:
+            return out
+        estimators = getattr(self, attr)
+        out.update(estimators)
+        for name, estimator in estimators:
+            if hasattr(estimator, 'get_params'):
+                for key, value in six.iteritems(
+                        estimator.get_params(deep=True)):
+                    out['%s__%s' % (name, key)] = value
+        return out
+
+    def _set_params(self, attr, **params):
+        # Ensure strict ordering of parameter setting:
+        # 1. All steps
+        if attr in params:
+            setattr(self, attr, params.pop(attr))
+        # 2. Step replacement
+        names, _ = zip(*getattr(self, attr))
+        for name in list(six.iterkeys(params)):
+            if '__' not in name and name in names:
+                self._replace_estimator(attr, name, params.pop(name))
+        # 3. Step parameters and other initialisation arguments
+        super(_BaseComposition, self).set_params(**params)
+        return self
+
+    def _replace_estimator(self, attr, name, new_val):
+        # assumes `name` is a valid estimator name
+        new_estimators = list(getattr(self, attr))
+        for i, (estimator_name, _) in enumerate(new_estimators):
+            if estimator_name == name:
+                new_estimators[i] = (name, new_val)
+                break
+        setattr(self, attr, new_estimators)
+
+    def _validate_names(self, names):
+        if len(set(names)) != len(names):
+            raise ValueError('Names provided are not unique: '
+                             '{0!r}'.format(list(names)))
+        invalid_names = set(names).intersection(self.get_params(deep=False))
+        if invalid_names:
+            raise ValueError('Estimator names conflict with constructor '
+                             'arguments: {0!r}'.format(sorted(invalid_names)))
+        invalid_names = [name for name in names if '__' in name]
+        if invalid_names:
+            raise ValueError('Estimator names must not contain __: got '
+                             '{0!r}'.format(invalid_names))
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'transformers': None, 'remainder': 'passthrough', 'n_jobs': 1, 'transformer_weights': None, '_remainder': ['remainder', 'passthrough', None], 'transformers_': None}, 'args': {'attr': '_transformers'}, 'kwargs': {'deep': False}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+{'n_jobs': 1, 'remainder': 'passthrough', 'transformer_weights': None, 'transformers': None}
+
+<<LLM_RESPONSE>>
+
+[THOUGHT]
+We need to reproduce the returned dict from _get_params:
+{
+  "n_jobs": 1,
+  "remainder": "passthrough",
+  "transformer_weights": null,
+  "transformers": null
+}
+
+Behavior of _get_params:
+- It starts with out = super(...).get_params(deep=deep), i.e., BaseEstimator.get_params. That method reads attribute values for the estimator's init-parameters and returns them in a dict. So to get those four keys with the given values, the instance attributes with those names must be set to those values: n_jobs = 1, remainder = "passthrough", transformer_weights = None, transformers = None.
+- Because deep=True, _get_params continues: estimators = getattr(self, attr). It then does out.update(estimators) and loops over estimators to add nested params. To preserve the output having only the four keys above, estimators must be empty (so update and loop do nothing). Therefore getattr(self, attr) must return an empty iterable (e.g., []).
+- The attr argument passed to _get_params should therefore be the name of the attribute that holds the estimators (commonly "transformers_" in ColumnTransformer), and that attribute should be an empty list.
+
+Other struct fields not used by get_params can be set to harmless values (null/[]).
+
+So the input:
+- self.transformers = null
+- self.remainder = "passthrough"
+- self.n_jobs = 1
+- self.transformer_weights = null
+- self._remainder = null (unused)
+- self.transformers_ = [] (empty, so no extra keys added)
+- arg attr = "transformers_"
+- kwargs.deep = true
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "transformers": null,
+        "remainder": "passthrough",
+        "n_jobs": 1,
+        "transformer_weights": null,
+        "_remainder": null,
+        "transformers_": []
+    },
+    "args": {
+        "attr": "transformers_"
+    },
+    "kwargs": {
+        "deep": true
+    }
+}
+```
+[/INPUT]

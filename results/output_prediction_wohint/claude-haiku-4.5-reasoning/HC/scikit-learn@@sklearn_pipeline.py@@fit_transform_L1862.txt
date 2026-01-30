@@ -1,0 +1,64 @@
+[THOUGHT]
+Let me trace through the `fit_transform` method of `FeatureUnion` step by step.
+
+**Step 1: Check _routing_enabled()**
+The `_routing_enabled()` function checks if metadata routing is enabled. By default, this returns `False` since it uses `get_config().get("enable_metadata_routing", False)`.
+
+Since `_routing_enabled()` returns `False` and `kwargs` is empty, we enter the else branch.
+
+**Step 2: Build routed_params**
+```python
+routed_params = Bunch()
+for name, obj in self.transformer_list:
+    if hasattr(obj, 'fit_transform'):
+        routed_params[name] = Bunch(fit_transform={})
+        routed_params[name].fit_transform = params  # params = {}
+```
+
+Both SimpleImputer and MissingIndicator inherit from TransformerMixin, so both have `fit_transform` methods. After the loop:
+- `routed_params['simpleimputer']` = Bunch(fit_transform={})
+- `routed_params['missingindicator']` = Bunch(fit_transform={})
+
+**Step 3: Call _parallel_func**
+`_parallel_func` calls `_fit_transform_one` for each transformer in parallel (or sequentially), which:
+1. Calls `fit_transform()` on each transformer with input X
+2. Returns the transformed output and the fitted transformer object
+
+For each transformer with input `X = [[nan, 1.], [1., nan]]`:
+
+- **SimpleImputer(strategy='most_frequent')**:
+  - Column 0: [nan, 1.] → most frequent non-NaN value is 1 → [1., 1.]
+  - Column 1: [1., nan] → most frequent non-NaN value is 1 → [1., 1.]
+  - Output: [[1., 1.], [1., 1.]]
+
+- **MissingIndicator()**: 
+  - Marks presence of missing values (1 for NaN, 0 for non-NaN)
+  - Output: [[1, 0], [0, 1]] (1 at positions that were NaN)
+
+**Step 4: Unzip and update**
+```python
+Xs, transformers = zip(*results)
+```
+- Xs = (array([[1., 1.], [1., 1.]]), array([[1, 0], [0, 1]]))
+- transformers = (fitted_simple_imputer, fitted_missing_indicator)
+
+**Step 5: Return hstacked result**
+`_hstack` horizontally concatenates the arrays. Since neither array is sparse and no special adapter applies:
+```python
+return np.hstack(Xs)
+```
+
+When numpy.hstack combines a float array and an int array, it promotes to float64.
+
+Result: `[[1., 1., 1., 0.], [1., 1., 0., 1.]]` with shape (2, 4)
+- Columns 0-1: imputed values from SimpleImputer
+- Columns 2-3: missing indicators from MissingIndicator
+</THOUGHT>
+
+[OUTPUT]
+```
+{
+    "output": "array([[1., 1., 1., 0.],\n       [1., 1., 0., 1.]])"
+}
+```
+[/OUTPUT]

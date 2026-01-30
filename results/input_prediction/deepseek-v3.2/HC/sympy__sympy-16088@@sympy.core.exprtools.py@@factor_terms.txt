@@ -1,0 +1,117 @@
+Let’s reason through this step-by-step.  
+
+We are told the `factor_terms` function output is `2*x/(a**2*(x**2 - y**2))`.  
+We need to find the original expression `expr` such that `factor_terms(expr)` returns that string.  
+
+---
+
+### Step 1: Understanding `factor_terms`
+Looking at the code:  
+- `factor_terms` calls an inner function `do` recursively.  
+- `expr` is sympified.  
+- The function handles various types:  
+  1. Atoms or non-Basic → return unchanged.  
+  2. Pow, Function, or iterable → process each argument recursively.  
+  3. If expr is Sum or Integral → special handling.  
+  4. Otherwise:  
+     - Compute `expr.as_content_primitive(radical=radical, clear=clear)` → returns `(content, primitive)`.  
+     - If primitive is Add:  
+       - factor `gcd_terms` on the primitive.  
+       - special handling for negative factor extraction.  
+     - Then `_keep_coeff(content, primitive)` to recombine.  
+
+The main effect of `factor_terms` is to factor out a common numerical factor from *all terms* in an Add expression, and also factor out common subexpressions if they appear in every term. But it can also simplify rational expressions? Let’s check:  
+
+The output `2*x/(a**2*(x**2 - y**2))` is a fraction.  
+So input likely is a rational expression where numerator and denominator have common factors that can be simplified via `factor_terms`.  
+
+---
+
+### Step 2: Try to reverse the output
+The output `2*x/(a**2*(x**2 - y**2))` simplifies to `2*x/(a**2*(x - y)*(x + y))`.  
+So maybe the input was something like `(2*a**2*x*(x**2 - y**2))/(a**4*(x**2 - y**2)**2)`? That would simplify to `2*x/(a**2*(x**2 - y**2))` indeed after canceling `a**2*(x**2 - y**2)`.
+
+But `factor_terms` is **not** `cancel` or `factor` — it factors *terms* (common factors across additive terms).  
+
+Check `factor_terms` on a single fraction:  
+Example: `factor_terms((2*x)/(a**2*(x**2 - y**2)))` just returns same, because no additive terms.  
+
+But maybe input is `(2*x*(x**2 - y**2) + 2*x*y**2 - 2*x**3)/(a**2*(x**2 - y**2))`? That numerator simplifies to zero — not correct.  
+
+---
+
+### Step 3: Consider additive terms
+Since `factor_terms` pulls common factor from additive terms, maybe input is something like  
+`2*x/(a**2*x**2 - a**2*y**2)` (already factored denominator) — that’s same as output. No change.  
+So maybe denominator is expanded: `2*x/(a**2*x**2 - a**2*y**2)`.  
+Now `factor_terms` won’t change that either because it’s a single fraction, not sum of terms.  
+
+Wait, maybe output results from `factor_terms` of an expression where the **whole** expr is an Add? Example:  
+
+`x/(a**2*(x**2 - y**2)) + x/(a**2*(x**2 - y**2))` → that’s `2*x/(a**2*(x**2 - y**2))`, yes.  
+So maybe `expr = x/(a**2*(x**2 - y**2)) + x/(a**2*(x**2 - y**2))`. Then `factor_terms` factors out `1/(a**2*(x**2 - y**2))` from both terms, multiplies by `(x + x)` = `2x`, giving output.  
+
+Let’s test: `factor_terms( x/(a**2*(x**2 - y**2)) + x/(a**2*(x**2 - y**2)) )`  
+Both terms identical, so it’s just `2*x/(a**2*(x**2 - y**2))`.  
+
+Yes, that fits the logic:  
+- `expr` is Add with two terms `T1 + T2`, T1 = T2.  
+- `as_content_primitive` extracts `T1` as common factor times `(1 + 1)`, but careful:  
+
+Actually let's simulate:  
+Let `p = x/(a**2*(x**2 - y**2))`.  
+`expr = p + p`.  
+`expr` is `Add(p, p)`.  
+`expr.as_content_primitive()` returns `(1, 2*p)` if `p` is not numeric? Wait, for `Add`, `as_content_primitive` extracts the *gcd* of coefficients of terms in Add.  
+
+But here terms are `p` and `p`. The coefficient of `p` in both is 1. So gcd=1, primitive = `p + p` = `2*p`. Then `do` will call `gcd_terms` on `2*p`? But `2*p` is `Mul(2, p)` not Add, so `do` just returns `2*p`. That’s `2*x/(a**2*(x**2 - y**2))`.  
+
+So indeed `expr = x/(a**2*(x**2 - y**2)) + x/(a**2*(x**2 - y**2))`.
+
+---
+
+### Step 4: Write in simpler form
+`expr` could be `2*x/(a**2*(x**2 - y**2))` from start? No, then output same as input. So input must be different but equivalent after `factor_terms`.  
+
+Another possibility: `(2*x)/(a**2*x**2 - a**2*y**2)` same as output.  
+So maybe input is `(2*a**2*x**3 - 2*a**2*x*y**2)/(a**4*(x**4 - 2*x**2*y**2 + y**4))`? That denominator = `a**4*(x**2 - y**2)**2`. Cancel `a**2*(x**2 - y^2)` → `2*x/(a**2*(x**2 - y^2))`. But does `factor_terms` cancel across numerator/denominator? Not directly — it only extracts common factor from *additive terms*, not multiplicative canceling. So that wouldn’t happen.  
+
+Thus, `factor_terms` not responsible for polynomial canceling. So the transformation must happen in `as_content_primitive` or `gcd_terms` on *Add* structures.  
+
+---
+
+### Step 5: Check: maybe denominator is additive
+Suppose `expr = 2*x/(a**2*x**2 - a**2*y^2)`. That’s exactly the output, so no change. So input must have additive terms in numerator/denominator that can be grouped.  
+
+What if `expr = (x + x)/(a**2*x**2 - a**2*y^2)`?  
+Numerator `x + x` = `2*x`, denominator `a**2*(x^2 - y^2)`.  
+`factor_terms` would see numerator as Add: coefficients both 1, gcd 1 → primitive `x + x` = `2*x`.  
+No change from original? Actually original `(x + x)/(a**2*(x^2 - y^2))` after sympify becomes `2*x/(a**2*(x^2 - y^2))` automatically due to evaluation.  
+
+So maybe input is `(x + x) / (a**2*x**2 - a**2*y**2)` and `factor_terms` returns same.
+
+---
+
+### Step 6: Maybe there’s additive terms in denominator too
+Example:  
+`expr = 2*x/(a**2*x**2 - a**2*y**2 + a**2*y**2 - a**2*y**2)` nonsense.  
+
+Given the output is neat, input likely is `x/(a**2*(x**2 - y**2)) + x/(a**2*(x**2 - y**2))`.  
+
+Let’s go with that.  
+
+So `expr` is `Add(Mul(x, Pow(Mul(a**2, Add(Pow(x, 2), Mul(-1, Pow(y, 2)))), -1)), same)`.  
+
+---
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "expr": "x/(a**2*(x**2 - y**2)) + x/(a**2*(x**2 - y**2))"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

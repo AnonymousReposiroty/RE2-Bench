@@ -1,0 +1,153 @@
+[THOUGHT]
+We trace fit called with self.batch_size = 50 and X as a dense numpy array of shape (100, 3) (100 rows counted from the input). gen_batches with batch_size 50 yields two batches (50 rows each), so partial_fit is invoked twice.
+
+- Line 33: self.batch_size is not None (50) → the if is False → ['N'].
+- Line 41 (inside the for loop): X_batch is a dense numpy array for both batches → sparse.issparse(X_batch) is False both times → ['N', 'N'].
+- partial_fit is called twice with check_input=False (from fit) so at line 48 the if check_input is not taken both times → ['N', 'N'].
+- At entry to partial_fit, self.components_ was set to None in fit before the loop, so hasattr(self, 'components_') is True and thus "if not hasattr(...)" is False for both calls → ['N', 'N'].
+- self.n_components is None in self → line 59 evaluates True on both calls → ['Y', 'Y'].
+- Line 60: on the first partial_fit self.components_ is None → True; on the second partial_fit components_ was set by the first call → False. So ['Y', 'N'].
+- The subsequent elif branches at lines 64 and 68 are not evaluated at all because line 59's branch was taken each time → each has zero encounters → [].
+- Line 82: self.n_samples_seen_ was initialized to 0 in fit, so the attribute exists; "if not hasattr(...)" is False for both calls → ['N', 'N'].
+- Line 93: on the first partial_fit self.n_samples_seen_ == 0 is True; after first call it's updated to 50, so on the second call it's False → ['Y', 'N'].
+- At line 117: n_components_ becomes min(n_samples_in_batch, n_features) on the first call => min(50, 3) = 3; since n_features is 3, n_components_ < n_features is False for both calls → ['N', 'N'].
+
+We record branch results in the order each branch point is encountered during execution (multiple entries for repeated encounters).
+[/THOUGHT]
+
+[ANSWER]
+1 import numpy as np
+2 from scipy import linalg, sparse
+3 from .base import _BasePCA
+4 from ..utils import check_array, gen_batches
+5 from ..utils.extmath import svd_flip, _incremental_mean_and_var
+6 
+7 
+8 
+9 class IncrementalPCA(_BasePCA):
+10 
+11     def __init__(self, n_components=None, whiten=False, copy=True,
+12                  batch_size=None):
+13         self.n_components = n_components
+14         self.whiten = whiten
+15         self.copy = copy
+16         self.batch_size = batch_size
+17 
+18     def fit(self, X, y=None):
+19         self.components_ = None
+20         self.n_samples_seen_ = 0
+21         self.mean_ = .0
+22         self.var_ = .0
+23         self.singular_values_ = None
+24         self.explained_variance_ = None
+25         self.explained_variance_ratio_ = None
+26         self.singular_values_ = None
+27         self.noise_variance_ = None
+28 
+29         X = check_array(X, accept_sparse=['csr', 'csc', 'lil'],
+30                         copy=self.copy, dtype=[np.float64, np.float32])
+31         n_samples, n_features = X.shape
+32 
+33         if self.batch_size is None: ## [BRANCH]taken=['N'][/BRANCH]
+34             self.batch_size_ = 5 * n_features
+35         else:
+36             self.batch_size_ = self.batch_size
+37 
+38         for batch in gen_batches(n_samples, self.batch_size_,
+39                                  min_batch_size=self.n_components or 0):
+40             X_batch = X[batch]
+41             if sparse.issparse(X_batch): ## [BRANCH]taken=['N', 'N'][/BRANCH]
+42                 X_batch = X_batch.toarray()
+43             self.partial_fit(X_batch, check_input=False)
+44 
+45         return self
+46 
+47     def partial_fit(self, X, y=None, check_input=True):
+48         if check_input: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+49             if sparse.issparse(X):
+50                 raise TypeError(
+51                     "IncrementalPCA.partial_fit does not support "
+52                     "sparse input. Either convert data to dense "
+53                     "or use IncrementalPCA.fit to do so in batches.")
+54             X = check_array(X, copy=self.copy, dtype=[np.float64, np.float32])
+55         n_samples, n_features = X.shape
+56         if not hasattr(self, 'components_'): ## [BRANCH]taken=['N', 'N'][/BRANCH]
+57             self.components_ = None
+58 
+59         if self.n_components is None: ## [BRANCH]taken=['Y', 'Y'][/BRANCH]
+60             if self.components_ is None: ## [BRANCH]taken=['Y', 'N'][/BRANCH]
+61                 self.n_components_ = min(n_samples, n_features)
+62             else:
+63                 self.n_components_ = self.components_.shape[0]
+64         elif not 1 <= self.n_components <= n_features: ## [BRANCH]taken=[][/BRANCH]
+65             raise ValueError("n_components=%r invalid for n_features=%d, need "
+66                              "more rows than columns for IncrementalPCA "
+67                              "processing" % (self.n_components, n_features))
+68         elif not self.n_components <= n_samples: ## [BRANCH]taken=[][/BRANCH]
+69             raise ValueError("n_components=%r must be less or equal to "
+70                              "the batch number of samples "
+71                              "%d." % (self.n_components, n_samples))
+72         else:
+73             self.n_components_ = self.n_components
+74 
+75         if (self.components_ is not None) and (self.components_.shape[0] !=
+76                                                self.n_components_):
+77             raise ValueError("Number of input features has changed from %i "
+78                              "to %i between calls to partial_fit! Try "
+79                              "setting n_components to a fixed value." %
+80                              (self.components_.shape[0], self.n_components_))
+81 
+82         if not hasattr(self, 'n_samples_seen_'): ## [BRANCH]taken=['N', 'N'][/BRANCH]
+83             self.n_samples_seen_ = 0
+84             self.mean_ = .0
+85             self.var_ = .0
+86 
+87         col_mean, col_var, n_total_samples = \
+88             _incremental_mean_and_var(
+89                 X, last_mean=self.mean_, last_variance=self.var_,
+90                 last_sample_count=np.repeat(self.n_samples_seen_, X.shape[1]))
+91         n_total_samples = n_total_samples[0]
+92 
+93         if self.n_samples_seen_ == 0: ## [BRANCH]taken=['Y', 'N'][/BRANCH]
+94             X -= col_mean
+95         else:
+96             col_batch_mean = np.mean(X, axis=0)
+97             X -= col_batch_mean
+98             mean_correction = \
+99                 np.sqrt((self.n_samples_seen_ * n_samples) /
+100                         n_total_samples) * (self.mean_ - col_batch_mean)
+101             X = np.vstack((self.singular_values_.reshape((-1, 1)) *
+102                            self.components_, X, mean_correction))
+103 
+104         U, S, V = linalg.svd(X, full_matrices=False)
+105         U, V = svd_flip(U, V, u_based_decision=False)
+106         explained_variance = S ** 2 / (n_total_samples - 1)
+107         explained_variance_ratio = S ** 2 / np.sum(col_var * n_total_samples)
+108 
+109         self.n_samples_seen_ = n_total_samples
+110         self.components_ = V[:self.n_components_]
+111         self.singular_values_ = S[:self.n_components_]
+112         self.mean_ = col_mean
+113         self.var_ = col_var
+114         self.explained_variance_ = explained_variance[:self.n_components_]
+115         self.explained_variance_ratio_ = \
+116             explained_variance_ratio[:self.n_components_]
+117         if self.n_components_ < n_features: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+118             self.noise_variance_ = \
+119                 explained_variance[self.n_components_:].mean()
+120         else:
+121             self.noise_variance_ = 0.
+122         return self
+123 
+124     def transform(self, X):
+125         if sparse.issparse(X):
+126             n_samples = X.shape[0]
+127             output = []
+128             for batch in gen_batches(n_samples, self.batch_size_,
+129                                      min_batch_size=self.n_components or 0):
+130                 output.append(super().transform(X[batch].toarray()))
+131             return np.vstack(output)
+132         else:
+133             return super().transform(X)
+134 
+[/ANSWER]

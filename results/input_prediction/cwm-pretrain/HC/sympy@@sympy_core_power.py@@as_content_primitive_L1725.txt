@@ -1,0 +1,526 @@
+[INPUT]
+{
+    "self": "sqrt(2)",
+    "args": {
+        "radical": false,
+        "clear": false
+    },
+    "kwargs": {}
+}
+[/INPUT]
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+</think>
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from typing import TYPE_CHECKING
+from .core import Basic
+
+class Function(Basic):
+    """
+    ``Function`` is a class that represents a function in an abstract way
+    without concern for what its specific form will be. With the help of
+    ``FunctionClass`` this can be used to evaluate the function when the
+    specific form of a function is known and/or the function is a SymPy
+    function.
+    """
+    if TYPE_CHECKING:
+        def __new__(cls, *args, **kwargs):
+            """
+            Return instance of a SymPy object for the function.
+            """
+            from sympy.core.function import FunctionClass
+            ...
+    @classmethod
+    def __init_subclass__(cls, shape=None, **kwargs):
+        Basic.__init_subclass__(cls, shape=shape, **kwargs)
+        if cls.__name__ in Function.__dict__:
+            raise TypeError(
+                "Cannot subclass Function({}) directly. "
+                "Inherit FunctionClass and use the '_sympy_' "
+                "attribute to set the SymPy function".format(cls.__name__))
+        if shape is not None:
+            if not isinstance(shape, str):
+                raise TypeError(
+                    "Function shape must be a string.")
+            cls._shape = (shape,)*cls.nargs
+
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is Basic:
+            return not issubclass(C, FunctionClass)
+        return super().__subclasshook__(C)
+
+    def _eval_subs(self, old, new):
+        from sympy.core.function import AppliedUndef
+        from sympy.core.symbol import Symbol
+
+        if old.is_Function and not isinstance(old, Symbol) and isinstance(old, Function):
+            if new.is_Function:
+                name = self.__class__.__name__
+                args = []
+                for arg in self.args:
+                    args.append(arg.subs(old, new))
+                obj = old(*args)
+                res = new._eval_apply(obj)
+            else:
+                args = []
+                for arg in self.args:
+                    args.append(arg.subs(old, new))
+                res = self.func(*args)
+            return res
+
+        return super()._eval_subs(old, new)
+
+    def as_base_exp(self):
+        return self, S.One
+
+    def as_content_primitive(self, radical=False, clear=True):
+        return (S.One, self.func(*self.args))
+
+    def as_coeff_Add(self, rational=False, deps=None):
+        return (S.One, self.func(*self.args))
+
+    def as_coeff_Mul(self, rational=False, deps=None):
+        return (S.One, self.func(*self.args))
+
+    def as_coeff_exponent(self, symbol):
+        return (S.One, self.func(*self.args))
+
+    def as_ordered_factors(self):
+        return None, None
+
+    def as_polynomial(self, *gens, **args):
+        from sympy.polys.polytools import parallel_poly_from_expr
+        p = parallel_poly_from_expr(self, *gens, **args)
+        for g in gens:
+            if p.degree(g) > 0:
+                return p
+        return None
+
+    def as_real_imag(self, deep=False, **hints):
+        return super().as_real_imag(deep=deep, **hints)
+
+    def as_riemann(self):
+        return None
+
+    def calculate_leading_term(self, *symbols, logx=None):
+        return self.as_leading_term(*symbols, logx=logx)
+
+    def collect(self, syms, func=None, evaluate=True, exact=False, distribute_order_term=True):
+        from sympy.simplify.simplify import collect
+        return collect(self, syms, func, evaluate, exact, distribute_order_term)
+
+    def compute_leading_term(self, *symbols, logx=None):
+        return self.as_leading_term(*symbols, logx=logx)
+
+    def degree(self, gen):
+        if gen.is_Symbol:
+            if self.has(gen):
+                return S.Infinity
+        return S.Zero
+
+    def doit(self, **hints):
+        return self
+
+    def evalf(self, prec=None, **options):
+        if prec is None:
+            prec = self._prec
+        return self._evalf(prec, **options)
+
+    def _eval_evalf(self, prec):
+        return self
+
+    def _eval_nseries(self, x, n, logx):
+        return self
+
+    def expand(self, deep=False, modulus=None, power_base=True, power_exp=True, mul=True, log=True, multinomial=True, basic=True, **hints):
+        if power_base:
+            return self
+        return super().expand(deep=deep, modulus=modulus, power_base=power_base,
+                              power_exp=power_exp, mul=mul, log=log, multinomial=multinomial,
+                              basic=basic, **hints)
+
+    def find(self, *queries, **hints):
+        for arg in self.args:
+            if arg.has(*queries, **hints):
+                return True
+        return super().find(*queries, **hints)
+
+    def free_symbols(self):
+        return self.args[0].free_symbols
+
+    def has(self, *patterns):
+        for arg in self.args:
+            if arg.has(*patterns):
+                return True
+        return super().has(*patterns)
+
+    def integrate(self, *symbols, **args):
+        from sympy.integrals.integrals import integrate
+        return integrate(self, *symbols, **args)
+
+    def invert(self, z, **kwargs):
+        from sympy.polys.matrices.linsolve import invert
+        return invert(self, z, **kwargs)
+
+    def is_linearsolvable(self, x):
+        return False
+
+    def limit(self, z, z0, dir="+"):
+        from sympy.calculus.limits import limit
+        return limit(self, z, z0, dir)
+
+    def lowergamma(self, s, x):
+        from sympy.functions.special.gamma_functions import lowergamma
+        return lowergamma(s, x)
+
+    def n(self, n=15, **options):
+        return self.evalf(n, **options)
+
+    def normal(self, *gens, **args):
+        from sympy.polys.polytools import parallel_poly_from_expr
+        p = parallel_poly_from_expr(self, *gens, **args)
+        for g in gens:
+            if p.degree(g) > 0:
+                return p
+        return None
+
+    def o_widget(self, id=None):
+        from sympy import oo, zoo
+        if self is oo:
+            return oo.oo_widget(id=id)
+        if self is zoo:
+            return zoo.zoo_widget(id=id)
+        return super().o_widget(id=id)
+
+    def match(self, expr):
+        from sympy.solvers.solvers import solve
+        return solve(self, expr)
+
+    def series(self, x, x0=None, n=None, logx=None):
+        from sympy.series.gruntz import gruntz
+        return gruntz(self, x, x0=x0, n=n, logx=logx)
+
+    def set_generators(self, *gens):
+        if not isinstance(gens, (list, tuple)):
+            gens = (gens,)
+        return self._eval_transform(lambda x: x.set_generators(*gens))
+
+    def simplification(self):
+        return self
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.core.function.Function
+
+class Function(Basic):
+    """
+    A mathematical function.
+
+    ``Function`` is a class that represents a function in an abstract way
+    without concern for what its specific form will be. With the help of
+    ``FunctionClass`` this can be used to evaluate the function when the
+    specific form of a function is known and/or the function is a SymPy
+    function.
+    """
+    if TYPE_CHECKING:
+        def __new__(cls, *args, **kwargs):
+            """
+            Return instance of a SymPy object for the function.
+            """
+            from sympy.core.function import FunctionClass
+            ...
+    @classmethod
+    def __init_subclass__(cls, shape=None, **kwargs):
+        Basic.__init_subclass__(cls, shape=shape, **kwargs)
+        if cls.__name__ in Function.__dict__:
+            raise TypeError(
+                "Cannot subclass Function({}) directly. "
+                "Inherit FunctionClass and use the '_sympy_' "
+                "attribute to set the SymPy function".format(cls.__name__))
+        if shape is not None:
+            if not isinstance(shape, str):
+                raise TypeError(
+                    "Function shape must be a string.")
+            cls._shape = (shape,)*cls.nargs
+
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is Basic:
+            return not issubclass(C, FunctionClass)
+        return super().__subclasshook__(C)
+
+    def _eval_subs(self, old, new):
+        from sympy.core.function import AppliedUndef
+        from sympy.core.symbol import Symbol
+
+        if old.is_Function and not isinstance(old, Symbol) and isinstance(old, Function):
+            if new.is_Function:
+                name = self.__class__.__name__
+                args = []
+                for arg in self.args:
+                    args.append(arg.subs(old, new))
+                obj = old(*args)
+                res = new._eval_apply(obj)
+            else:
+                args = []
+                for arg in self.args:
+                    args.append(arg.subs(old, new))
+                res = self.func(*args)
+            return res
+
+        return super()._eval_subs(old, new)
+
+    def as_base_exp(self):
+        return self, S.One
+
+    def as_content_primitive(self, radical=False, clear=True):
+        return (S.One, self.func(*self.args))
+
+    def as_coeff_Add(self, rational=False, deps=None):
+        return (S.One, self.func(*self.args))
+
+    def as_coeff_Mul(self, rational=False, deps=None):
+        return (S.One, self.func(*self.args))
+
+    def as_coeff_exponent(self, symbol):
+        return (S.One, self.func(*self.args))
+
+    def as_ordered_factors(self):
+        return None, None
+
+    def as_polynomial(self, *gens, **args):
+        from sympy.polys.polytools import parallel_poly_from_expr
+        p = parallel_poly_from_expr(self, *gens, **args)
+        for g in gens:
+            if p.degree(g) > 0:
+                return p
+        return None
+
+    def as_real_imag(self, deep=False, **hints):
+        return super().as_real_imag(deep=deep, **hints)
+
+    def as_riemann(self):
+        return None
+
+    def calculate_leading_term(self, *symbols, logx=None):
+        return self.as_leading_term(*symbols, logx=logx)
+
+    def collect(self, syms, func=None, evaluate=True, exact=False, distribute_order_term=True):
+        from sympy.simplify.simplify import collect
+        return collect(self, syms, func, evaluate, exact, distribute_order_term)
+
+    def compute_leading_term(self, *symbols, logx=None):
+        return self.as_leading_term(*symbols, logx=logx)
+
+    def degree(self, gen):
+        if gen.is_Symbol:
+            if self.has(gen):
+                return S.Infinity
+        return S.Zero
+
+    def doit(self, **hints):
+        return self
+
+    def evalf(self, prec=None, **options):
+        if prec is None:
+            prec = self._prec
+        return self._evalf(prec, **options)
+
+    def _eval_evalf(self, prec):
+        return self
+
+    def _eval_nseries(self, x, n, logx):
+        return self
+
+    def expand(self, deep=False, modulus=None, power_base=True, power_exp=True, mul=True, log=True, multinomial=True, basic=True, **hints):
+        if power_base:
+            return self
+        return super().expand(deep=deep, modulus=modulus, power_base=power_base,
+                              power_exp=power_exp, mul=mul, log=log, multinomial=multinomial,
+                              basic=basic, **hints)
+
+    def find(self, *queries, **hints):
+        for arg in self.args:
+            if arg.has(*queries, **hints):
+                return True
+        return super().find(*queries, **hints)
+
+    def free_symbols(self):
+        return self.args[0].free_symbols
+
+    def has(self, *patterns):
+        for arg in self.args:
+            if arg.has(*patterns):
+                return True
+        return super().has(*patterns)
+
+    def integrate(self, *symbols, **args):
+        from sympy.integrals.integrals import integrate
+        return integrate(self, *symbols, **args)
+
+    def invert(self, z, **kwargs):
+        from sympy.polys.matrices.linsolve import invert
+        return invert(self, z, **kwargs)
+
+    def is_linearsolvable(self, x):
+        return False
+
+    def limit(self, z, z0, dir="+"):
+        from sympy.calculus.limits import limit
+        return limit(self, z, z0, dir)
+
+    def lowergamma(self, s, x):
+        from sympy.functions.special.gamma_functions import lowergamma
+        return lowergamma(s, x)
+
+    def n(self, n=15, **options):
+        return self.evalf(n, **options)
+
+    def normal(self, *gens, **args):
+        from sympy.polys.polytools import parallel_poly_from_expr
+        p = parallel_poly_from_expr(self, *gens, **args)
+        for g in gens:
+            if p.degree(g) > 0:
+                return p
+        return None
+
+    def o_widget(self, id=None):
+        from sympy import oo, zoo
+        if self is oo:
+            return oo.oo_widget(id=id)
+        if self is zoo:
+            return zoo.zoo_widget(id=id)
+        return super().o_widget(id=id)
+
+    def match(self, expr):
+        from sympy.solvers.solvers import

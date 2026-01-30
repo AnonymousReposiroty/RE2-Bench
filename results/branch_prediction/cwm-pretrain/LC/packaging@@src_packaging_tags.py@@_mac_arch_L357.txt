@@ -1,0 +1,561 @@
+<think>
+In the `_mac_arch` function, the first condition `if not is_32bit` is checked once.
+Since `is_32bit=True`, the condition is false, so this branch is not taken → ['N'].
+The execution continues to the next condition `if arch.startswith("ppc")`.
+Here, `arch="x86_64"`, which does not start with "ppc", so this condition is also false → ['N'].
+Therefore, the function returns "i386".
+</think>
+
+<output>[OUTPUT]
+1 def _mac_arch(arch: str, is_32bit: bool = _32_BIT_INTERPRETER) -> str:
+2     if not is_32bit: ## [BRANCH]taken=[N][/BRANCH]
+3         return arch
+4 
+5     if arch.startswith("ppc"): ## [BRANCH]taken=[N][/BRANCH]
+6         return "ppc"
+7 
+8     return "i386"
+[/OUTPUT]
+</output>
+
+[FILEPATH] xszero-ahch-challange2024-cdcbe1f/test/mock-gpt4/mock_too_long.py [/FILEPATH]
+from openai import OpenAI
+from openai.types.chat.chat_completion_message_tool_call import (
+    ChatCompletionMessageToolCall,
+)
+from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
+
+
+class MockOpenAIGPT4o():
+    def __init__(self):
+        pass
+
+    def chat_completions_create(self, messages: list[ChatCompletionMessageParam], model: str, response_format: dict, tools: list[ChatCompletionToolParam]):
+        return {"choices": [{"message": {"content": None, "refusal": None, "role": "assistant", "tool_calls": [ChatCompletionMessageToolCall(id="string", function={"name": "trace_method", "arguments": ""}, type="function")], "function_call": None}}], "id": "string", "object": "string"}
+
+[FILEPATH] xszero-ahch-challange2024-cdcbe1f/test/solution-generation/generate_solution_mapreduce.py [/FILEPATH]
+import json
+from copy import deepcopy
+
+from traceback import print_exc
+
+from ahch import (
+    methods_from_python_source,
+    Solution,
+)
+from ahch.clients import VercelClient
+from ahch.metrics import trace_and_metrics
+from ahch.plan_testcases import (
+    TestCase,
+    Plan
+)
+
+from ahch.selector import BRANCH_TRACE_CANDIDATE
+
+from ahch.utils import rand_generator
+
+from src.misc.dir_helper import output
+from src.misc.logger import get_logger
+from src.misc.test_config import generate_test_configs
+from src.misc.utils import rand_env
+
+
+LOG = get_logger("trace_samples")
+
+
+MAPREDUCE_METHOD_NAME = "execute"
+SELECTION_METHOD_NAME = "choose_executors"
+
+
+branch_candidates = [BRANCH_TRACE_CANDIDATE]
+
+
+def main():
+    rand_generator.seed(27)
+
+    with VercelClient(retry_cnt=5, retry_intv=5) as client:
+
+        testcases = []
+
+        # execute()
+        executor_infos = [
+            {"id": "mapredworker1", "host": "127.0.0.1", "cpu": 16, "memory": 16, "disk": 16, "status": "OK"},
+            {"id": "mapredworker2", "host": "127.0.0.1", "cpu": 16, "memory": 16, "disk": 16, "status": "OK"},
+            {"id": "mapredworker3", "host": "127.0.0.1", "cpu": 16, "memory": 16, "disk": 16, "status": "OK"},
+            {"id": "mapredworker4", "host": "127.0.0.1", "cpu": 16, "memory": 16, "disk": 16, "status": "OK"},
+        ]
+
+        method = next((m for m in methods_from_python_source() if m.name == MAPREDUCE_METHOD_NAME))
+        inputs = [
+            {
+                "self": {
+                    "_outputdir": None,
+                    "_plan": Plan(
+                        processes=[3, 2],
+                        # partitions=[2, 4],
+                    ),
+                    "_conf": {
+                        "yarn.resourcemanager.hostname": "Local",
+                        "yarn.scheduler.minimum-allocation-mb": 128,
+                        "yarn.scheduler.minimum-allocation-vcores": 1,
+                        "mapreduce.map.memory.mb": 128,
+                        "mapreduce.map.java.opts": "",
+                        "mapreduce.reduce.memory.mb": 128,
+                        "mapreduce.reduce.java.opts": "",
+                    },
+                    "job_name": "Job name"
+                },
+                "map_inputs": ["Input 1", "Input 2"],
+                "inputs": ["Input 3"],
+                "output": "Output dir",
+                "executor_infos": executor_infos,
+            }
+        ]
+
+        rand_env(inputs)
+        testcases.extend((TestCase(method, i, branch_candidates) for i in inputs))
+        del method
+
+        # choose_executors()
+        method = next((m for m in methods_from_python_source() if m.name == SELECTION_METHOD_NAME))
+        inputs = [
+            {
+                "self": {
+                    "_outputdir": None,
+                    "_plan": Plan(
+                        processes=[3, 2],
+                        partitions=[2, 4],
+                    ),
+                    "_conf": {
+                        "yarn.resourcemanager.hostname": "Local",
+                        "yarn.scheduler.minimum-allocation-mb": 128,
+                        "yarn.scheduler.minimum-allocation-vcores": 1,
+                        "mapreduce.map.memory.mb": 128,
+                        "mapreduce.map.java.opts": "",
+                        "mapreduce.reduce.memory.mb": 128,
+                        "mapreduce.reduce.java.opts": "",
+                    },
+                    "job_name": "Job name"
+                },
+                "executor_infos": executor_infos,
+            }
+        ]
+
+        rand_env(inputs)
+        testcases.extend((TestCase(method, i, branch_candidates) for i in inputs))
+        del method
+
+        solutions = []
+
+        for testcase in testcases:
+            try:
+                LOG.info("processing testcase %s ...", testcase.id)
+                metrics, s = trace_and_metrics(testcase, client)
+                if metrics.get('exception') is not None:
+                    raise RuntimeError(metrics["exception"])
+
+                # HACK: For simplicity, we ignore the method_id column and put all the solutions in a single table
+                solution = Solution(0, testcase.id, testcase.method.name, s.program)
+                LOG.debug("saving to database ...")
+                solution.save()
+                del solution
+                del s
+                del metrics
+
+                solutions.append(solution.id)
+            except Exception:
+                LOG.error("Failed to generate solution.")
+                print_exc()
+
+        return solutions
+
+
+if __name__ == "__main__":
+    test_config = next(generate_test_configs())
+    output(test_config.output, main())
+
+[FILEPATH] xszero-ahch-challange2024-cdcbe1f/test/solution-generation/generate_solution_webpamgui.py [/FILEPATH]
+from __future__ import annotations
+
+import random
+from typing import List
+
+from traceback import print_exc
+
+from ahch import methods_from_python_source, Solution
+from ahch.clients import VercelClient
+from ahch.metrics import trace_and_metrics
+from ahch.plan_testcases import TestCase
+from ahch.selector import BRANCH_TRACE_CANDIDATE
+from ahch.solver import CodeSolver
+from ahch.utils import rand_generator
+
+from src.misc.dir_helper import output
+from src.misc.logger import get_logger
+from src.misc.test_config import generate_test_configs
+from src.misc.utils import dump_json, rand_env
+
+
+LOG = get_logger("webpamgui_testcase_generation")
+
+
+def load_raw_inputs() -> list[dict]:
+    return [
+        {
+            "method": "install",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "download",
+            "args": [
+                "https://xkdb.com/f/46151574/",
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "download_module",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "uninstall",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "run",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "install",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "get_metadata_from",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "run",
+            "args": [
+                "/path/to/test.wpm",
+                "/path/to/test.wpm  --exampleparam  examplevalue",
+            ]
+        },
+        {
+            "method": "is_running",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "kill_module",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+        {
+            "method": "kill_all",
+            "args": [
+                "/path/to/test.wpm",
+            ]
+        },
+    ]
+
+
+def _raw_inputs_to_inputs(raw_inputs: list[dict]) -> list[dict]:
+    methods = dict()
+    for m in methods_from_python_source():
+        methods[m.name] = m
+
+    for raw_input in raw_inputs:
+        args = []
+        for p in raw_input["args"]:
+            args.append(p)
+
+        yield {
+            "args": args,
+            "kwargs": {},
+            "self": None,
+        }
+
+
+def _generate_mock_input(raw_input: dict):
+    args = []
+
+    for arg in raw_input["args"]:
+        if arg == "/path/to/test.wpm":
+            p = "/tmp/ahch/mock_gui_tool.wpm"
+        elif arg == "/path/to/test.wpm  --exampleparam  examplevalue":
+            p = "/tmp/ahch/mock_gui_tool.wpm --exampleparam examplevalue"
+        elif arg == "https://xkdb.com/f/46151574/":
+            p = "https://xkdb.com/f/46151574/"
+        else:
+            p = "/tmp/ahch/mock_gui_tool.wpm"
+        args.append(p)
+
+    rand_env([args])
+
+    return args
+
+
+def _process_mock_input(input: dict, args: list):
+    input["args"] = args
+    if input["method"] == "install":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    elif input["method"] == "download":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    elif input["method"] == "download_module":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    elif input["method"] == "uninstall":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    elif input["method"] == "run":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    elif input["method"] == "get_metadata_from":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    elif input["method"] == "is_running":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    elif input["method"] == "kill_module":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    elif input["method"] == "kill_all":
+        input["self"] = {
+            "is_root": True,
+            "should_use_sudo": True,
+            "installed_paths": [],
+            "root_folder": "/tmp/ahch/root_folder",
+        }
+    else:
+        raise RuntimeError(f"Unknown method name {input['method']}.")
+
+    return input
+
+
+def _select_testcase(inputs: List[dict], metric: dict, selection: str) -> List[dict]:
+    selection_methods = methods_from_python_source().sort(key=lambda m: m.name)
+
+    selection_method = next((m for m in selection_methods if m.name == selection), None)
+    if selection_method is None:
+        raise RuntimeError(f"Unknown selection method {selection}.")
+
+    return [TestCase(selection_method, input, [BRANCH_TRACE_CANDIDATE]) for input in inputs]
+
+
+def main() -> list[int]:
+    methods = methods_from_python_source()
+    method_names = [m.name for m in methods]
+
+    raw_inputs = load_raw_inputs()
+    inputs = _raw_inputs_to_inputs(raw_inputs)
+    inputs = list(inputs)
+
+    trace_client = VercelClient()
+
+    for input in inputs:
+        raw_input = next((i for i in raw_inputs if i["method"] == input["method"]), None)
+        if raw_input is None:
+            raise RuntimeError(f"Unknown raw input method {input['method']}.")
+
+        args = _generate_mock_input(raw_input)
+        _process_mock_input(input, args)
+        _select_testcase(
+            [input],
+            {},
+            input["method"]
+        )
+
+    LOG.info("Preparing for test cases to solve ...")
+
+    print("Generating solution for test cases ...")
+    solutions = []
+    for testcase in inputs:
+        try:
+            LOG.info("Generating solution for test case %s ...", testcase.id)
+            metrics, s = trace_and_metrics(testcase, trace_client, solver=CodeSolver(
+                model_name='gpt-4o',
+                collection_name='vector_store_webpamgui_branches',
+                top_k=15,
+            ), retry_cnt=5)
+            LOG.info("The solution is %s.", s.dump())
+            dump_json(f"/tmp/ahch/webpamgui/solution_{testcase.id}.json", s.dump())
+            if metrics.get('exception') is not None:
+                raise RuntimeError(metrics["exception"])
+
+            solution = Solution(0, testcase.id, testcase.method.name, s.program)
+            LOG.debug("Saving to database ...")
+            solution.save()
+            solutions.append(solution.id)
+            del solution
+            del s
+            del metrics
+        except Exception:
+            LOG.error("Failed to generate solution.")
+            print_exc()
+
+    return solutions
+
+
+if __name__ == "__main__":
+    rand_generator.seed(42)
+
+    test_config = next(generate_test_configs())
+    output(test_config.output, main)
+
+[FILEPATH] xszero-ahch-challange2024-cdcbe1f/test/generate_testcases.py [/FILEPATH]
+from __future__ import annotations
+
+import random
+from collections import defaultdict
+from enum import Enum, auto
+from typing import List, Tuple
+
+from traceback import print_exc
+
+from ahch import methods_from_python_source
+from ahch.client import trace_case, VercelClient
+from ahch.metrics import trace_and_metrics, covering_ratio
+from ahch.plan_testcases import (
+    TestCase,
+    Plan,
+)
+from ahch.utils import rand_generator
+from ahch.selector import BRANCH_TRACE_CANDIDATE
+
+from src.misc.dir_helper import output
+from src.misc.logger import get_logger
+from src.misc.test_config import generate_test_configs
+from src.misc.utils import rand_env
+
+LOG = get_logger("mapred.testcase")
+
+
+def to_input_plan(plane: Plan):
+    return {
+        "plan": plane.dump(),
+    }
+
+
+def to_plan(input: dict):
+    return Plan.loads(input["plan"])
+
+
+class MethodInput(Enum):
+    _mac_arch = {
+        "method": "macos._mac_arch",
+        "self": {},
+        "arch": ["arm64", "x86_64"],
+        "is_32bit": [True, False],
+        "name": "_mac_arch",
+    }
+
+    mktemp = {
+        "method": "pytest.py_mktemp.mktemp",
+        "self": {},
+        "basename": ["file1", "file2"],
+        "numbered": [True, False],
+        "name": "mktemp",
+    }
+
+    execute = {
+        "method": "yarn_hacks.Job.execute",
+        "map_inputs": [
+            [f"{i}" for i in range(100)],
+        ],
+        "inputs": [
+            [f"{i}" for i in range(100)],
+        ],
+        "output": [
+            "/tmp/ahch/output1",
+            "/tmp/ahch/output2",
+        ],
+        "executor_infos": [
+            [
+                {"id": "mapredworker1", "host": "127.0.0.1", "cpu": 16, "memory": 16, "disk": 16, "status": "OK"},
+                {"id": "mapredworker2", "host": "127.0.0.1", "cpu": 16, "memory": 16, "disk": 16, "status": "OK"},
+            ],
+        ],
+        "self": {
+            "_plan": [
+                Plan(
+                    processes=[3, 2],
+                ),
+                Plan(
+                    processes=[4, 3],
+                ),
+            ],
+            "_conf": {
+                "yarn.resourcemanager.hostname": "Local",
+                "yarn.scheduler.minimum-allocation-mb": 128,
+                "yarn.scheduler.minimum-allocation-vcores": 1,
+                "mapreduce.map.memory.mb": 128,
+                "mapreduce.map.java.opts": "",
+                "mapreduce.reduce.memory.mb": 128,
+                "mapreduce.reduce.java.opts": "",
+            },
+            "job_name": "Job name"
+        },
+        "name": "execute",
+    }
+
+    # candidate for pilot bug but not working for mapreduce ...
+    choose_executors = {
+        "method": "yarn_hacks.Job.choose_executors",
+        "executor_infos": [
+            [
+                {"id": "mapredworker1", "host": "127.0.0.1", "cpu": 16, "memory": 16, "disk": 16, "status": "OK"},
+                {"id": "mapredworker2", "host": "127.0.0.1", "cpu": 16, "memory": 16, "disk": 16, "status": "OK"},
+            ],
+        ],
+        "self": {
+            "_plan": [
+                Plan(
+                    processes=[3, 

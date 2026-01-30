@@ -1,0 +1,178 @@
+Let’s walk through it step by step.
+
+---
+
+**Step 1 — Understanding the function definition**
+
+We see:
+```python
+def visit_UnaryOp(self, node: ast.UnaryOp) -> str:
+    if isinstance(node.op, ast.Not):
+        return '%s %s' % (self.visit(node.op), self.visit(node.operand))
+    return '%s%s' % (self.visit(node.op), self.visit(node.operand))
+```
+
+The function returns either `"op operand"` (for `ast.Not`) or `"opoperand"` (for other unary operators), having visited both `op` and `operand`.
+
+Given **output** `"~1"`, that fits the second branch: `'%s%s' % (visit(op), visit(operand))`.
+
+---
+
+**Step 2 — Decompose output**
+
+`"~1"` means `visit(node.op)` returned `"~"` and `visit(node.operand)` returned `"1"`.
+
+So `node.op` is `ast.Invert` (since `~` is bitwise invert), and `node.operand` is something that renders as `"1"`, likely an `ast.Constant` with value `1` or an `ast.Num` (depending on Python version — `typed_ast.ast3` might be Python 3 grammar; here probably `ast.Constant(value=1)`).
+
+---
+
+**Step 3 — Structure requirements**
+
+The `STRUCTURE` shows `node` has keys:
+
+- `op`: an operator node (`ast.Invert`)
+- `operand`: an expression node (here something yielding `"1"`)
+- plus `lineno`, `col_offset`, etc., which we can set to arbitrary valid integers.
+
+---
+
+**Step 4 — Representing `ast.Invert`**
+
+In `ast3`, `ast.Invert` is a class instance with `lineno`, `col_offset`, etc., but `visit(node.op)` returns `"~"`.
+
+Operator nodes have no content other than position info for visitor pattern in this `UnparseVisitor`.
+
+Similarly, `operand` is `ast.Constant(value=1, kind=None)` in Python 3.8+ `ast3`. Older `ast3` might use `ast.Num(n=1)`.
+
+But `typed_ast.ast3` matches Python 3.5–3.7 roughly, so `ast.Num` might be used.
+
+Given `visit` for `ast.Num` returns `str(n)`, here `"1"`.
+
+---
+
+**Step 5 — Position attributes**
+
+We must assign `lineno`, `col_offset`, `end_lineno`, `end_col_offset` to each node. These integers are arbitrary but must match plausible positions if the code was `~1`.
+
+---
+
+**Step 6 — Building the input**
+
+We need `node` to be `ast.UnaryOp(op=ast.Invert(), operand=ast.Num(1))` with position info filled.
+
+Looking at `typed_ast.ast3` definitions:
+
+- `ast.UnaryOp` has attributes `op`, `operand`, plus `lineno`, `col_offset`, `end_lineno`, `end_col_offset`.
+- `ast.Invert` has only positional attributes (`lineno`, `col_offset`, etc.), no other content.
+- `ast.Num` has `n` and positional attributes.
+
+---
+
+**Step 7 — Assigning position numbers**
+
+Let’s choose:
+
+- Start at line 1, column 0 for `~`.
+- `~` at col 0, `1` at col 1.
+- End at line 1, col 2 (since `~1` is two characters: col0 ~, col1 1, ends col2 exclusive? Usually `end_col_offset` is exclusive, so `2` for `~1` spans cols 0–2 exclusive means token ends at col2).
+
+So:
+
+```
+node.lineno = 1
+node.col_offset = 0
+node.end_lineno = 1
+node.end_col_offset = 2
+
+node.op.lineno = 1
+node.op.col_offset = 0
+node.op.end_lineno = 1
+node.op.end_col_offset = 1
+
+operand.lineno = 1
+operand.col_offset = 1
+operand.end_lineno = 1
+operand.end_col_offset = 2
+```
+
+---
+
+**Step 8 — Final input**
+
+For `operand`, older `ast3` may use `ast.Num` with `n=1`. But since we are using `typed_ast.ast3`, perhaps `ast.Constant` is not present yet (it appeared in Python 3.8 standard `ast`). `typed_ast` backports modern nodes to older syntax trees if needed, but here likely `ast.Num`.
+
+Alternatively, the structure says `operand` has `value`, so maybe it’s `ast.Constant`.
+
+Given the `STRUCTURE` shows `operand` having `value`, `kind`, it’s `ast.Constant` (since `ast.Num` has `n`, not `value`). Wait: but `typed_ast.ast3` may mimic the stdlib `ast` of the targeted Python version. Maybe wrong. Let’s stick to `ast.Constant` if `value` is present.
+
+`kind` can be `None` for a numeric constant.
+
+---
+
+Thus:
+
+```json
+{
+    "self": {
+        "code": ""
+    },
+    "args": {
+        "node": {
+            "op": {
+                "lineno": 1,
+                "col_offset": 0,
+                "end_lineno": 1,
+                "end_col_offset": 1
+            },
+            "operand": {
+                "value": 1,
+                "kind": null,
+                "lineno": 1,
+                "col_offset": 1,
+                "end_lineno": 1,
+                "end_col_offset": 2
+            },
+            "lineno": 1,
+            "col_offset": 0,
+            "end_lineno": 1,
+            "end_col_offset": 2
+        }
+    },
+    "kwargs": {}
+}
+```
+
+---
+
+[INPUT]
+```
+{
+    "self": {
+        "code": ""
+    },
+    "args": {
+        "node": {
+            "op": {
+                "lineno": 1,
+                "col_offset": 0,
+                "end_lineno": 1,
+                "end_col_offset": 1
+            },
+            "operand": {
+                "value": 1,
+                "kind": null,
+                "lineno": 1,
+                "col_offset": 1,
+                "end_lineno": 1,
+                "end_col_offset": 2
+            },
+            "lineno": 1,
+            "col_offset": 0,
+            "end_lineno": 1,
+            "end_col_offset": 2
+        }
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

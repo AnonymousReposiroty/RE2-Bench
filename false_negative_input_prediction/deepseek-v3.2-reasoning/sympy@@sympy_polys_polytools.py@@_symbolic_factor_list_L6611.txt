@@ -1,0 +1,180 @@
+<<FUNCTION_NAME>>
+
+_symbolic_factor_list
+
+<<CODE>>
+
+from functools import wraps, reduce
+from operator import mul
+from collections import Counter, defaultdict
+from sympy.core import (
+    S, Expr, Add, Tuple
+)
+from sympy.core.evalf import (
+    pure_complex, evalf, fastlog, _evalf_with_bounded_error, quad_to_mpmath)
+from sympy.core.mul import Mul, _keep_coeff
+from sympy.polys.polyerrors import (
+    OperationNotSupported, DomainError,
+    CoercionFailed, UnificationFailed,
+    GeneratorsNeeded, PolynomialError,
+    MultivariatePolynomialError,
+    ExactQuotientFailed,
+    PolificationFailed,
+    ComputationFailed,
+    GeneratorsError,
+)
+
+def _symbolic_factor_list(expr, opt, method):
+    """Helper function for :func:`_symbolic_factor`. """
+    coeff, factors = S.One, []
+
+    args = [i._eval_factor() if hasattr(i, '_eval_factor') else i
+        for i in Mul.make_args(expr)]
+    for arg in args:
+        if arg.is_Number or (isinstance(arg, Expr) and pure_complex(arg)):
+            coeff *= arg
+            continue
+        elif arg.is_Pow and arg.base != S.Exp1:
+            base, exp = arg.args
+            if base.is_Number and exp.is_Number:
+                coeff *= arg
+                continue
+            if base.is_Number:
+                factors.append((base, exp))
+                continue
+        else:
+            base, exp = arg, S.One
+
+        try:
+            poly, _ = _poly_from_expr(base, opt)
+        except PolificationFailed as exc:
+            factors.append((exc.expr, exp))
+        else:
+            func = getattr(poly, method + '_list')
+
+            _coeff, _factors = func()
+            if _coeff is not S.One:
+                if exp.is_Integer:
+                    coeff *= _coeff**exp
+                elif _coeff.is_positive:
+                    factors.append((_coeff, exp))
+                else:
+                    _factors.append((_coeff, S.One))
+
+            if exp is S.One:
+                factors.extend(_factors)
+            elif exp.is_integer:
+                factors.extend([(f, k*exp) for f, k in _factors])
+            else:
+                other = []
+
+                for f, k in _factors:
+                    if f.as_expr().is_positive:
+                        factors.append((f, k*exp))
+                    else:
+                        other.append((f, k))
+
+                factors.append((_factors_product(other), exp))
+    if method == 'sqf':
+        factors = [(reduce(mul, (f for f, _ in factors if _ == k)), k)
+                   for k in {i for _, i in factors}]
+    #collect duplicates
+    rv = defaultdict(int)
+    for k, v in factors:
+        rv[k] += v
+    return coeff, list(rv.items())
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {}, 'args': {'expr': 'cos(phi)', 'opt': {'fraction': True}, 'method': 'factor'}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+['1', [["Poly((cos(phi)), cos(phi), domain='ZZ')", 1]]]
+
+<<LLM_RESPONSE>>
+
+Let's break this down.
+
+## Step 1: Understanding the output
+The output is: `["1", [["Poly((cos(phi)), cos(phi), domain='ZZ')", 1]]]`
+
+This represents:
+- Coefficient: `1`
+- Factors: One factor which is `Poly((cos(phi)), cos(phi), domain='ZZ')` with exponent `1`
+
+So `_symbolic_factor_list` returned `(1, [(Poly(cos(phi), cos(phi), domain='ZZ'), 1)])`
+
+## Step 2: How the function works
+Looking at `_symbolic_factor_list`:
+1. It takes `expr` and tries to factor it
+2. It uses `Mul.make_args(expr)` to break into multiplicative components
+3. For each component:
+   - If it's a number or complex, multiply into coefficient
+   - If it's a Pow, separate base/exponent
+   - Try to convert to polynomial via `_poly_from_expr`
+   - Call polynomial factorization method (`method + '_list'`)
+4. Returns coefficient and list of (factor, exponent) pairs
+
+The output shows a Poly in `cos(phi)`. This means the expression must involve `cos(phi)` as a variable.
+
+## Step 3: Working backwards from the output
+The output says we have `Poly(cos(phi), cos(phi), domain='ZZ')` as the only factor with exponent 1.
+
+This suggests:
+- The expression was `cos(phi)` or something equivalent
+- The factorization method found it to be irreducible (already a polynomial in `cos(phi)`)
+
+Since the coefficient is `1`, there's no numeric factor.
+
+## Step 4: Determining `method`
+Looking at the code, when `method='sqf'`, it does extra grouping:
+```python
+if method == 'sqf':
+    factors = [(reduce(mul, (f for f, _ in factors if _ == k)), k) for k in {i for _, i in factors}]
+```
+
+The output has factors grouped normally (not by the sqf grouping), suggesting `method='factor'` (full factorization).
+
+## Step 5: Determining `opt`
+The structure shows `opt` has only `fraction` key. For `cos(phi)` to be treated as a Poly with domain='ZZ', `fraction` should probably be `False` (so we work over integers, not rationals).
+
+## Step 6: Testing my reasoning
+If `expr = cos(phi)`:
+1. `Mul.make_args(cos(phi))` → `(cos(phi),)`
+2. `arg = cos(phi)` is not a Number, not pure complex
+3. It's not a Pow, so `base = cos(phi)`, `exp = 1`
+4. Try `_poly_from_expr(cos(phi), opt)`:
+   - If `opt` has appropriate settings, it creates `Poly(cos(phi), cos(phi), domain='ZZ')`
+5. Call `factor_list()` on this Poly (since `method='factor'`)
+   - Returns `(1, [(Poly(cos(phi), cos(phi), domain='ZZ'), 1)])`
+6. Final: `(1, [(Poly(...), 1)])`
+
+This matches the output!
+
+[THOUGHT]
+1. The output shows coefficient 1 and a single factor: Poly(cos(phi), cos(phi), domain='ZZ') with exponent 1.
+2. This suggests the input expression was simply `cos(phi)` or an equivalent expression that gets converted to this Poly.
+3. The Poly is in the variable `cos(phi)` with integer domain, so `fraction` should be `False` (working over ZZ).
+4. The method must be `'factor'` since `'sqf'` would group factors differently.
+5. The simplest expression that yields this output is `cos(phi)` itself.
+6. When `_poly_from_expr` is called on `cos(phi)` with `gens=[cos(phi)]`, it creates the Poly shown.
+7. Therefore: `expr = cos(phi)`, `opt.fraction = False`, `method = 'factor'`.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "expr": "cos(phi)",
+        "opt": {
+            "fraction": false
+        },
+        "method": "factor"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

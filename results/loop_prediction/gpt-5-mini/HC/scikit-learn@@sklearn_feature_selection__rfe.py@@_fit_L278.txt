@@ -1,0 +1,95 @@
+[THOUGHT]
+Given inputs:
+- X has shape (150, 10) so n_features = 10.
+- self.n_features_to_select = 4 (an Integral), so n_features_to_select is set to 4 and remains constant.
+- self.step = 0.1 and 0.0 < step < 1.0, so step = int(max(1, 0.1 * 10)) = int(1.0) = 1.
+Loop behavior:
+- support_ starts with sum = 10.
+- Each iteration: threshold = min(step, sum(support_) - n_features_to_select) = min(1, current_sum - 4).
+- Therefore each iteration removes exactly 1 feature until sum(support_) == 4.
+- Number of iterations = 10 - 4 = 6.
+Thus n_features_to_select stays 4 for each of the 6 loop iterations.
+[/THOUGHT]
+
+[ANSWER]
+1 import warnings
+2 from numbers import Integral
+3 import numpy as np
+4 from sklearn.base import (
+5     BaseEstimator,
+6     MetaEstimatorMixin,
+7     _fit_context,
+8     clone,
+9     is_classifier,
+10 )
+11 from sklearn.feature_selection._base import SelectorMixin, _get_feature_importances
+12 from sklearn.utils._param_validation import HasMethods, Interval, RealNotInt
+13 from sklearn.utils.validation import (
+14     _check_method_params,
+15     _estimator_has,
+16     check_is_fitted,
+17     validate_data,
+18 )
+19 
+20 class RFE(SelectorMixin, MetaEstimatorMixin, BaseEstimator):
+21     _parameter_constraints: dict = {'estimator': [HasMethods(['fit'])], 'n_features_to_select': [None, Interval(RealNotInt, 0, 1, closed='right'), Interval(Integral, 0, None, closed='neither')], 'step': [Interval(Integral, 0, None, closed='neither'), Interval(RealNotInt, 0, 1, closed='neither')], 'verbose': ['verbose'], 'importance_getter': [str, callable]}
+22 
+23     def __init__(self, estimator, *, n_features_to_select=None, step=1, verbose=0, importance_getter='auto'):
+24         self.estimator = estimator
+25         self.n_features_to_select = n_features_to_select
+26         self.step = step
+27         self.importance_getter = importance_getter
+28         self.verbose = verbose
+29 
+30     def _fit(self, X, y, step_score=None, **fit_params):
+31         X, y = validate_data(self, X, y, accept_sparse='csc', ensure_min_features=2, ensure_all_finite=False, multi_output=True)
+32         n_features = X.shape[1]
+33         if self.n_features_to_select is None:
+34             n_features_to_select = n_features // 2
+35         elif isinstance(self.n_features_to_select, Integral):
+36             n_features_to_select = self.n_features_to_select
+37             if n_features_to_select > n_features:
+38                 warnings.warn(f'Found n_features_to_select={n_features_to_select!r} > n_features={n_features!r}. There will be no feature selection and all features will be kept.', UserWarning)
+39         else:
+40             n_features_to_select = int(n_features * self.n_features_to_select)
+41         if 0.0 < self.step < 1.0:
+42             step = int(max(1, self.step * n_features))
+43         else:
+44             step = int(self.step)
+45         support_ = np.ones(n_features, dtype=bool)
+46         ranking_ = np.ones(n_features, dtype=int)
+47         if step_score:
+48             self.step_n_features_ = []
+49             self.step_scores_ = []
+50             self.step_support_ = []
+51             self.step_ranking_ = []
+52         while np.sum(support_) > n_features_to_select:## [STATE]n_features_to_select=[4,4,4,4,4,4][/STATE]
+53             features = np.arange(n_features)[support_]
+54             estimator = clone(self.estimator)
+55             if self.verbose > 0:
+56                 print('Fitting estimator with %d features.' % np.sum(support_))
+57             estimator.fit(X[:, features], y, **fit_params)
+58             if step_score:
+59                 self.step_n_features_.append(len(features))
+60                 self.step_scores_.append(step_score(estimator, features))
+61                 self.step_support_.append(list(support_))
+62                 self.step_ranking_.append(list(ranking_))
+63             importances = _get_feature_importances(estimator, self.importance_getter, transform_func='square')
+64             ranks = np.argsort(importances)
+65             ranks = np.ravel(ranks)
+66             threshold = min(step, np.sum(support_) - n_features_to_select)
+67             support_[features[ranks][:threshold]] = False
+68             ranking_[np.logical_not(support_)] += 1
+69         features = np.arange(n_features)[support_]
+70         self.estimator_ = clone(self.estimator)
+71         self.estimator_.fit(X[:, features], y, **fit_params)
+72         if step_score:
+73             self.step_n_features_.append(len(features))
+74             self.step_scores_.append(step_score(self.estimator_, features))
+75             self.step_support_.append(support_)
+76             self.step_ranking_.append(ranking_)
+77         self.n_features_ = support_.sum()
+78         self.support_ = support_
+79         self.ranking_ = ranking_
+80         return self
+[/ANSWER]

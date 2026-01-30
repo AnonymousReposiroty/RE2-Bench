@@ -1,0 +1,350 @@
+[OUTPUT]
+```
+{
+    "output": "no"        
+}
+```
+[/OUTPUT]
+
+[FILEPATH] LeoHcL-Opencood-97a1f40/sensor_fusion/models/opencood/heter_sensor_fusion/adaCoOp/cfgs/opencood_adaCoOp_voxelnet_BV.yaml [/FILEPATH]
+# DA was trained with OpenCOOD and the target is (1) fusion cost ~0.005 sec, (2) equal performance as base model
+# Set nclasses in target model as 4 to get fusion cost below 0.005, just like single 3DMLP. See this issue https://github.com/DerrickXuNu/DA-CoOp/issues/25
+
+OPENCOOD:
+  fusion_method: ADA_COOP
+  input_modality:
+    LIDAR: 1
+    CAMERA: 2
+
+  model:
+    name: BEVFormerBase
+    args:
+      enc_layers: 3
+      dec_layers: 6
+      window_size: 8
+      n_head: 6
+      use_nms: true
+      use_rotate_nms: true
+      multiclass_nms: false
+      lidar_only: false
+      rasterization_size: [ 248, 216 ]
+      with_trans_head: false
+      voxel_size: [0.25, 0.25, 8]
+      out_size_factor: 4
+      use_mean_size: true
+      use_pred_speed: false
+      use_nearest: true
+      density_similarity_weight: 1.0
+      single_lidar_encoder: false
+      nclasses: 4
+
+      backbone_fixed: false
+      backbone_bn_eval: true
+      backbone_trainable: true
+      backbone_dcn: false
+      compen_clamp: 0.0
+      identity: false
+      upsample_thr: 0.0
+      box_coder: ResidualCoder
+      alignment_head_channels: 64
+      head_conv: true
+      use_epoch_based_timer: false
+      add_centerness_pred: true
+      alignment_head_cls_thresh: 0.5
+      alignment_head_dir_offset: 0.785
+      alignment_head_mean_size: [1.615386662194961, 3.5428571829649287, 1.5300690942230944]
+      enable_sector_split: true
+      test_with_oa: true
+
+  postprocess:
+    dir_offset: 0.785
+    score_threshold: 0.3
+    nms_threshold: 0.01
+    use_semantic_aware_nms: false
+    add_vel_to_box: false
+    hard_supervision: true
+    augment_multiscale: false
+    data_augmenter: False
+    augment_sweep: false
+
+  lidar_encoder:
+    name: SparseEncoder
+    args:
+      voxel_size: [0.25, 0.25, 8]
+      point_cloud_range: [0, -39.68, -3, 79.36, 39.68, 1]
+
+  camera_encoder:
+    name: CameraEncoder
+    args:
+      output_width: 150
+      output_height: 100
+      sampling_ratio: 1.0
+      enable_input_projs: false
+      image_normalizer: False
+      use_cams_embeds: false
+      img_backbone: resnet18
+
+  model_fusion_type: FUSION_EARLY
+  train:
+    cross_modal:
+      enable_fusion: false
+      # enable_camera: false
+      enable_self_cam: true
+      enable_self_lidar: false
+    register_L1: true
+    L1_fuse: true
+    max_interaction_steps: 3
+    teacher_temperature: 0.07
+    save_teacher_preds: true
+    teacher_epoch: 5
+
+      # Iliya wrote to get performance as good as the base model
+  freeze_backbone: True
+  # use_grid_mask: True
+  out_feature_dim: 32
+  grid_size: 40
+  random_grid_masking: False
+
+  align_after_compress: False
+  other_encoder_args:
+    grid_size: 40
+    align_after_compress: False
+
+  optim_config:
+    name: Adam
+    args:
+      lr: 3.e-5
+
+  seed: 1
+
+  # heterogenous implementation
+  heter_config:
+    warmup_max_iter: 0
+    use_backbone_features: False
+    use_sampling: False
+    freeze_bn: False
+    freeze_cls_head: False
+    use_encoder_out: False
+    use_decoder_out: False
+    use_fusion_out: False
+    voxelizer: HardVoxelization
+    loss_weight: -1
+
+train:
+  times: 10
+  save_folder: output/adaCoOp
+  load_prev_step: false
+  prev_train_info_path: null
+  auto_resume: false
+  eval_freq: 1
+  save_freq: 1
+  max_cav: 3
+
+test:
+  save_folder: output/adaCoOp
+  load_model: output/adaCoOp/ckpt/checkpoint_epoch_5.pth
+  batch_size: 32
+  max_cav: 1
+  data_source: 'scop'
+
+[FILEPATH] LeoHcL-Opencood-97a1f40/sensor_fusion/models/opencood/heter_sensor_fusion/adaCoOp/ada_coop_opencood.py [/FILEPATH]
+import time
+from collections import OrderedDict
+
+import torch
+from sensor_fusion.utils.config import cfg
+import numpy as np
+from sensor_fusion.models.opencood.heter_sensor_fusion.adaCoOp import regfusion_utils as u
+
+if cfg.use_nuscenes:
+    from sensor_fusion.datasets.utils.nusc_scene_dataset import NuscSceneDataset
+    from sensor_fusion.models.opencood.heter_sensor_fusion.adaCoOp.nuscenes_utils import nus_eval, index_fn
+elif cfg.use_waymo:
+    from sensor_fusion.datasets.utils.waymo_scene_dataset import WaymoSceneDataset
+    from sensor_fusion.models.opencood.heter_sensor_fusion.adaCoOp.waymo_utils import waymo_eval, index_fn
+
+class DA_CoOp(nn.Module):
+    def __init__(self):
+        super(DA_CoOp, self).__init__()
+        self.conf = cfg.HETERO_CONFIG
+        self.register_L1 = self.conf.register_L1  # to supervise the latent
+        self.L1_fuse = self.conf.L1_fuse  # use L1 to supervise the latent
+        self.max_interaction_steps = self.conf.max_interaction_steps  # Max number of interactions
+        self.teacher_temperature = self.conf.teacher_temperature  # temperature for teacher softmax
+        self.save_teacher_preds = self.conf.save_teacher_preds  # Save teacher predictions
+        self.teacher_epoch = self.conf.teacher_epoch  # save teacher epoch
+        self.encoder = torch.nn.LSTM(input_size=1, hidden_size=128, num_layers=1, batch_first=True).cuda()  # LSTM
+        self.decoder = torch.nn.LSTM(input_size=1, hidden_size=128, num_layers=1, batch_first=True).cuda()  # LSTM
+        self.encoder_convs = torch.nn.Sequential(*[torch.nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(), torch.nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU()]).cuda()  # 2 Convs
+        self.decoder_convs = torch.nn.Sequential(*[torch.nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(), torch.nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU()]).cuda()  # 2 Convs
+        self.decoder_convs_v = torch.nn.Sequential(*[torch.nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(), torch.nn.Conv1d(128, 128, 3, padding=1), nn.BatchNorm1d(128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU()]).cuda()  # 2 Convs
+        self.encoder_decoders = torch.nn.Sequential(*[torch.nn.Linear(128, 1)]).cuda()  # MLP
+        self.decoder_encoders = torch.nn.Sequential(*[torch.nn.Linear(128, 1)]).cuda()  # MLP
+
+        self.encode_and_decode(self.conf.teacher_epoch, test=True, teacher='both', cat_type='sim', time_type='soft', init_file='')
+
+        self.scene_name = ''  # scene name
+        self.ret_types = ['cyl', 'car', 'cons', 'ped', 'mot']
+        self.cls_map = {}
+        self.class_names = ['car', 'truck', 'construction_vehicle', 'bus', 'trailer',
+                            'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+        self.cls_map['car'] = 0
+        self.cls_map['truck'] = 1
+        self.cls_map['construction_vehicle'] = 2
+        self.cls_map['bus'] = 2
+        self.cls_map['trailer'] = 3
+        self.cls_map['barrier'] = 3
+        self.cls_map['motorcycle'] = 4
+        self.cls_map['bicycle'] = 4
+        self.cls_map['pedestrian'] = 5
+        self.cls_map['traffic_cone'] = 3
+
+        if cfg.use_nuscenes:
+            self.data_processor = NuscSceneDataset(1)
+            self.data_processor_e = NuscSceneDataset(1)
+        elif cfg.use_waymo:
+            self.data_processor = WaymoSceneDataset(1)
+            self.data_processor_e = WaymoSceneDataset(1)
+
+    def encode_and_decode(self, epoch=0, test=False, teacher='both', cat_type='sim', time_type='soft', init_file=''):
+        if self.conf.use_sampling:
+            from sensor_fusion.models.opencood.heter_sensor_fusion.adaCoOp.sample_utils import dyn_encoder, dyn_decoder, dyn_encode, dyn_decode
+            self.dyn_encoder = dyn_encoder(0, 32, 128)
+            self.dyn_decoder = dyn_decoder(0, 128)
+            self.dyn_encode = dyn_encode(self.dyn_encoder)
+            self.dyn_decode = dyn_decode(self.dyn_decoder)
+
+        # teacher='both': early fusion  teacher='early': late fusion  teacher='late': early fusion
+        tmp = []
+        tmp_s = []
+        print('teacher={}'.format(teacher))
+        for t in range(self.max_interaction_steps):
+            hidden, cell = (torch.randn((1, 1, 128)).cuda(), torch.randn((1, 1, 128)).cuda())  # LSTM inputs
+            if test:  # test mode
+                if teacher == 'late' and t > 1:  # late fusion
+                    input_seq = torch.tensor(np.ones((1, 1))).cuda()  # input sequence
+                    for k in range(1):
+                        _, (h, c) = self.encoder(input_seq, (hidden, cell))  # encode and decode
+                        input_seq = self.encoder_decoders(h)
+                    tmp.append((input_seq, hidden, cell))
+                elif teacher == 'both' and t > 1:  # early fusion
+                    input_seq = torch.tensor(np.ones((1, 1))).cuda()  # input sequence
+                    for k in range(1):
+                        _, (h, c) = self.decoder(input_seq, (hidden, cell))  # encode and decode
+                        input_seq = self.decoder_encoders(h)
+                    tmp.append((input_seq, hidden, cell))
+                elif teacher == 'early' and t <= 1:  # early fusion
+                    input_seq = torch.tensor(np.ones((1, 1))).cuda()  # input sequence
+                    for k in range(1):
+                        _, (h, c) = self.encoder(input_seq, (hidden, cell))  # encode and decode
+                        input_seq = self.encoder_decoders(h)
+                    tmp.append((input_seq, hidden, cell))
+            else:  # train mode
+                if teacher == 'late' and t > 1:  # late fusion
+                    input_seq = torch.tensor(np.ones((1, 1))).cuda()  # input sequence
+                    for k in range(1):
+                        _, (h, c) = self.encoder(input_seq, (hidden, cell))  # encode and decode
+                        input_seq = self.encoder_decoders(h)
+                    tmp.append((input_seq, hidden, cell))
+                elif teacher == 'both' and t > 1:  # early fusion
+                    input_seq = torch.tensor(np.ones((1, 1))).cuda()  # input sequence
+                    for k in range(1):
+                        _, (h, c) = self.decoder(input_seq, (hidden, cell))  # encode and decode
+                        input_seq = self.decoder_encoders(h)
+                    tmp.append((input_seq, hidden, cell))
+                elif teacher == 'early' and t <= 1:  # early fusion
+                    input_seq = torch.tensor(np.ones((1, 1))).cuda()  # input sequence
+                    for k in range(1):
+                        _, (h, c) = self.encoder(input_seq, (hidden, cell))  # encode and decode
+                        input_seq = self.encoder_decoders(h)
+                    tmp.append((input_seq, hidden, cell))
+        self.step_softmax_tmp = tmp
+
+    def forward(self, data_dict):
+        start = time.time()  # start time
+        input_seq = torch.tensor(np.ones((1, 1))).cuda()  # input sequence
+        probs = []  # probabilities
+        losses = []  # losses
+        tmp = []  # temporary list
+        (hidden, cell) = (torch.randn((1, 1, 128)).cuda(), torch.randn((1, 1, 128)).cuda())  # LSTM inputs
+        teacher_prob, teacher_hard = [], []  # teacher probability and hard
+        for t in range(self.max_interaction_steps):  # for each step
+            if self.conf.use_sampling:
+                hidden = hidden.view(1, 1, 128)  # reshape
+                hidden = self.dyn_encoder(hidden)
+                hidden = hidden.view(1, 1, 128)  # reshape
+                cell = cell.view(1, 1, 128)  # reshape
+                cell = self.dyn_encoder(cell)
+                cell = cell.view(1, 1, 128)  # reshape
+            _, (h, c) = self.encoder(input_seq, (hidden, cell))  # encode and decode
+            hidden = h
+            cell = c
+            if self.conf.use_sampling:  # use sampling
+                hidden = self.dyn_encode(hidden)
+                cell = self.dyn_encode(cell)
+            hidden = self.encoder_convs(hidden)  # encoder convs
+            cell = self.encoder_convs(cell)  # encoder convs
+            hidden = hidden.permute(0, 2, 1)  # reshape
+            cell = cell.permute(0, 2, 1)  # reshape
+            hidden = hidden.contiguous().view(1, 1, -1)  # reshape
+            cell = cell.contiguous().view(1, 1, -1)  # reshape
+            pred = self.encoder_decoders(hidden)  # decoder
+            if t > 0:  # after the first step
+                target, label = pred.squeeze(), self.step_softmax_tmp[t][0].squeeze()  # target and label
+                loss = torch.nn.functional.cross_entropy(target / self.teacher_temperature, label, reduce=False)  # cross entropy loss
+                prob = torch.nn.functional.softmax(target.detach(), dim=-1)  # softmax
+                sample_hard = torch.argmax(prob, dim=-1)  # argmax
+                p = [sample_hard.item(), prob[0].item(), prob[1].item(), loss.item()]
+                p = [sample_hard.item(), prob[0].item(), prob[1].item(), loss.item()]
+                losses.append(p)  # append loss
+                probs.append(p)  # append probability
+                teacher_prob.append(prob)  # append teacher probability
+                teacher_hard.append(sample_hard)  # append teacher hard
+            input_seq = pred  # update input sequence
+            tmp.append((pred, hidden, cell))  # append to temporary list
+
+        losses = torch.tensor(losses).cuda()  # losses
+        probs = torch.tensor(probs).cuda()  # probabilities
+        teacher_prob = torch.stack(teacher_prob, dim=0)  # teacher probability
+        teacher_hard = torch.stack(teacher_hard, dim=0)  # teacher hard
+
+        # visualizer
+        if (cfg.eval_visualization and (cfg.eval_version in cfg.adaCoOp['vis_epoch'])) or \
+                (cfg.vis_version in cfg.adaCoOp['vis_epoch']):
+            from sensor_fusion.models.opencood.heter_sensor_fusion.adaCoOp import vis_utils as vu
+            vu.vis_teacher(teacher_prob, teacher_hard, 'multiverse')
+            vu.vis_teacher_cross_entropy(probs, losses, 'multiverse')
+
+        return self.conf.loss_weight * torch.mean(losses[:, 3])  # return loss
+
+[FILEPATH] LeoHcL-Opencood-97a1f40/sensor_fusion/models/opencood/heter_sensor_fusion/coalign/coalign_decoder.py [/FILEPATH]
+import torch.nn as nn
+from torch import Tensor
+from sensor_fusion.models.opencood.heter_sensor_fusion.coalign.nearest_emb_vqvae import Embedding
+from sensor_fusion.models.opencood.heter_sensor_fusion.coalign.nearest_emb_vqvae import NearestEmbedding
+from sensor_fusion.models.opencood.heter_sensor_fusion.coalign.nearest_emb_vqvae import ResBlock
+
+class CoAlignDecoder(nn.Module):
+    def __init__(self,
+                 n_codes,
+                 code_dim,
+                 num_res_layers,
+                 img_feat_dim=256, # * 3,
+                 emb_dim=128,
+                 pre_logits_layers=[],
+                 finetune_enabled=True):
+        super().__init__()
+        
+        if finetune_enabled:
+            self.decoder = CoAlignDecoderVQVAE(n_codes, code_dim, img_feat_dim, emb_dim,
+                                               num_res_layers, pre_logits_layers)
+        else:
+            # vocab encoder
+            self.quantizer = NearestEmbedding(n_codes=n_codes, code_dim=code_dim)
+            # create layer to map code to img feat dim
+            if len(pre_logits_layers) == 0:
+                self.map_to_vocab = nn.Linear(code_dim, img_feat_dim)
+            else:
+                layers = []
+                layers.append(nn.Linear(code_dim, pre_logits_layers[0]))
+                for i, out_dim in enumerate

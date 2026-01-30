@@ -1,0 +1,68 @@
+from typing import Any, Type
+from sympy.core.basic import Basic
+from sympy.core.function import AppliedUndef, UndefinedFunction, Function
+
+class Printer:
+    """ Generic printer
+
+    Its job is to provide infrastructure for implementing new printers easily.
+
+    If you want to define your custom Printer or your custom printing method
+    for your custom class then see the example above: printer_example_ .
+    """
+    _global_settings: dict[str, Any] = {}
+    _default_settings: dict[str, Any] = {}
+    printmethod: str = None
+
+    @classmethod
+    def _get_initial_settings(cls):
+        settings = cls._default_settings.copy()
+        for key, val in cls._global_settings.items():
+            if key in cls._default_settings:
+                settings[key] = val
+        return settings
+
+    def __init__(self, settings=None):
+        self._str = str
+        self._settings = self._get_initial_settings()
+        self._context = {}
+        if settings is not None:
+            self._settings.update(settings)
+            if len(self._settings) > len(self._default_settings):
+                for key in self._settings:
+                    if key not in self._default_settings:
+                        raise TypeError("Unknown setting '%s'." % key)
+        self._print_level = 0
+
+    def _print(self, expr, **kwargs) -> str:
+        """Internal dispatcher
+
+        Tries the following concepts to print an expression:
+            1. Let the object print itself if it knows how.
+            2. Take the best fitting method defined in the printer.
+            3. As fall-back use the emptyPrinter method for the printer.
+        """
+        self._print_level += 1
+        try:
+            if self.printmethod and hasattr(expr, self.printmethod):
+                if not (isinstance(expr, type) and issubclass(expr, Basic)):
+                    return getattr(expr, self.printmethod)(self, **kwargs)
+            classes = type(expr).__mro__
+            if AppliedUndef in classes:
+                classes = classes[classes.index(AppliedUndef):]
+            if UndefinedFunction in classes:
+                classes = classes[classes.index(UndefinedFunction):]
+            if Function in classes:
+                i = classes.index(Function)
+                classes = tuple((c for c in classes[:i] if c.__name__ == classes[0].__name__ or c.__name__.endswith('Base'))) + classes[i:]
+            for cls in classes:
+                printmethodname = '_print_' + cls.__name__
+                printmethod = getattr(self, printmethodname, None)
+                if printmethod is not None:
+                    return printmethod(expr, **kwargs)
+            return self.emptyPrinter(expr)
+        finally:
+            self._print_level -= 1
+
+    def emptyPrinter(self, expr):
+        return str(expr)

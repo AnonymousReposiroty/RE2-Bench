@@ -1,0 +1,228 @@
+<<FUNCTION_NAME>>
+
+_expand_partial_derivative
+
+<<CODE>>
+
+from sympy import Symbol, Number, sympify
+from sympy import MutableDenseNDimArray, S
+from sympy.tensor.tensor import (Tensor, TensExpr, TensAdd, TensMul,
+                                 TensorIndex)
+from .array import derive_by_array, tensorcontraction
+
+
+
+class PartialDerivative(TensExpr):
+    def __new__(cls, expr, *variables):
+
+        # Flatten:
+        if isinstance(expr, PartialDerivative):
+            variables = expr.variables + variables
+            expr = expr.expr
+
+        args, indices, free, dum = cls._contract_indices_for_derivative(
+            S(expr), variables)
+
+        obj = TensExpr.__new__(cls, *args)
+
+        obj._indices = indices
+        obj._free = free
+        obj._dum = dum
+        return obj
+    @classmethod
+    def _contract_indices_for_derivative(cls, expr, variables):
+        variables_opposite_valence = []
+
+        for i in variables:
+            if isinstance(i, Tensor):
+                i_free_indices = i.get_free_indices()
+                variables_opposite_valence.append(
+                        i.xreplace({k: -k for k in i_free_indices}))
+            elif isinstance(i, Symbol):
+                variables_opposite_valence.append(i)
+
+        args, indices, free, dum = TensMul._tensMul_contract_indices(
+            [expr] + variables_opposite_valence, replace_indices=True)
+
+        for i in range(1, len(args)):
+            args_i = args[i]
+            if isinstance(args_i, Tensor):
+                i_indices = args[i].get_free_indices()
+                args[i] = args[i].xreplace({k: -k for k in i_indices})
+
+        return args, indices, free, dum
+    def _expand_partial_derivative(self):
+        args, indices, free, dum = self._contract_indices_for_derivative(self.expr, self.variables)
+
+        obj = self.func(*args)
+        obj._indices = indices
+        obj._free = free
+        obj._dum = dum
+
+        result = obj
+
+        if not args[0].free_symbols:
+            return S.Zero
+        elif isinstance(obj.expr, TensAdd):
+            # take care of sums of multi PDs
+            result = obj.expr.func(*[
+                    self.func(a, *obj.variables)._expand_partial_derivative()
+                    for a in result.expr.args])
+        elif isinstance(obj.expr, TensMul):
+            # take care of products of multi PDs
+            if len(obj.variables) == 1:
+                # derivative with respect to single variable
+                terms = []
+                mulargs = list(obj.expr.args)
+                for ind in range(len(mulargs)):
+                    if not isinstance(sympify(mulargs[ind]), Number):
+                        # a number coefficient is not considered for
+                        # expansion of PartialDerivative
+                        d = self.func(mulargs[ind], *obj.variables)._expand_partial_derivative()
+                        terms.append(TensMul(*(mulargs[:ind]
+                                               + [d]
+                                               + mulargs[(ind + 1):])))
+                result = TensAdd.fromiter(terms)
+            else:
+                # derivative with respect to multiple variables
+                # decompose:
+                # partial(expr, (u, v))
+                # = partial(partial(expr, u).doit(), v).doit()
+                result = obj.expr  # init with expr
+                for v in obj.variables:
+                    result = self.func(result, v)._expand_partial_derivative()
+                    # then throw PD on it
+
+        return result
+    @property
+    def expr(self):
+        return self.args[0]
+    @property
+    def variables(self):
+        return self.args[1:]
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'_indices': None, '_free': None, '_dum': None}, 'args': {}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+{'_indices': None, '_free': None, '_dum': None}
+
+<<LLM_RESPONSE>>
+
+Let's break this down step by step.  
+
+First, the output shows:  
+
+```
+{
+    "_indices": null,
+    "_free": null,
+    "_dum": null
+}
+```
+
+This means `self._indices`, `self._free`, `self._dum` are `null` after calling `_expand_partial_derivative`.  
+
+Looking at the `_expand_partial_derivative` method:  
+
+1. It starts by calling `self._contract_indices_for_derivative(self.expr, self.variables)`, which returns `(args, indices, free, dum)`.  
+2. Then it creates `obj = self.func(*args)` (which is `PartialDerivative` with those args).  
+3. It sets `obj._indices = indices`, `obj._free = free`, `obj._dum = dum`.  
+4. `result = obj`.  
+5. Then there is a branch:  
+   - If `args[0].free_symbols` is empty → returns `S.Zero`.  
+   - If `obj.expr` is `TensAdd` → expands further.  
+   - If `obj.expr` is `TensMul` with `len(obj.variables) == 1` → expands into sum of products.  
+   - Otherwise for `len(obj.variables) > 1` → expands recursively over each variable.  
+
+But the output `_indices`, `_free`, `_dum` being `null` likely means `result` is not a `PartialDerivative` object in the end — maybe `S.Zero` or some other non-`TensExpr`.  
+
+Looking at the return value: if `args[0].free_symbols` is empty → `S.Zero`. `S.Zero` has no `_indices`, `_free`, `_dum`. So if `_expand_partial_derivative` returns `S.Zero`, the calling context might try to access those attributes and find `null`.  
+
+Thus the input `self` must be a `PartialDerivative` whose `expr` has **no free symbols**.  
+
+From the `PartialDerivative.__new__`, `self.args = (expr, variables...)`.  
+If `expr` has no free symbols, then `args[0].free_symbols` empty → `S.Zero`.  
+
+`expr` could be something like a `TensorHead` with no indices? No, `TensorHead` is not a `TensExpr`? Actually `Tensor` is a `TensExpr`. But `expr` could be a `TensMul` with no free symbols — meaning all symbols are dummies? Possibly `expr` is a contracted tensor with no free indices and all dummy indices contracted, so `free_symbols` could be empty if all indices are dummies and there are no component functions with arguments? Wait, `Tensor` has no `free_symbols` method defined in given code? It inherits from `Basic`, whose `free_symbols` looks at `self.args`. For `Tensor`, `args[0]` is `TensorHead`, `args[1]` is indices tuple. `TensorHead` is a symbol — it has `free_symbols = {self}`. So any `Tensor` has free symbols unless the `TensorHead` is a number? No, `TensorHead` is always a symbol.  
+
+Thus `expr.free_symbols` only empty if `expr` is something like `0` (a `Number`). Yes, `S.Zero` is a `Number`, has no free symbols. So `expr` must be `0` (or `S.Zero`).  
+
+But `PartialDerivative` expects `expr` to be a `TensExpr`? Actually, `PartialDerivative.__new__` calls `TensExpr.__new__`, which will accept any SymPy object as first arg, but `_contract_indices_for_derivative` expects `expr` to be a `TensExpr`? In code, `_contract_indices_for_derivative` calls `TensMul._tensMul_contract_indices` on `[expr] + variables_opposite_valence`. If `expr` is `S.Zero`, `Zero` is not a `TensExpr`, `get_indices(Zero)` returns `()`. So `args_indices` first element is empty tuple. That’s fine. Then `indices_to_free_dum` processes it.  
+
+Still, `args[0]` in `_expand_partial_derivative` is `S.Zero`? Wait, `self.expr` is `args[0]` from `self.args`. In `_expand_partial_derivative`, `self.expr` is the original `expr` passed to `PartialDerivative`. If `expr` is `S.Zero`, `args[0].free_symbols` is empty → return `S.Zero`. So output is `S.Zero`, which has no `_indices`, `_free`, `_dum` attributes, so accessing them gives `null`.  
+
+So input `self` must be `PartialDerivative(S.Zero, ...)` with any variables.  
+
+Output JSON shows `"_indices": null` etc. — means the object returned has these as `null` (maybe accessed via `__dict__`). For `S.Zero`, `hasattr(obj, '_indices')` is `False`, so JSON serialization gives `null`.  
+
+Thus input `self` is a `PartialDerivative` with `expr = S.Zero`. Variables can be anything, say a single `Tensor` variable for simplicity.  
+
+But `self` is represented as `{"_indices": ..., "_free": ..., "_dum": ...}` in the input structure. Wait, looking at `__new__` of `PartialDerivative`: it creates `obj._indices`, `obj._free`, `obj._dum` via `_contract_indices_for_derivative`. So even for `S.Zero`, `_contract_indices_for_derivative` returns `indices`, `free`, `dum`. Those would be stored in `self._indices` etc. So why `null` in output?  
+
+Unless `_expand_partial_derivative` returns `S.Zero`, which is a different object from `self`, and `S.Zero` doesn’t have `_indices`. The output JSON is from `_expand_partial_derivative` **return value**, not `self`.  
+
+So they are asking: given the output `{"_indices": null, "_free": null, "_dum": null}` from `_expand_partial_derivative`, what was `self`? But `self` is a `PartialDerivative`. Its `_indices`, `_free`, `_dum` are computed in `__new__`. They could be anything — but output `null` means returned object is not a `PartialDerivative`. That means the branch `args[0].free_symbols` empty triggered. So `expr` has no free symbols. Simplest: `expr` is `0`.  
+
+But `expr` must be a `TensExpr`? No, `PartialDerivative` subclasses `TensExpr`, but `TensExpr` can have any first arg? Possibly.  
+
+Given no further constraints, choose `expr = S.Zero`, variables = `Tensor('T', TensorIndexType('Lorentz'), (TensorIndex('i', TensorIndexType('Lorentz'), True), TensorIndex('j', TensorIndexType('Lorentz'), False))`? Too specific. But we just need `expr` with no free symbols. `S.Zero` works.  
+
+But `S.Zero` as `args[0]` means `self.expr` is `0`. `self._indices` will be from `_contract_indices_for_derivative(S.Zero, variables)` where `variables` have indices? `indices` will be list of indices from variables? Possibly empty list?  
+
+The output `_indices: null` means result’s `_indices` is `null`. That’s consistent with `S.Zero`.  
+
+Thus minimal: `self = PartialDerivative(0, Tensor(...))`. But `Tensor` as variable? Code says `variables` can be `Tensor` or `Symbol`. Let's pick `Symbol('x')`.  
+
+So: `self = PartialDerivative(S.Zero, Symbol('x'))`.  
+
+Then `self._indices` computed in `__new__` would be `[]` (empty tuple?), but stored as `[]`? Actually `indices` from `_contract_indices_for_derivative`:  
+`args_indices = [get_indices(expr), get_indices(variable)]`. `get_indices(S.Zero)` is `()`. `get_indices(Symbol('x'))` also `()` because `Symbol` is not `TensExpr`. So `indices = []`. Then `free = []`, `dum = []`. So `self._indices = []`, `self._free = []`, `self._dum = []`.  
+
+But output is `null`, not empty list — because returned object `S.Zero` has no `_indices`.  
+
+So input `self._indices = []`, `self._free = []`, `self._dum = []`.  
+
+Thus:  
+
+```json
+{
+    "self": {
+        "_indices": [],
+        "_free": [],
+        "_dum": []
+    },
+    "args": {},
+    "kwargs": {}
+}
+```
+
+But in output, accessing `_indices` gives `null` — because output object is `S.Zero`.  
+
+But wait, the JSON output shows `"_indices": null`, not `[]`. That means result’s `_indices` is `null` (doesn't exist). Indeed `S.Zero` has no such attribute.  
+
+So input `self`’s `_indices` etc. could be anything (computed in `__new__`), but they aren’t referenced in output. So we can choose arbitrary values consistent with `PartialDerivative` constructor. Let’s choose simplest: `expr = 0`, `variables = [Symbol('x')]`. Then `_indices = []`, `_free = []`, `dum = []`.  
+
+That fits structure placeholder XXX.  
+
+Final answer:  
+
+[THOUGHT]  
+Output `_indices`, `_free`, `_dum` are `null` → `_expand_partial_derivative` returned `S.Zero`. That happens when `self.expr` has no free symbols. Simplest case: `expr = S.Zero`, `variables` any list (e.g., `[Symbol('x')]`). Then `self._indices`, `_free`, `_dum` computed in `__new__` are empty lists. So input `self._indices = []`, `self._free = []`, `self._dum = []`.  
+[/THOUGHT]  
+
+[INPUT]  
+```
+{
+    "self": {
+        "_indices": [],
+        "_free": [],
+        "_dum": []
+    },
+    "args": {},
+    "kwargs": {}
+}
+```
+[/INPUT]

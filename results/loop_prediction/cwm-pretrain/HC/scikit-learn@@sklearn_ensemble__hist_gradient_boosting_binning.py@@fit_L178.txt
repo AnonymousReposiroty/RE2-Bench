@@ -1,0 +1,445 @@
+[ANSWER]
+1 import numpy as np
+2 from sklearn.base import BaseEstimator, TransformerMixin
+3 from sklearn.ensemble._hist_gradient_boosting.common import (
+4     ALMOST_INF,
+5     X_BINNED_DTYPE,
+6     X_BITSET_INNER_DTYPE,
+7     X_DTYPE,
+8 )
+9 from sklearn.utils import check_array, check_random_state
+10 from sklearn.utils.parallel import Parallel, delayed
+11 
+12 class _BinMapper(TransformerMixin, BaseEstimator):
+13 
+14     def __init__(self, n_bins=256, subsample=int(200000.0), is_categorical=None, known_categories=None, random_state=None, n_threads=None):
+15         self.n_bins = n_bins
+16         self.subsample = subsample
+17         self.is_categorical = is_categorical
+18         self.known_categories = known_categories
+19         self.random_state = random_state
+20         self.n_threads = n_threads
+21 
+22     def fit(self, X, y=None):
+23         if not 3 <= self.n_bins <= 256:
+24             raise ValueError('n_bins={} should be no smaller than 3 and no larger than 256.'.format(self.n_bins))
+25         X = check_array(X, dtype=[X_DTYPE], ensure_all_finite=False)
+26         max_bins = self.n_bins - 1
+27         rng = check_random_state(self.random_state)
+28         if self.subsample is not None and X.shape[0] > self.subsample:
+29             subset = rng.choice(X.shape[0], self.subsample, replace=False)
+30             X = X.take(subset, axis=0)
+31         if self.is_categorical is None:
+32             self.is_categorical_ = np.zeros(X.shape[1], dtype=np.uint8)
+33         else:
+34             self.is_categorical_ = np.asarray(self.is_categorical, dtype=np.uint8)
+35         n_features = X.shape[1]
+36         known_categories = self.known_categories
+37         if known_categories is None:
+38             known_categories = [None] * n_features
+39         for f_idx in range(n_features):## [STATE]f_idx=[0,1][/STATE] [STATE]range(n_features)=[0,1,0,1][/STATE]
+40             is_categorical = self.is_categorical_[f_idx]
+41             known_cats = known_categories[f_idx]
+42             if is_categorical and known_cats is None:
+43                 raise ValueError(f'Known categories for feature {f_idx} must be provided.')
+44             if not is_categorical and known_cats is not None:
+45                 raise ValueError(f"Feature {f_idx} isn't marked as a categorical feature, but categories were passed.")
+46         self.missing_values_bin_idx_ = self.n_bins - 1
+47         self.bin_thresholds_ = [None] * n_features
+48         n_bins_non_missing = [None] * n_features
+49         non_cat_thresholds = Parallel(n_jobs=self.n_threads, backend='threading')((delayed(_find_binning_thresholds)(X[:, f_idx], max_bins) for f_idx in range(n_features) if not self.is_categorical_[f_idx]))
+50         non_cat_idx = 0
+51         for f_idx in range(n_features):
+52             if self.is_categorical_[f_idx]:
+53                 thresholds = known_categories[f_idx]
+54                 n_bins_non_missing[f_idx] = thresholds.shape[0]
+55                 self.bin_thresholds_[f_idx] = thresholds
+56             else:
+57                 self.bin_thresholds_[f_idx] = non_cat_thresholds[non_cat_idx]
+58                 n_bins_non_missing[f_idx] = self.bin_thresholds_[f_idx].shape[0] + 1
+59                 non_cat_idx += 1
+60         self.n_bins_non_missing_ = np.array(n_bins_non_missing, dtype=np.uint32)
+61         return self
+[/ANSWER]
+[/ANSWER]
+
+[FILEPATH] nrl301-autogen-2a1ecfa/sympy/test.py [/FILEPATH]
+from sympy.utilities.autowrap import AutowrapTool
+
+def wrapper(template):
+    # Snipped for brevity.
+    tool = AutowrapTool(template)
+    tool.set_output_directory(dir)
+    tool.build()
+
+wrapper("core.py")
+
+import sympy
+import numpy as np
+from numpy.testing import assert_array_almost_equal
+
+from sympy import nsum, Sum, symbols, oo
+import core
+def test_simple():
+    x = np.array([0.123, 0.654])
+    y = np.array([0.321, 0.978])
+    z = np.array([0.111, 0.999])
+    a, b, c = symbols('a, b, c')
+    a_val, b_val, c_val = 1, 2, 3
+    expr = a + b + c
+    result, (a, b, c) = core.compile("core.py").summation(expr, a_val, b_val, c_val, 0, 2)
+    assert_array_almost_equal(result, np.array([6., 6.]))
+
+if __name__ == "__main__":
+    test_simple()
+
+[FILEPATH] nrl301-autogen-2a1ecfa/sympy/sympy.cc [/FILEPATH]
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#include <stdlib.h>
+#include <sstream>
+#include <sympy/cl2sym.h>
+#include <sympy/floats.h>
+#include <sympy/printer.h>
+#include <sympy/sym.h>
+#include <sympy/cl2.h>
+#include <sympy/str.h>
+
+void scale_assign(REAL *to, REAL *from, REAL scalor)
+{
+    for (int i = 0; i < __builtin_popcountll(VECTOR_SIZE-1); i++) {
+        to[i] = from[i] * scalor;
+    }
+}
+
+int main() {
+    REAL* arr_1 = new REAL[4];
+    REAL* arr_2 = new REAL[4];
+
+    REAL arr_3[] = {1, 2, 3, 4};
+    REAL arr_4[] = {5, 6, 7, 8};
+    REAL arr_5[] = {9, 10, 11, 12};
+
+    for (int i = 0; i < 4; i++) {
+        arr_1[i] = arr_3[i] + arr_4[i] + arr_5[i];
+    }
+
+    return 0;
+}
+
+[FILEPATH] nrl301-autogen-2a1ecfa/sympy/core.py [/FILEPATH]
+import sympy
+import numpy as np
+
+from sympy import Add, Expr, FiniteSet, oo, Sum, symbols, Symbol, lambdify, sympify, Rational, Integral, Integral, integrate, FiniteSet
+
+def summation(func, func_args, lower, upper, n):
+    '''
+    Evaluate the summation of a function of arbitrary number of arguments over a range.
+
+    Parameters:
+        func: The sympy expression for the function to be summed.
+        func_args: The values of the arguments at which the function is evaluated.
+            This can be a number or a numpy array. In the latter case, the shape of the array
+            must be consistent with the number of arguments in the function and the sum is
+            computed for each corresponding set of arguments.
+        lower: The lower limit of the summation.
+        upper: The upper limit of the summation.
+
+    Returns:
+        A numpy array with the summation of the function for each set of arguments.
+    '''
+    args = symbols('a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z')
+    args = args[:func.free_symbols & symbols(func_args)]
+    if isinstance(lower, (int, float)):
+        lower = symbols(lower)
+    if isinstance(upper, (int, float)):
+        upper = symbols(upper)
+    if isinstance(lower, Symbol):
+        lower = {args[0]: lower}
+    if isinstance(upper, Symbol):
+        upper = {args[0]: upper}
+    if not isinstance(lower, (list, tuple)):
+        lower = [lower]
+    if not isinstance(upper, (list, tuple)):
+        upper = [upper]
+
+    func_args = np.atleast_2d(func_args)
+
+    res = []
+    for k in range(func_args.shape[0]):
+        subs = {}
+        for i, arg in enumerate(func_args[k]):
+            if isinstance(arg, str) and arg.startswith('R(') and arg.endswith(')'):
+                subs[args[i]] = Rational(arg[2:-1])
+            else:
+                subs[args[i]] = arg
+        subs.update(lower)
+        subs.update(upper)
+        func_subs = func.subs(subs)
+        func_lambda = lambdify(args, func_subs)
+        res.append(func_lambda(*args[:len(func_args[k])]))
+    return np.array(res), list(lower.values()), list(upper.values())
+
+def integration(func, func_args, limits, n):
+    '''
+    Evaluate the integration of a function of arbitrary number of arguments over a range.
+
+    Parameters:
+        func: The sympy expression for the function to be integrated.
+        func_args: The values of the arguments at which the function is evaluated.
+            This can be a number or a numpy array. In the latter case, the shape of the array
+            must be consistent with the number of arguments in the function and the integration is
+            computed for each corresponding set of arguments.
+        limits: A tuple of tuples, each containing the lower and upper limits of the integration.
+
+    Returns:
+        A numpy array with the integration of the function for each set of arguments.
+    '''
+    args = symbols('a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z')
+    args = args[:func.free_symbols & symbols(func_args)]
+    if not isinstance(limits, (list, tuple)):
+        limits = [limits]
+
+    func_args = np.atleast_2d(func_args)
+
+    res = []
+    for k in range(func_args.shape[0]):
+        subs = {}
+        for i, arg in enumerate(func_args[k]):
+            if isinstance(arg, str) and arg.startswith('R(') and arg.endswith(')'):
+                subs[args[i]] = Rational(arg[2:-1])
+            else:
+                subs[args[i]] = arg
+        func_subs = func.subs(subs)
+        func_lambda = lambdify(args, func_subs)
+        res.append(func_lambda(*args[:len(func_args[k])]))
+    return np.array(res)
+
+[FILEPATH] nrl301-autogen-2a1ecfa/brent.dag/README.md [/FILEPATH]
+from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+response_schemas = [
+    ResponseSchema(name="states", description="All variable names in the for loop.")
+    ResponseSchema(name="states_values", description="state of a variable in a for loop"),
+]
+output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
+format_instructions = output_parser.get_format_instructions()
+
+prompt = PromptTemplate(
+    template="...",
+    input_variables=["..."],
+    partial_variables={"format_instructions": format_instructions}
+)
+
+llm = LLM(...)
+
+# Chain
+chain = LLMChain(llm=llm, prompt=prompt)
+
+print(chain.run({"n": 5}))
+
+[FILEPATH] nrl301-autogen-2a1ecfa/brent.dag/loop.py [/FILEPATH]
+import matplotlib.pyplot as plt
+import math
+import numpy as np
+
+fig, ax = plt.subplots()
+f = lambda x: 2*x-9
+a = 0.3
+b = 1.5
+c = 0.0
+n = 100
+
+e = np.linspace(a, b, num=100)
+t = [f(x) for x in e]
+ax.plot(e,t)
+
+# increment the search interval by 5 iterations
+for i in range(0, 5):
+    c = (a + b)/2 # calculate the midpoint
+    
+    print(c) # calculate the function values at a and b
+
+    fa = f(a)
+    fb = f(b)
+    fc = f(c)
+
+    if fa * fc < 0: # zero lies between a and c
+        b = c
+        # plot the midpoint
+        ax.plot([c],[fc],'ro')
+    elif fb * fc < 0: # zero lies between c and b
+        a = c
+        # plot the midpoint
+        ax.plot([c],[fc],'bo')
+plt.show()
+
+[FILEPATH] nrl301-autogen-2a1ecfa/brent.dag/x.py [/FILEPATH]
+from typing import Annotated, Literal, Optional
+
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, StateGraph
+from langchain_community.graphs.vespa_graph import VespaGraph
+from typing_extensions import TypedDict
+
+
+class State(TypedDict):
+    question: str
+    graph_state: str
+
+
+def search(state: State):
+    graph_state = state["graph_state"]
+    graph_state += "Looking for Pizza, don't ask me why"
+    return {"question": state["question"], "graph_state": graph_state}
+
+
+graph_builder = StateGraph(State)
+
+graph_builder.add_node("search", search)
+
+graph_builder.set_entry_point("search")
+
+graph_builder.add_edge(START, "search")
+
+graph = graph_builder.compile()
+
+final_state = graph.invoke({"question": "What is the meaning of life?"})
+
+[FILEPATH] nrl301-autogen-2a1ecfa/brent.dag/brent.py [/FILEPATH]
+import numpy as np
+
+class Brent:
+    def __init__(self, f, a, b, tol=1e-8):
+        self.f = f
+        self.a = a
+        self.b = b
+        self.tol = tol
+        self.c = 0.0
+
+    def solve(self):
+        f_a = self.f(self.a)
+        f_b = self.f(self.b)
+        if f_a * f_b > 0:
+            raise ValueError("f(a) and f(b) must have opposite signs")
+
+        c_prev = self.a
+        d_prev = self.b - self.a
+        e_prev = d_prev
+
+        # Start Brent's method
+        while True:
+            if np.abs(f_b) < np.abs(f_a):
+                self.a, self.b = self.b, self.a
+                f_a, f_b = f_b, f_a
+
+            c_prev = self.b
+            d_prev = e_prev
+            e_prev = self.b - self.a
+            f_c = self.f(self.c)
+            if np.abs(f_c) < self.tol:
+                return self.c
+            if f_a != f_c and f_b != f_c:
+                s = self.a * f_b * f_c / ((f_a - f_b) * (f_a - f_c)) + self.b * f_a * f_c / ((f_b - f_a) * (f_b - f_c)) + self.c * f_a * f_b / ((f_c - f_a) * (f_c - f_b))
+            else:
+                s = self.b - f_b * (self.b - self.a) / (f_b - f_a)
+            if (s < (3 * self.a + self.b) / 4 or s > self.b) or (f_a == f_c and np.abs(s - self.b) >= np.abs(self.b - self.c) / 2) or (f_b == f_c and np.abs(s - self.b) >= np.abs(self.c - self.d_prev) / 2) or (f_a != f_c and f_b != f_c and np.abs(s - self.b) >= np.abs(self.c - self.d_prev) / 2 and np.abs(s - self.b) >= np.abs(self.b - self.c) / 2):
+                s = (self.a + self.b) / 2
+                self.c = s
+                f_c = self.f(s)
+                d_prev = self.b - self.a
+                e_prev = self.b - self.a
+            if np.abs(f_c) < self.tol:
+                return s
+            if f_c * f_b < 0:
+                self.a = self.b
+                self.b = s
+                f_a = f_b
+                f_b = f_c
+            else:
+                self.b = self.a
+                self.a = s
+                f_a = f_c
+
+def test_brent():
+    def func(x):
+        return x ** 2 - 1
+
+    solver = Brent(func, 0, 2)
+    assert np.isclose(solver.solve(), 1.0)
+    print("Brent's method test passed.")
+
+
+def test_brent():
+    def func(x):
+        return x ** 2 - 1
+
+    solver = Brent(func, 0, 2)
+    assert np.isclose(solver.solve(), 1.0)
+    print("Brent's method test passed.")
+
+
+if __name__ == "__main__":
+    test_brent()
+
+[FILEPATH] nrl301-autogen-2a1ecfa/brent.dag/langchain.md [/FILEPATH]
+HumanMessage(content='Hey there world!')
+
+HumanMessage(content='How are you?')
+
+SystemMessage(content='I\'m doing well, thank you!')
+
+AgentMessage(content='I\'m an AI agent!')
+
+AIMessage(content='I\'m an AI!')
+
+HumanMessage(content='What is 2 + 2?')
+
+AIMessage(content='2 + 2 = 4')
+
+ToolMessage(content='The current weather in New York is sunny.')
+
+tool('openweathermap', input='{"location": "New York", "unit": "Celsius"}')
+
+Observation(content='It\'s a beautiful day in the neighborhood.')
+
+The tool system message tells the model what a tool message is, and can also include what format the input should be in. The tool message includes the id of the tool you'd like to call, and the input the tool message is using. The assistant should then determine whether to call the tool or not.
+
+```langchain
+from langchain.prompts import ChatPromptTemplate
+
+def get_weather_forecast(location):
+    # Dummy function to simulate getting a weather forecast
+    weather_forecasts = {
+        "New York": "Sunny",
+        "London": "Rainy",
+        "Tokyo": "Cloudy",
+    }
+    return weather_forecasts.get(location, "Weather data not available")
+
+# Define the tools
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The city and state, e.g. San Francisco, CA",
+                    },
+                    "unit": {"type": "string", "enum": ["Celsius", "Fahrenheit"]},
+                },
+                "required": ["location"],
+            },
+        },
+    }
+]
+
+# Define the prompt
+prompt = ChatPromptTemplate.from_messages(
+    [

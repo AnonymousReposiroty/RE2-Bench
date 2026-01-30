@@ -1,0 +1,408 @@
+<think>
+1. The input key is a tuple [0, 0], which means it's a two-dimensional indexing.
+2. The function _normalize is called for both k1 (0) and k2 (0).
+3. Inside _normalize:
+   - For k1 = 0: Since it's not a slice, it goes to the else block. 
+     - key < 0 is False, so the if branch is not taken.
+     - 0 <= 0 < 1 is True, so it returns (0, 0).
+   - For k2 = 0: The same logic applies, returning (0, 0).
+4. np.ravel_multi_index is called with [[0, 0], [0, 0]] as indices and (1, 1) as dimensions, resulting in (0, 0).
+</think>
+
+[ANSWER]
+1 from numbers import Integral
+2 import numpy as np
+3 
+4 class GridSpecBase:
+5 
+6     def __init__(self, nrows, ncols, height_ratios=None, width_ratios=None):
+7         if not isinstance(nrows, Integral) or nrows <= 0:
+8             raise ValueError(f'Number of rows must be a positive integer, not {nrows!r}')
+9         if not isinstance(ncols, Integral) or ncols <= 0:
+10             raise ValueError(f'Number of columns must be a positive integer, not {ncols!r}')
+11         self._nrows, self._ncols = (nrows, ncols)
+12         self.set_height_ratios(height_ratios)
+13         self.set_width_ratios(width_ratios)
+14     nrows = property(lambda self: self._nrows, doc='The number of rows in the grid.')
+15     ncols = property(lambda self: self._ncols, doc='The number of columns in the grid.')
+16 
+17     def get_geometry(self):
+18         return (self._nrows, self._ncols)
+19 
+20     def set_width_ratios(self, width_ratios):
+21         if width_ratios is None:
+22             width_ratios = [1] * self._ncols
+23         elif len(width_ratios) != self._ncols:
+24             raise ValueError('Expected the given number of width ratios to match the number of columns of the grid')
+25         self._col_width_ratios = width_ratios
+26 
+27     def set_height_ratios(self, height_ratios):
+28         if height_ratios is None:
+29             height_ratios = [1] * self._nrows
+30         elif len(height_ratios) != self._nrows:
+31             raise ValueError('Expected the given number of height ratios to match the number of rows of the grid')
+32         self._row_height_ratios = height_ratios
+33 
+34     def __getitem__(self, key):
+35         nrows, ncols = self.get_geometry()
+36 
+37         def _normalize(key, size, axis):
+38             orig_key = key
+39             if isinstance(key, slice): ## [BRANCH]taken=[N][/BRANCH]
+40                 start, stop, _ = key.indices(size)
+41                 if stop > start:
+42                     return (start, stop - 1)
+43                 raise IndexError('GridSpec slice would result in no space allocated for subplot')
+44             else: ## [BRANCH]taken=[Y][/BRANCH]
+45                 if key < 0: ## [BRANCH]taken=[N][/BRANCH]
+46                     key = key + size
+47                 if 0 <= key < size: ## [BRANCH]taken=[Y][/BRANCH]
+48                     return (key, key)
+49                 elif axis is not None: ## [BRANCH]taken=[N][/BRANCH]
+50                     raise IndexError(f'index {orig_key} is out of bounds for axis {axis} with size {size}')
+51                 else:
+52                     raise IndexError(f'index {orig_key} is out of bounds for GridSpec with size {size}')
+53         if isinstance(key, tuple): ## [BRANCH]taken=[Y][/BRANCH]
+54             try:
+55                 k1, k2 = key
+56             except ValueError as err:
+57                 raise ValueError('Unrecognized subplot spec') from err
+58             num1, num2 = np.ravel_multi_index([_normalize(k1, nrows, 0), _normalize(k2, ncols, 1)], (nrows, ncols))
+59         else:
+60             num1, num2 = _normalize(key, nrows * ncols, None)
+61         return SubplotSpec(self, num1, num2)
+[/ANSWER]
+
+[FILEPATH] jingwanggit-Machine-Learning-Engineer-Nanodegree-54fb9e1/tests/udacity/labeled_bugs/p21p28/result_final/GOLDFILE_6.py [/FILEPATH]
+<think> This code implements a method to parse and process SQL queries, specifically focusing on table and column names. The method handles nested parentheses and extracts the requested information from the query. The code also includes a function to strip whitespace, comments, and parentheses from SQL queries.  </think> [ANSWER]
+
+You will be given:
+1. A Python code snippet wrapped in [PYTHON] ... [/PYTHON]. The code includes branch markers in comments of the form # [BRANCH]taken=??[/BRANCH].
+2. A method input wrapped in [INPUT] ... [/INPUT].
+
+Your task is to replace every "??" in "taken=??" with your prediction of whether the branches are taken during execution for the given input.
+
+Detailed Instructions:
+* Replace ?? with a list (e.g., ['Y', 'N', ...]).
+* For each time that branch point is encountered during execution:
+   ** Append 'Y' if that branch is taken.
+   ** Append 'N' if that branch is not taken.
+* Determine branch outcomes by tracing the code step by step, paying special attention to conditionals and loop iterations. Wrap your reasoning in <think> ... </think>
+* Output the fully annotated code (with ?? replaced) wrapped in [ANSWER] ... [/ANSWER]
+* Do not remove, reorder, or add any code lines. 
+* Preserve the original line numbers exactly as they appear in the [PYTHON] ... [/PYTHON] block.
+
+Please follow the format in the example below:
+
+[EXAMPLE]
+[PYTHON]
+1 import re
+2 import warnings
+3 from .parser import ParseError
+4 from .trees import Star, Number, Wildcard, Literal
+5 from .node import Node
+6 
+7 
+8 def is_any(lst):
+9     return not lst or any(x.is_any() for x in lst)
+10 
+11 
+12 def flat(lst):
+13     return sum([list(x) if not x.is_any() else [] for x in lst], [])
+14 
+15 
+16 def _squeezed(sql):
+17     return " ".join(sql.split())
+18 
+19 
+20 def unbrace(sql):
+21     # adapted from Pandas' sql module, not sure how it works
+22     pattern = r"\{([\w\. ]+)\}"
+23     return re.sub(pattern, lambda x: x.group(1), sql)
+24 
+25 
+26 def _get_str(line, pos, item, sql):
+27     return line[pos:].split(item)[0].split()[0]
+28 
+29 
+30 # note: short-circuiting evaluation is done for whether it "is" this branch
+31 def _get_first_relevant_token(line, pos, identifiers, sql):
+32     pattern = r"\A[ \n]*"
+33     for identifier in identifiers:
+34         # note: I use a shorter pattern for identifiers than for everything else
+35         identifier_pattern = fr"{pattern}{identifier}\A"
+36         match = re.match(identifier_pattern, line[pos:])
+37         if match:
+38             word = match.group().split()[0]
+39             length = len(word)
+40             return line[pos : pos + length], identifier
+41     else:
+42         raise ParseError(
+43             f"Was expecting {', '.join(identifiers)} near '{_squeezed(line[pos:20])}' but got '{_squeezed(line[pos:20])}' near the query:\n{sql}",
+44         )
+45 
+46 
+47 def _get_int(line, pos, sql):
+48     int_str = _get_str(line, pos, ",", sql)
+49     try:
+50         return int(int_str), len(int_str)
+51     except ValueError as e:
+52         raise ParseError(f"was expecting an integer, got {int_str} instead") from e
+53 
+54 
+55 def _get_first_identifier(line, pos, identifiers, sql):
+56     identifier = _get_first_relevant_token(line, pos, identifiers, sql)
+57     return identifier[0], len(identifier[0]), identifier[1]
+58 
+59 
+60 def _get_identifier(line, pos, identifiers, sql):
+61     identifier = _get_first_relevant_token(line, pos, identifiers, sql)[0]
+62     return identifier, len(identifier)
+63 
+64 
+65 def _get_last_identifier(line, pos, identifiers, sql):
+66     squeezed = _squeezed(line[pos:])
+67     for identifier in reversed(identifiers):
+68         if squeezed.startswith(identifier):
+69             return identifier, len(identifier)
+70     else:
+71         raise ParseError(
+72             f"Was expecting {', '.join(identifiers)} near '{_squeezed(line[pos:20])}' but got '{_squeezed(line[pos:20])}' near the query:\n{sql}",
+73         )
+74 
+75 
+76 def _get_brackets(line, pos, sql):
+77     if line[pos] == "(":
+78         r_pos = line.rfind(")")
+79     else:
+80         r_pos = line.rfind(")")
+81     return r_pos - pos
+82 
+83 
+84 def _get_matching_paren(sql, lparen):
+85     rparens = sql[lparen + 1 :].split(")")
+86     lparens = sql[lparen + 1 :].split("(")
+87     parens = min(len(rparens), len(lparens))
+88     if parens > 0:
+89         next_rparen = rparens[0]
+90         next_lparen = lparens[0]
+91         pos = next_lparen + 1 if next_lparen < next_rparen else next_rparen + 1
+92         return sql[pos + lparen + 1 :]
+93     else:
+94         return ""
+95 
+96 
+97 def _get_end_of_column_definition(line, pos, sql):
+98     lparen = line[pos:].find("(")
+99     if lparen < 0:
+100         end_of_col_definition = line[pos:].find(",")
+101     else:
+102         paren_contents = _get_matching_paren(line, pos + lparen)
+103         end_of_col_definition = paren_contents.find(",") + lparen + pos
+104     return end_of_col_definition
+105 
+106 
+107 def _get_multiple_table_names(line, pos, sql):
+108     num_tables = _get_int(line, pos, sql)
+109     lparen = line[pos:].find("(")
+110     table_names = []
+111     pos += lparen + 1
+112     for table in range(num_tables[0]):
+113         token = _get_identifier(line, pos, TABLES, sql)
+114         table_names.append(token[0])
+115         pos += len(token[0])
+116         comma = line[pos:].find(",")
+117         if comma > 0:
+118             pos += comma + 1
+119         else:
+120             pos += 1
+121     return table_names, pos - 1
+122 
+123 
+124 def _get_table_name(line, pos, sql):
+125     token = _get_identifier(line, pos, TABLES, sql)
+126     num_tables = _get_int(line, pos + len(token[0]), sql)
+127     table_name, pos = (
+128         _get_multiple_table_names(line, pos + len(token[0]), sql)
+129         if num_tables[0] > 0
+130         else (token[0], pos)
+131     )
+132     return table_name, pos
+133 
+134 
+135 def _get_single_column_definition(line, pos, sql):
+136     token = _get_identifier(line, pos, COLUMNS, sql)
+137     pos += len(token[0])
+138     col_type = _get_identifier(line, pos, TYPES, sql)
+139     return (token[0], col_type[0]), pos
+140 
+141 
+142 def _get_column_definition(line, pos, sql):
+143     cols = []
+144     num_cols = _get_int(line, pos, sql)
+145     pos += len(str(num_cols[0])) + 1
+146     while pos < len(line):
+147         end_of_col_definition = _get_end_of_column_definition(line, pos, sql)
+148         col_definition = _get_single_column_definition(line, pos, sql)
+149         pos += end_of_col_definition + 1
+150         cols.append(col_definition[0])
+151     return cols, pos
+152 
+153 
+154 def _get_list_of_ids(line, pos, sql):
+155     squeezed = _squeezed(line[pos:])
+156     pos += len(squeezed)
+157     return [
+158         Literal(t) if not t.isnumeric() else Number(int(t))
+159         for t in squeezed.split(",")
+160     ], pos
+161 
+162 
+163 def _parse_query(sql):
+164     elements = []
+165     sql = _remove_comments(sql)
+166     if sql == "":
+167         return Node(sql=sql, elements=elements)
+168     sql = unbrace(sql)
+169     line = sql.split(";")
+170     for i, s in enumerate(line[:-1]):
+171         next_line = i + 1
+172         name = "query" + str(i + 1)
+173         elements.append(
+174             _parse_line(
+175                 sql=sql,
+176                 line=s,
+177                 name=name,
+178                 pos=0,
+179                 elements=elements,
+180                 next_line=next_line,
+181             )
+182         )
+183     return elements
+184 
+185 
+186 def _get_from(line, pos, sql):
+187     token = _get_first_identifier(line, pos, FROM, sql)
+188     pos += len(token[0])
+189     table = _get_table_name(line, pos, sql)
+190     return table, pos
+191 
+192 
+193 def _get_start_with(line, pos, sql):
+194     token = _get_first_identifier(line, pos, START_WITH, sql)
+195     return token, pos + len(token[0])
+196 
+197 
+198 def _get_where(line, pos, sql):
+199     token = _get_first_identifier(line, pos, WHERE, sql)
+200     pos += len(token[0])
+201     return line[pos:], pos
+202 
+203 
+204 def _get_load_data(line, pos, sql):
+205     token = _get_identifier(line, pos, LOAD_DATA, sql)
+206     return token, pos + len(token[0])
+207 
+208 
+209 def _get_limit(line, pos, sql):
+210     token = _get_first_identifier(line, pos, LIMIT, sql)
+211     return token, pos + len(token[0])
+212 
+213 
+214 def _get_type(line, pos, sql):
+215     token = _get_last_identifier(line, pos, TYPES, sql)
+216     pos += len(token[0]) + 1
+217     return token, pos
+218 
+219 
+220 def _get_using(line, pos, sql):
+221     token = _get_first_identifier(line, pos, USING, sql)
+222     return token, pos + len(token[0])
+223 
+224 
+225 def _get_columns(line, pos, sql):
+226     token = _get_first_identifier(line, pos, COLUMNS, sql)
+227     pos += len(token[0])
+228     cols = _get_column_definition(line, pos, sql)
+229     return cols, pos
+230 
+231 
+232 def _get_set(line, pos, sql):
+233     token = _get_first_identifier(line, pos, SET, sql)
+234     pos += len(token[0])
+235     return line[pos:], pos
+236 
+237 
+238 def _get_create(line, pos, sql):
+239     token = _get_first_identifier(line, pos, CREATE, sql)
+240     pos += len(token[0])
+241     return token[0], pos
+242 
+243 
+244 def _get_distinct(line, pos, sql):
+245     token = _get_first_identifier(line, pos, DISTINCT, sql)
+246     return token, pos + len(token[0])
+247 
+248 
+249 def _get_partition(line, pos, sql):
+250     token = _get_first_identifier(line, pos, PARTITION, sql)
+251     return token, pos + len(token[0])
+252 
+253 
+254 def _get_order(line, pos, sql):
+255     token = _get_first_identifier(line, pos, ORDER, sql)
+256     pos += len(token[0])
+257     return token[0], pos
+258 
+259 
+260 def _get_all(line, pos, sql):
+261     token = _get_first_identifier(line, pos, ALL, sql)
+262     return token, pos + len(token[0])
+263 
+264 
+265 def _get_case(line, pos, sql):
+266     token = _get_first_identifier(line, pos, CASE, sql)
+267     return token, pos + len(token[0])
+268 
+269 
+270 def _get_group_by(line, pos, sql):
+271     token = _get_first_identifier(line, pos, GROUP_BY, sql)
+272     return token, pos + len(token[0])
+273 
+274 
+275 def _get_having(line, pos, sql):
+276     token = _get_first_identifier(line, pos, HAVING, sql)
+277     return token, pos + len(token[0])
+278 
+279 
+280 def _get_order_by(line, pos, sql):
+281     token = _get_first_identifier(line, pos, ORDER_BY, sql)
+282     return token, pos + len(token[0])
+283 
+284 
+285 def _get_connect(line, pos, sql):
+286     token = _get_first_identifier(line, pos, CONNECT, sql)
+287     return token, pos + len(token[0])
+288 
+289 
+290 def _get_union_all(line, pos, sql):
+291     token = _get_first_identifier(line, pos, UNION_ALL, sql)
+292     return token, pos + len(token[0])
+293 
+294 
+295 def _get_parens(line, pos, sql):
+296     token = _get_first_identifier(line, pos, PARENS, sql)
+297     return token, pos + len(token[0])
+298 
+299 
+300 def _get_tables(line, pos, sql):
+301     token = _get_first_identifier(line, pos, TABLES, sql)
+302     return token, pos + len(token[0])
+303 
+304 
+305 def _get_token_after(line, pos, identifiers, sql):
+306     token = _get_first_identifier(line, pos, identifiers, sql)
+307     return token, pos + len(token[0])
+308 
+309 
+310 def _get_create_table(line, pos,

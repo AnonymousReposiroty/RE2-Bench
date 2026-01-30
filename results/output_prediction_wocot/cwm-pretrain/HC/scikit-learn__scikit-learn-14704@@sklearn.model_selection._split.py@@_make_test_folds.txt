@@ -1,0 +1,529 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. ONLY print the output, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+def my_func(a, b, c):
+    d = a + b
+    e = d * c
+    return e
+[/PYTHON]
+What will be the output of my_func, given the following input:
+[INPUT]
+{"a": 2, "b": 3, "c": 4}
+[/INPUT]
+Output structure:
+[STRUCTURE]
+```
+{ 
+    "value": XXX
+}
+```
+[/STRUCTURE]
+Output:
+[OUTPUT]
+```
+{
+    "value": 20
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from __future__ import annotations
+import builtins
+import itertools
+from collections import abc
+from functools import partial, wraps
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    Iterable,
+    Mapping,
+    Sequence,
+    TypeVar,
+    cast,
+    overload,
+)
+import numpy as np
+from pandas._libs.tslibs import IncompatibleFrequency
+from pandas._typing import (
+    DateTimeErrorChoices,
+    Freq,
+)
+from pandas.errors import InvalidIndexError
+from pandas.util._decorators import cache_readonly
+from pandas.util._exceptions import find_stack_level
+
+from pandas.core.dtypes.common import (
+    is_datetime64_any_dtype,
+    is_datetime64tz_dtype,
+    is_list_like,
+)
+from pandas.core.dtypes.dtypes import (
+    DatetimeTZDtype,
+    ExtensionDtype,
+)
+from pandas.core.dtypes.generic import (
+    ABCSeries,
+    ABCTimedeltaIndex,
+)
+from pandas.core.dtypes.missing import notna
+
+from pandas.core.arrays import (
+    DatetimeArray,
+    ExtensionArray,
+    TimedeltaArray,
+    _datetimelike_array_cmp,
+    validate_period_array_interface_casting,
+)
+
+from pandas.tseries.offsets import (
+    DateOffset,
+    Tick,
+    prefix_mapping,
+)
+import pandas._libs.tslib as tslib
+from pandas._libs.tslib import (
+    Timedelta,
+)
+from pandas._libs.tslibs import BaseOffset
+from pandas._libs.tslibs.ccalendar import (
+    get_days_in_month,
+    get_firstbday,
+    get_lastbday,
+    get_ultimate_termination_day_for_quarter,
+    get_ultimate_termination_day_for_quarter_monday,
+)
+from pandas._libs.tslibs.nattype import NaT
+from pandas._libs.tslibs.period import IncompatibleFrequency as _IncompatibleFrequency
+from pandas._libs.tslibs.timedeltas import (
+    array_to_timedelta64,
+    delta_to_nanoseconds,
+    ints_to_pytimedelta,
+    is_any_td_scalar,
+    is_unitless,
+)
+from pandas._libs.tslibs.timestamps import (
+    Timestamp,
+    _timestamp,
+    to_offset,
+)
+from pandas._libs.tslibs.timezones import (
+    dateutil_gettz as gettz,
+    tz_compare,
+)
+
+from pandas.core.algorithms import unique
+from pandas.core.array_algos.datetimelike_accumulations import (
+    sequence_to_dt64ns,
+)
+from pandas.core.arrays.datetimelike import (
+    DatetimeLikeArrayMixin,
+)
+from pandas.core.base import NoNewAttributesMixin
+import pandas.core.common as com
+from pandas.core.indexes.base import (
+    Index,
+    maybe_extract_name,
+    set_default_names,
+)
+from pandas.core.ops.invalid import make_invalid_op
+
+from pandas.tseries import frequencies
+
+if TYPE_CHECKING:
+    from pandas import (
+        DataFrame,
+        Series,
+)
+
+_Int64T = TypeVar("_Int64T", bound=np.int64)
+
+T = TypeVar("T", bound="DatetimeIndex")
+
+_Int64TOrInterval = TypeVar("_Int64TOrInterval", _Int64T, "BaseOffset")
+
+
+doc_top_attributes = """
+    Parameters
+    ----------
+    data : array-like (1-dimensional), optional
+        Optional datetime-like data to construct index with.
+    freq : str or pandas offset object, optional
+        One of pandas date offset strings or corresponding objects. The string
+        'infer' can be passed in order to set the frequency of the index as the
+        inferred frequency upon creation.
+
+        .. warning::
+
+            If the ``TimedeltaIndex`` has custom freq, passing "infer" will raise
+            an error.
+
+        .. deprecated:: 2.0.0
+
+            Passing "infer" is deprecated and will raise in a future version.
+
+    tz : pytz.timezone or dateutil.tz.tzfile or datetime.tzinfo or str
+    copy : bool
+        Make a copy of input ndarray.
+    name : label, defaults to None
+        Name to be stored in the index.
+    """
+
+doc_subtitle_template = """
+    datetime-like data to construct index with. %(data_description)s %(freq_description)s
+    """
+
+doc_frequency_title = """
+    .. note:: if `freq` is passed, it should be a Frequency class
+    """
+
+doc_datetime_index_lists = """
+%(data)s
+    NaTType : optional, defaults to no parsing
+        Whether or not to parse the tabular columns into NaT or a datelike.
+
+        .. versionadded:: 2.0.0
+
+    dtype : numpy.dtype or DatetimeTZDtype, optional
+        Note that the only NumPy dtype allowed is ``numpy.dtype('M8[ns]')``.
+        Also note that the inferred dtype for string data containing a ``T``
+        will be ``'datetime64[ns]'`` and not ``'datetime64[ns, tz]'`` unless
+        explicitely specified.
+    copy : bool, default False
+        Make a copy of input ndarray.
+    name : label, defaults to None
+        Name to be stored in the index.
+"""
+
+doc_datetime_index_with_freq = """
+%(data)s
+    name : label, defaults to None
+        Name to be stored in the index.
+    tz : pytz.timezone or dateutil.tz.tzfile or datetime.tzinfo or str, optional
+        Timezone for the index, or ``None`` to specify no timezone. By default
+        is either the timezone of the first element of ``data`` if that is a
+        :class:`datetime` object with a tz attribute (e.g. via ``pd.to_datetime``),
+        or no timezone.
+"""
+
+# the key mapping dictionary provides 'f' and 'freq' as aliases
+_valid_throw_depr_kwarg = {"f", "freq", "freqstr"}
+
+
+class _index_shared_attrs:
+    _requires_extension = False
+    _is_numeric_dtype = False
+    _can_hold_strings = False
+    _shallow_copy = True
+    _isValidInt = False
+    _can_partial_string_index = False
+
+    _data = None
+
+    # whether we support partial string indexing. Overridden in DatetimeIndex
+    # op here for v2.0 is a placeholder for changes to come.
+    _partial_string_validation: Callable[[Index], None] | None = None
+
+
+@set_default_names  # type: ignore[misc]
+class DatetimeIndex(DatetimeLikeArrayMixin, _index_shared_attrs, Index):
+    """
+    Immutable index of datetime64 data, represented internally as int64, and
+    which can be boxed to Timestamp objects that are subclasses of datetime and
+    carry metadata such as frequency information.
+
+    Parameters
+    ----------
+    data : array-like (1-dimensional), optional
+        Optional datetime-like data to construct index with.
+    freq : str or pandas offset object, optional
+        One of pandas date offset strings or corresponding objects. This can be
+        specified to set the frequency of the index. This is not specified by
+        default for reasons of efficiency, though it will attempt to infer the
+        time step (which may or may not be correct). Specifying the frequency
+        can help in getting the desired output on certain operations. If the
+        ``TimedeltaIndex`` has custom freq, passing "infer" will raise an error.
+
+        .. deprecated:: 2.0.0
+
+            Passing "infer" is deprecated and will raise in a future version.
+
+    tz : pytz.timezone or dateutil.tz.tzfile or datetime.tzinfo or str, optional
+        Timezone for the index, or ``None`` to specify no timezone. By default
+        is either the timezone of the first element of ``data`` if that is a
+        :class:`datetime` object with a tz attribute (e.g. via ``pd.to_datetime``),
+        or no timezone.
+    ambiguous : 'infer', bool-ndarray, 'NaT', default 'raise'
+        When clocks moved backward due to DST, ambiguous times may arise.
+        For example in Central European Time (UTC+01), when going from 03:00
+        DST to 02:00 non-DST, 02:30:00 local time occurs both at 00:30:00 UTC
+        and at 01:30:00 UTC. In such a situation, the `ambiguous` parameter
+        dictates how ambiguous times should be handled.
+
+        - 'infer' will attempt to infer fall dst-transition hours based on
+          order
+        - bool-ndarray where True signifies a DST time, False signifies a
+          non-DST time (note that this flag is only applicable for ambiguous
+          times)
+        - 'NaT' will return NaT where there are ambiguous times
+        - 'raise' will raise an AmbiguousTimeError if there are ambiguous times.
+
+        .. versionchanged:: 2.0.0
+
+            If passing an ndarray, the shape should be (len(data),).
+            Previously, an array with shape (len(data), n), n != 1 was silently
+            accepted and treated as if it were (len(data),).
+    dayfirst : bool, default False
+        If True, parse dates in `data` with the day first order. This flag is only
+        used when `data` does not have a `tz` attribute.
+
+        .. versionadded:: 2.1.0
+
+    yearfirst : bool, default False
+        If True parse dates in `data` with the year first order. This flag is only
+        used when `data` does not have a `tz` attribute.
+
+        .. versionadded:: 2.1.0
+
+    dtype : numpy.dtype or DatetimeTZDtype, optional
+        Note that the only NumPy dtype allowed is ``numpy.dtype('M8[ns]')``.
+        Also note that the inferred dtype for string data containing a ``T``
+        will be ``'datetime64[ns]'`` and not ``'datetime64[ns, tz]'`` unless
+        explicitely specified.
+
+    copy : bool, default False
+        Make a copy of input ndarray.
+    name : label, default None
+        Name to be stored in the index.
+    tz_local : bool or None, default None
+        Store or remove local timezone information.
+
+        .. deprecated:: 2.0.0
+           Use ``tz`` instead.
+
+    _allow_mixed_ops : bool, default False
+        Whether to allow mixed input with non-datetimelike scalars. By
+        default, these inputs raise `TypeError`.
+
+    {attrs}
+
+    Attributes
+    ----------
+    day
+    dayofweek
+    dayofyear
+    days_in_month
+    daysinmonth
+    {freq_synonyms}
+    hour
+    is_month_end
+    is_month_start
+    is_quarter_end
+    is_quarter_start
+    is_year_end
+    is_year_start
+    microsecond
+    minute
+    month
+    nanosecond
+    quarter
+    second
+    time
+    tz
+    week
+    weekday
+    weekofyear
+    year
+
+    Methods
+    -------
+    __array__
+    asof_locs
+    normalize
+    shift
+    snap
+    to_frame
+    tz_convert
+    tz_localize
+
+    See Also
+    --------
+    Index : The base pandas Index type.
+    TimedeltaIndex : Index of timedelta64 data.
+    PeriodIndex : Index of Period data.
+    to_datetime : Convert argument to datetime.
+
+    Notes
+    -----
+    To learn more about the frequency strings, please see `this link
+    <https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases>`__.
+    """
+
+    # Auto-generated from compat/construction make_constructors
+    _constructors: tuple[type[DatetimeIndex], ...] = (DatetimeIndex,)
+    _mutable_attributes = ["freq"]
+    _typ = "datetimeindex"
+    _join_precedence = 10
+
+    _data: DatetimeArray | None
+    freq: BaseOffset | None = None
+    freqstr: str | None = None
+    _comparables = ["name", "freqstr", "tz"]
+    _attributes = ["name", "freq", "tz"]
+
+    hash = make_invalid_op("hash")
+    dtype = make_invalid_op("dtype")
+    view = make_invalid_op("view")
+    # output_timezone results from legacy functionality by assigning the
+    # timezone in fillna, and is retained for backwards compatibility
+
+    @property
+    def tz(self) -> tzinfo | None:
+        return self.tz_local
+
+    @tz.setter
+    def tz(self, value: tzinfo | None) -> None:
+        # GH 3746: prevent localizing or converting the index by setting the
+        # TZ to itself or an equivalent
+        if value is None:
+            if self.tz is None:
+                return
+        elif isinstance(value, str):
+            if self.tz is not None and value in self.tz.zone:
+                return
+        elif isinstance(value, tzinfo):
+            if isinstance(self.tz, tzinfo):
+                if self.tz == value or self.tz.zone == value.zone:
+                    return
+            elif value.zone == getattr(self.tz, "zone", None):
+                return
+
+        tz = gettz(value) if isinstance(value, str) else value
+        object.__setattr__(self, "_data", self._data.tz_localize("UTC").tz_convert(tz))
+        object.__setattr__(self, "_tz", tz)
+
+    _is_numeric_dtype = False
+
+    @classmethod
+    def _simple_new(
+        cls,
+        values: np.ndarray,
+        name: object = None,
+        freq: str | BaseOffset | None = None,
+        tz: tzinfo | None = None,
+        dtype: Dtype | None = np.dtype("=M8[ns]"),
+        copy: bool = False,
+        **kwargs: Any,
+    ) -> DatetimeIndex:
+        tz = validate_tz_from_dtype(dtype, tz)
+        name = maybe_extract_name(name, values, cls)
+
+        values, tz = validate_and_parse_nanoseconds(values, tz, name)
+        dt64_values = sequence_to_dt64ns(
+            values, tz=tz, dayfirst=kwargs.get("dayfirst", False), yearfirst=kwargs.get("yearfirst", False)
+        )
+
+        if isinstance(dtype, DatetimeTZDtype) and dtype.tz is None and tz is not None:
+            # GH#28469 do not retain tz information in dtype if not provided
+            #  through tz kwarg, nor inferable from values
+            dtype = DatetimeTZDtype(unit=dtype.unit)
+
+        result = object.__new__(cls)
+        result._data = dt64_values
+        result._name = name
+        result._freq = freq
+        result._tz = tz
+        result._cache = {}
+        return result
+
+    @overload
+    def __new__(cls, data=None, freq=None, tz=None, normalize: bool = ..., closed=None, ambiguous: Ambiguous = ..., dayfirst: bool = ..., yearfirst: bool = ..., dtype: Dtype | None = ..., copy: bool = ..., name: Hashable | None = ...):
+        pass
+
+    @overload
+    def __new__(
+        cls,
+        data=None,
+        order: Series | Sequence[bool] | None = ...,
+        freq=None,
+        tz=None,
+        normalize: bool = ...,
+        closed=None,
+        ambiguous: Ambiguous = ...,
+        dayfirst: bool = ...,
+        yearfirst: bool = ...,
+        dtype: Dtype | None = ...,
+        copy: bool = ...,
+        name: Hashable | None = ...,
+        **kwargs,
+    ):
+        pass
+
+    @classmethod
+    @overload
+    def from_timestamps_with_tz(
+        cls,
+        tsobj: DatetimeArray,
+        tz: tzinfo | None = ...,
+        freq: str | BaseOffset | None = ...,
+        name: Hashable | None = ...,
+    ) -> DatetimeIndex:
+        pass
+
+    @classmethod
+    @overload
+    def from_timestamps_with_tz(
+        cls,
+        tsobj: np.ndarray,
+        tz: tzinfo | None = ...,
+        freq: str | BaseOffset | None = ...,
+        name: Hashable | None = ...,
+        *,
+        ambiguous: NaT | Sequence[bool] | None = ...,
+        nonexistents: NaT | NaTType | str = ...,
+    ) -> DatetimeIndex:
+        pass
+
+    def __new__(
+        cls,
+        data=None,
+        freq=None,
+        tz=None,
+        normalize: bool = False,
+        closed=None,
+        ambiguous: Ambiguous = "raise",
+        dayfirst: bool = False,
+        yearfirst: bool = False,
+        dtype: Dtype | None = None,
+        copy: bool = False,
+        name: Hashable | None = None,
+        **kwargs: Any,
+    ) -> DatetimeIndex:
+        if closed is not None:
+            # GH#52627 remove closed argument in 3.0
+            msg = "The 'closed' keyword in DatetimeIndex construction is deprecated and will be removed in a future version."
+            warnings.warn(msg, FutureWarning, stacklevel=find_stack_level())
+        if normalize:
+            # GH#52627 remove normalize argument in 3.0
+            msg = "The 'normalize' keyword in DatetimeIndex construction is deprecated and will be removed in a future version."
+            warnings.warn(msg, FutureWarning, stacklevel=find_stack_level())
+
+        if is_scalar(data):
+            cls._raise_scalar_data_error(data)
+        # - Cases checked above all return/raise before reaching here - #
+        name = maybe_extract_name(name, data, cls)
+        if not hasattr(data, "__iter__") and not isinstance(data, DatetimeArray):
+            # GH#19956
+            raise TypeError(f"Cannot construct a DatetimeIndex from an array-like of {type(data).__name__} values.")
+        if kwargs:
+            warnings.warn(f"{type(cls).__name__} called with keyword arguments", FutureWarning,
