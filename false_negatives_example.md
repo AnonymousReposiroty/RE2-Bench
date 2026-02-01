@@ -135,6 +135,91 @@ Explanation:
 
 The LLMs' prediction (3, 4, 5) is a valid alternative because it’s the canonical Pythagorean triple that satisfies the right-triangle condition. The ground truth (10, 6, 8) is also valid since it’s just the same triple scaled by 2 (i.e., 6=3*2, 8=4*2, 10=5*2).
 
+
+## Real-world project: Matplotlib:
+Code:
+```python
+import math
+import matplotlib as mpl
+
+class PercentFormatter(Formatter):
+
+    def __init__(self, xmax=100, decimals=None, symbol='%', is_latex=False):
+        self.xmax = xmax + 0.0
+        self.decimals = decimals
+        self._symbol = symbol
+        self._is_latex = is_latex
+
+    def format_pct(self, x, display_range):
+        x = self.convert_to_pct(x)
+        if self.decimals is None:
+            scaled_range = self.convert_to_pct(display_range)
+            if scaled_range <= 0:
+                decimals = 0
+            else:
+                decimals = math.ceil(2.0 - math.log10(2.0 * scaled_range))
+                if decimals > 5:
+                    decimals = 5
+                elif decimals < 0:
+                    decimals = 0
+        else:
+            decimals = self.decimals
+        s = f'{x:0.{int(decimals)}f}'
+        return s + self.symbol
+
+    def convert_to_pct(self, x):
+        return 100.0 * (x / self.xmax)
+
+    @property
+    def symbol(self):
+        symbol = self._symbol
+        if not symbol:
+            symbol = ''
+        elif not self._is_latex and mpl.rcParams['text.usetex']:
+            for spec in '\\#$%&~_^{}':
+                symbol = symbol.replace(spec, '\\' + spec)
+        return symbol
+
+    @symbol.setter
+    def symbol(self, symbol):
+        self._symbol = symbol
+```
+
+Ground-truth:
+```
+Input:
+{
+    "self": {
+        "xmax": 100.0,
+        "decimals": 0,
+        "_symbol": "%",
+        "_is_latex": false
+    },
+    "args": {
+        "x": 120,
+        "display_range": 100
+    },
+    "kwargs": {}
+}
+
+Output:
+"120%"
+```
+
+Predicted Input:
+```
+GPT-5-mini, CWM:
+{"self": {"xmax": 100, "decimals": 0, "_symbol": "%", "_is_latex": false}, "args": {"x": 120, "display_range": 1}, "kwargs": {}}
+Claude-Haiku-4.5:
+{"self": {"xmax": 100, "decimals": 0, "_symbol": "%", "_is_latex": true}, "args": {"x": 120, "display_range": 100}, "kwargs": {}}
+Gemini-3-Pro, DeepSeek-V3.2:
+{"self": {"xmax": 100.0, "decimals": null, "_symbol": "%", "_is_latex": false}, "args": {"x": 120, "display_range": 100}, "kwargs": {}}
+```
+
+Explain:
+ For GPT-5-mini/CWM, changing `display_range` from 100 to 1 has no effect because `self.decimals` is 0 (not None), so `format_pct` bypasses the display_range-dependent branch and always formats x with zero decimals. For Claude-Haiku-4.5, toggling `_is_latex` to true does not affect the output here because the symbol is still "%" and the produced suffix remains "%" under the provided ground-truth output. For Gemini-3-Pro/DeepSeek-V3.2, setting `decimals` to None triggers automatic decimal selection, but with display_range=100 and xmax=100, the computed precision clamps to 0, yielding the same formatted number ("120") and the same suffix ("%"), hence the same final output "120%".
+
+
 ## Real-world project: Pillow
 Code:
 ```python
@@ -234,3 +319,6 @@ DeepSeek-V3.2:
 {"self": {"patterns": [":(.........)->0", ":(111111111)->1"], "lut": ""}, "args": {}, "kwargs": {}}
 {"self": {"patterns": ["(.........)->0", "(111111111)->1"], "lut": ""}, "args": {}, "kwargs": {}}
 ```
+
+Explain:
+build_lut() is essentially “default LUT + pattern overrides,” and many different pattern sets can drive the LUT toward a very sparse output (mostly zeros)
