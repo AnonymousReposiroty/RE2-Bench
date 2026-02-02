@@ -12,10 +12,19 @@ export OPEN_ROUTER_KEY="your_key_here"
 
 Run the following commands to create the environment:
 ```
-conda create -n re2-bench python=3.9
+conda create -n re2-bench python=3.12
 pip install -r requirements.txt
 conda activate re2-bench
 ```
+
+We provide a Dockerfile to reproduce the results of RE2-bench.
+Execute the following to create a docker image and execute the container in interactive mode:
+```
+docker build -t re2bench .
+docker run -it re2bench bash
+```
+
+If you are using MacOS with an Apple chip, please consider adding `--platform=linux/amd64` in docker build.
 
 
 ## Reproducing Results
