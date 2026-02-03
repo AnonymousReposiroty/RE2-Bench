@@ -55,53 +55,26 @@ def deepseek_generator(prompt, max_new_tokens):
         return True, ""
 
 
-def openrouter_generator(model, prompt, max_new_tokens, max_retries=10):
-    openrouter_key = os.getenv("OPEN_ROUTER_KEY")
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=openrouter_key,
-    )
-
-    last_exception = None
-    if model == "openai/gpt-5-mini":
-        temperature = 1.0
-    else:
-        temperature = 1.0
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                # max_tokens=max_new_tokens,
-                temperature=temperature
-            )
-
-            # Defensive checks
-            if (
-                completion is None
-                or not hasattr(completion, "choices")
-                or not completion.choices
-                or completion.choices[0].message is None
-                or not completion.choices[0].message.content
-                or not completion.choices[0].message.content.strip()
-            ):
-                print(f"[openrouter_generator] Empty response on attempt {attempt}, retrying...")
-                continue
-
-            return False, completion.choices[0].message.content
-
-        except Exception as e:
-            last_exception = e
-            print(f"[openrouter_generator] Exception on attempt {attempt}: {e}")
-
-    print("[openrouter_generator] Failed after max retries")
-    if last_exception:
-        print(f"Last exception: {last_exception}")
-
-    return True, ""
+def openrouter_generator(model, prompt, max_new_tokens):
+    try:
+        openrouter_key = os.getenv("OPEN_ROUTER_KEY")
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key="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",
+        )
+        completion = client.chat.completions.create(
+            model = model,
+            messages=[
+                {
+                "role": "user",
+                "content": prompt
+                }
+            ]
+        )
+        return False, completion.choices[0].message.content
+    except Exception as e:
+        print(e)
+        return True, ""    
     
 
 def get_incomplete_response(response_folder, tag):
@@ -146,7 +119,7 @@ def llm_inference(model, task, max_tokens):
             elif model == "gemini/gemini-2.5-pro":
                 err_flag, response = openrouter_generator("google/gemini-2.5-pro", prompt, max_new_tokens=max_tokens)
             else:
-                err_flag, response = openrouter_generator(model, prompt, max_new_tokens=max_tokens)
+                err_flag, response = litellm_generator(model, prompt, max_new_tokens=max_tokens)
             
             if not err_flag:
                 with open(response_path, 'w') as f:

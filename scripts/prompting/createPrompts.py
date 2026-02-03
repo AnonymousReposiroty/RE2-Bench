@@ -24,7 +24,7 @@ def create_output_prediction_prompts():
         output_prompts = OutputPredictionPrompt()
         if source == "HumanEval" or source == "cruxeval":
             prompt = output_prompts.humanEvalPrompt(code, entry_point, code_input, output_structure)
-        elif source == "Swebench" or source == "Real":
+        elif source == "Swebench":
             dep_code = read_dependency(sample_id)
             prompt = output_prompts.swebenchPrompt(code, entry_point, code_input, output_structure, dep_code)
         elif source == "Avatar":
@@ -34,7 +34,7 @@ def create_output_prediction_prompts():
             prompt = output_prompts.classevalPrompt(code, entry_point, code_input, output_structure)
         
         ## write prompts to txt files
-        wr_root = f"../prompts_new/output_prediction/{difficulty}"
+        wr_root = f"../prompts/output_prediction/{difficulty}"
         if not os.path.exists(wr_root):
             os.makedirs(wr_root)
         txt_path = os.path.join(wr_root, f"{sample_id}.txt")
@@ -64,7 +64,7 @@ def create_input_prediction_prompts():
         if source == "HumanEval" or source == "cruxeval":
             code_output = json.dumps({"output": code_output}, indent=4)
             prompt = input_prompts.humanEvalPrompt(code, entry_point, code_output, input_structure)
-        elif source == "Swebench" or source == "Real":
+        elif source == "Swebench":
             dep_code = read_dependency(sample_id)
             if not isinstance(code_output, dict):
                 code_output = {"output": code_output}
@@ -82,7 +82,7 @@ def create_input_prediction_prompts():
             prompt = input_prompts.classevalPrompt(code, entry_point, code_output, input_structure)
 
         ## write prompts to txt files
-        wr_root = f"../prompts_new/input_prediction/{difficulty}"
+        wr_root = f"../prompts/input_prediction/{difficulty}"
         if not os.path.exists(wr_root):
             os.makedirs(wr_root)
         txt_path = os.path.join(wr_root, f"{sample_id}.txt")
@@ -108,7 +108,7 @@ def create_output_prediction_wohint_prompts():
         output_prompts = OutputPredictionWoHintPrompt()
         if source == "HumanEval" or source == "cruxeval":
             prompt = output_prompts.humanEvalPrompt(code, entry_point, code_input)
-        elif source == "Swebench" or source == "Real":
+        elif source == "Swebench":
             dep_code = read_dependency(sample_id)
             prompt = output_prompts.swebenchPrompt(code, entry_point, code_input, dep_code)
         elif source == "Avatar":
@@ -118,7 +118,7 @@ def create_output_prediction_wohint_prompts():
             prompt = output_prompts.classevalPrompt(code, entry_point, code_input)
         
         ## write prompts to txt files
-        wr_root = f"../prompts_new/output_prediction_wohint/{difficulty}"
+        wr_root = f"../prompts/output_prediction_wohint/{difficulty}"
         if not os.path.exists(wr_root):
             os.makedirs(wr_root)
         txt_path = os.path.join(wr_root, f"{sample_id}.txt")
@@ -146,7 +146,7 @@ def create_input_prediction_wohint_prompts():
         if source == "HumanEval" or source == "cruxeval":
             code_output = json.dumps({"output": code_output}, indent=4)
             prompt = input_prompts.humanEvalPrompt(code, entry_point, code_output)
-        elif source == "Swebench" or source == "Real":
+        elif source == "Swebench":
             dep_code = read_dependency(sample_id)
             if not isinstance(code_output, dict):
                 code_output = {"output": code_output}
@@ -163,7 +163,7 @@ def create_input_prediction_wohint_prompts():
             prompt = input_prompts.classevalPrompt(code, entry_point, code_output)
 
         ## write prompts to txt files
-        wr_root = f"../prompts_new/input_prediction_wohint/{difficulty}"
+        wr_root = f"../prompts/input_prediction_wohint/{difficulty}"
         if not os.path.exists(wr_root):
             os.makedirs(wr_root)
         txt_path = os.path.join(wr_root, f"{sample_id}.txt")
@@ -191,7 +191,7 @@ def create_output_prediction_wocot_prompts():
         output_prompts = OutputPredictionWoCoTPrompt()
         if source == "HumanEval" or source == "cruxeval":
             prompt = output_prompts.humanEvalPrompt(code, entry_point, code_input, output_structure)
-        elif source == "Swebench" or source == "Real":
+        elif source == "Swebench":
             dep_code = read_dependency(sample_id)
             prompt = output_prompts.swebenchPrompt(code, entry_point, code_input, output_structure, dep_code)
         elif source == "Avatar":
@@ -201,7 +201,7 @@ def create_output_prediction_wocot_prompts():
             prompt = output_prompts.classevalPrompt(code, entry_point, code_input, output_structure)
         
         ## write prompts to txt files
-        wr_root = f"../prompts_new/output_prediction_wocot/{difficulty}"
+        wr_root = f"../prompts/output_prediction_wocot/{difficulty}"
         if not os.path.exists(wr_root):
             os.makedirs(wr_root)
         txt_path = os.path.join(wr_root, f"{sample_id}.txt")
@@ -232,7 +232,7 @@ def create_input_prediction_wocot_prompts():
         if source == "HumanEval" or source == "cruxeval":
             code_output = json.dumps({"output": code_output}, indent=4)
             prompt = input_prompts.humanEvalPrompt(code, entry_point, code_output, input_structure)
-        elif source == "Swebench" or source == "Real":
+        elif source == "Swebench":
             dep_code = read_dependency(sample_id)
             if not isinstance(code_output, dict):
                 code_output = {"output": code_output}
@@ -250,7 +250,7 @@ def create_input_prediction_wocot_prompts():
             prompt = input_prompts.classevalPrompt(code, entry_point, code_output, input_structure)
 
         ## write prompts to txt files
-        wr_root = f"../prompts_new/input_prediction_wocot/{difficulty}"
+        wr_root = f"../prompts/input_prediction_wocot/{difficulty}"
         if not os.path.exists(wr_root):
             os.makedirs(wr_root)
         txt_path = os.path.join(wr_root, f"{sample_id}.txt")
@@ -259,11 +259,10 @@ def create_input_prediction_wocot_prompts():
             
 # create_output_prediction_prompts()
 if __name__ == "__main__":
-    # create_output_prediction_prompts()
-    # create_input_prediction_prompts()
+    create_output_prediction_prompts()
+    create_input_prediction_prompts()
     create_output_prediction_wohint_prompts()
     create_input_prediction_wohint_prompts()
+    
     create_input_prediction_wocot_prompts()
     create_output_prediction_wocot_prompts()
-    
-    

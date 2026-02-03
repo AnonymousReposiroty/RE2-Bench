@@ -127,27 +127,16 @@ def _content_between_output_tags(text: str, tag: str) -> Optional[str]:
     """
     if tag == "output":
         m = re.search(r'\[OUTPUT\](.*?)(?:\[/OUTPUT\]|$)', text, flags=re.DOTALL | re.IGNORECASE)
-        if not m:
-            m = re.search(r'\[/THOUGHT](.*?)(?:\[/OUTPUT\]|$)', text, flags=re.DOTALL | re.IGNORECASE)
     else:
         m = re.search(r'\[INPUT\](.*?)(?:\[/INPUT\]|$)', text, flags=re.DOTALL | re.IGNORECASE)
-        if not m:
-            m = re.search(r'\[/THOUGHT](.*?)(?:\[/INPUT\]|$)', text, flags=re.DOTALL | re.IGNORECASE)
-    
-    
     if not m:
-        if "```" in text:
-            fence = re.search(r"```(.*?)```", text, flags=re.DOTALL)
-            if fence:
-                return fence.group(0)
         return None
-    else:
-        tail = m.group(1)
+    tail = m.group(1)
 
-        fence = re.search(r"```(.*?)```", tail, flags=re.DOTALL)
-        if fence:
-            return fence.group(0)
-        return tail.strip()
+    fence = re.search(r"```(.*?)```", tail, flags=re.DOTALL)
+    if fence:
+        return fence.group(0)
+    return tail.strip()
 
 def extract_output_json_easy(text: str, tag: str) -> dict:
     block = _content_between_output_tags(text, tag)
@@ -157,7 +146,6 @@ def extract_output_json_easy(text: str, tag: str) -> dict:
     doc = _strip_code_fences(block)
     doc = _remove_hash_comments(doc)
     doc = _remove_trailing_commas(doc)
-    
 
     max_passes = 25
     last_error = ""

@@ -62,7 +62,7 @@ def read_sampling_results():
     return samples
 
 def read_code(index, source):
-    if source in ["Swebench", "Avatar", "HumanEval", "Real"]:
+    if source in ["Swebench", "Avatar", "HumanEval"]:
         code_path = f"../dataset/re2-bench/code/{index}.py"
     elif source == "Classeval":
         code_path = f"../dataset/re2-bench/code/{index.split("@")[-1]}.py"
@@ -92,8 +92,6 @@ def read_io(index, source, io_id):
         modified_filename = index.split("@")[-1].replace(".", "@") + ".jsonl"
     elif source == "Avatar":
         modified_filename = index + ".jsonl"
-    elif source == "Real":
-        modified_filename = index + ".jsonl"
     file_path = os.path.join(input_ouput_root, modified_filename)
     if not os.path.exists(file_path):
         print(f"File not found: {file_path}")
@@ -121,13 +119,10 @@ def read_dependency(index):
         dependency_info = json.load(f)
         for k in dependency_info:
             dep_code = dependency_info[k]
-            if ".py@@" in k: ## swebench problems
-                package_name = k.split("@@")[0].removesuffix(".py") + "." + k.split("@@")[1]
-            else:
-                package_name = k
+            package_name = k.split("@@")[0].removesuffix(".py") + "." + k.split("@@")[1]
             dependency_string += package_name + "\n\n"
             dependency_string += dep_code + "\n\n"
-
+            counter += 1
     return dependency_string
     
      

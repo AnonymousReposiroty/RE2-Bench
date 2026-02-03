@@ -4,7 +4,46 @@ import time
 from tqdm import tqdm
 import argparse
 from openai import OpenAI
+from vllm import LLM, SamplingParams
 
+
+def generator_vllm(model, prompt, max_tokens, task, model_name):
+    
+    if model_name == "facebook/cwm" or model_name =="facebook/cwm-pretrain":
+        prompt = build_prompt_cwm(prompt, task)
+        
+    prompts = [prompt]
+    sampling_params = SamplingParams(temperature=1.0, top_p=0.95, max_tokens=max_tokens)
+    try:
+        outputs = model.generate(prompts, sampling_params)
+        output = outputs[0]
+        generate_text = output.outputs[0].text
+    except:
+        generate_text = "Error"
+        return True, generate_text
+
+    return False, generate_text
+
+def build_prompt_cwm(message,task):
+    prompt_content = message.replace("[THOUGHT]","<think>")
+    prompt_content = prompt_content.replace("[/THOUGHT]","</think>")
+    if task == "input_prediction":
+        format_inst = "Always use the tags [INPUT] and [/INPUT] to enclose the predicted input in your external response. DO NOT generate any code or irrelevant text after your response."
+    else:
+        format_inst = "Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response."
+    SYSTEM_PROMPT = (
+    "You are a helpful AI assistant. You always reason before responding, "
+    "using the following format:\n"
+    "<think>\n"
+    "your internal reasoning\n"
+    "</think>\n"
+    "your external response"
+    )
+    return (
+        f"<|system|>\n{SYSTEM_PROMPT}\n</s>\n"
+        f"<|user|>\n{prompt_content}\n {format_inst} </s>\n"
+        f"<|assistant|>\n"
+    )
 
 def openrouter_generator(model, prompt, max_new_tokens, max_retries=5, enable_reasoning=False):
     openrouter_key = os.getenv("OPEN_ROUTER_KEY")
@@ -50,10 +89,11 @@ def openrouter_generator(model, prompt, max_new_tokens, max_retries=5, enable_re
                         ],
                         extra_body={
                             "reasoning": {
-                                "effort": "high",
+                                "effort": "high"
                             }
                         }
                     )
+                # print(completion.choices[0].message.reasoning)
             else:
                 if "gemini" in model:
                     completion = client.chat.completions.create(
@@ -110,14 +150,32 @@ def openrouter_generator(model, prompt, max_new_tokens, max_retries=5, enable_re
 
     return True, ""
 
-
 def llm_inference(model, task, max_tokens, enable_reasoning=False):
     prompt_root = f"../prompts/{task}"
     model_name = model.split("/")[-1]
+    response_root = f"../results/{task}/{model_name}"
     if enable_reasoning:
         response_root = f"../results/{task}/{model_name}-reasoning"
     else:
         response_root = f"../results/{task}/{model_name}"
+        
+    if model == "deepseek-ai/deepseek-coder-33b-instruct":
+        vllm_model = LLM(
+            model=model,
+            max_model_len=35000,
+            download_dir="/u/cliu5/cache_dir", 
+            tensor_parallel_size=4
+        )
+    if model == "facebook/cwm" or model == "facebook/cwm-pretrain":
+        vllm_model = LLM(
+        model=model,
+        dtype="bfloat16",
+        tensor_parallel_size=2, 
+        max_model_len=32768, 
+        download_dir = "/projects/bdsz/cliu5/checkpoints-new",
+        gpu_memory_utilization=0.9 # optional but helpful
+    )
+        
     for difficulty in os.listdir(prompt_root):
         ## difficulty: difficult or medium
         prompt_folder = os.path.join(prompt_root, difficulty)
@@ -138,8 +196,9 @@ def llm_inference(model, task, max_tokens, enable_reasoning=False):
             with open(file_path, 'r') as f:
                 prompt = f.read()
                 
- 
-            err_flag, response = openrouter_generator(model, prompt, max_new_tokens=max_tokens, enable_reasoning=enable_reasoning)
+            if model == "deepseek-ai/deepseek-coder-33b-instruct" or model == "facebook/cwm" or model == "facebook/cwm-pretrain":    
+                err_flag, response = generator_vllm(vllm_model, prompt, max_tokens, task, model)
+            err_flag, response = openrouter_generator(model, prompt, max_new_tokens=max_tokens)
             
             if not err_flag:
                 with open(response_path, 'w') as f:
@@ -159,7 +218,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str)
     parser.add_argument("--task", type=str)
-    parser.add_argument("--max_tokens", type=int, default=4096)
+    parser.add_argument("--max_tokens", type=int, default=2048)
     parser.add_argument("--enable_reasoning", action='store_true')
     
     args = parser.parse_args()

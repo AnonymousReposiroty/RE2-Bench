@@ -5,9 +5,8 @@ from parsing_utils import extract_output_json_easy
 
 
 def parse_results(model, task):
-    
+    root_response = f"../results/{task}/{model}"
     model_id = model.split("/")[-1]
-    root_response = f"../results/{task}/{model_id}"
     jsonl_path = f"../results/summary/{model_id}_{task}.jsonl"
     
     jsonl_writer = open(jsonl_path, 'w')
@@ -20,7 +19,7 @@ def parse_results(model, task):
             response_text = open(file_path, 'r').read()
             parsed_json = {}
             try:
-                if "output_prediction" in task:
+                if task == "output_prediction":
                     result = extract_output_json_easy(response_text, "output")
                 else:
                     result = extract_output_json_easy(response_text, "input")
@@ -28,8 +27,7 @@ def parse_results(model, task):
                     parsed_json = result['json']
                     # print(parsed_json)
                 else:
-                    
-                    print(f"Error in parsing {problem_index} in {model} on {difficulty}, None in results['json']")
+                    print(f"Error in parsing {problem_index} in {model} on {difficulty}")
             except:
                 print(f"Error in parsing {problem_index} in {model} on {difficulty}")
             result = {
