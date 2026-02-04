@@ -66,3 +66,48 @@ This script should take a while to run because it requires ruuning test cases. o
 ### How to evaluate new LLMs
 The inference component supports LLMs served by [OpenRouter](https://openrouter.ai/) and [vLLM](https://docs.vllm.ai/en/latest/).
 Please go to their websites and use correct model IDs.
+
+## Analyze Reasoning Results
+- To visualize the distribution of the correct and incorrect predictions across complexity
+levels and datasets for evaluated LLMs, run the following script. Output figures can be found under `analysis/figs/distribution`.
+```bash
+cd analysis
+python plot_distribution_donuts.py
+```
+
+- To visualize unique and common problems each LLM succeeds in predicting their inputs and outputs, run the following script. Output figures can be found under `analysis/figs/overlap`.
+```bash
+cd analysis
+python plot_overlap_donuts.py
+```
+
+- To investigate the impact of different code constructs on LLMs' performance on input/output prediction, run the following script. Output figures can be found under `analysis/figs/construct`.
+```bash
+cd analysis
+python construct_analysis.py
+```
+
+- To visualize the call chain size distribution between successful and failed reasoning, run the following command. Output figures can be found under `analysis/figs/call_chain`
+```bash
+cd analysis
+python call_chain_analysis.py
+```
+
+- To compare between the performance of reasoning and low-reasoning/non-reasoning LLMs, run the following command. Out figures can be found under `analysis/figs/training`
+```bash
+cd analysis
+python venn_plot_family.py
+```
+
+- To compute the correlation coefficient values  for LLMs’ reasoning performance and complexity metrics, run the following command. This command will generate json files named `correlation_input_prediction.json` and `correlation_output_prediction.json`.
+```bash
+cd analysis
+python correlation_analysis.py
+```
+
+- To visualize the breakdown of the reasoning failure categorization per individual LLM, run the follwoing command, which will generate JSON reports and figures under `analysis/figs/false_prediction_reports`:
+
+```bash
+cd analysis
+python false_prediction_taxonomy.py
+```
