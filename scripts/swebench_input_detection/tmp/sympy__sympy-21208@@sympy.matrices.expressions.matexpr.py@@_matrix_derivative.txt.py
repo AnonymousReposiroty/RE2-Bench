@@ -1,0 +1,1 @@
+from sympy.matrices.expressions.matexpr import _matrix_derivative

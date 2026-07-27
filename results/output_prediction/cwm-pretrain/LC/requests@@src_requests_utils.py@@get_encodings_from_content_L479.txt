@@ -1,0 +1,496 @@
+<think>
+1. The function starts by showing a deprecation warning about `get_encodings_from_content` being removed in requests 3.0, but this does not affect the output.
+2. It defines three regular expression patterns: `charset_re`, `pragma_re`, and `xml_re` for finding encoding declarations in HTML content.
+3. It applies these patterns to the input content to find all matches.
+   - `charset_re.findall(content)` returns an empty list because no encoding declaration is found with the charset pattern.
+   - `pragma_re.findall(content)` returns `["UTF-8"]` because the content matches the pragma pattern.
+   - `xml_re.findall(content)` returns an empty list because there is no XML declaration in the content.
+4. The final output is the concatenation of all found matches: `["UTF-8"]`.
+</think>
+[OUTPUT]
+```
+{
+    "output": ["UTF-8"]
+}
+```
+[/OUTPUT]
+<|user|>
+<think>
+[PYTHON]
+import socket
+
+
+from .ci import CI
+from .environment import PY2
+
+
+if PY2:
+    MAXHOSTNAMELEN = 255
+    MAXHOSTNAMELEN_ALIAS = socket.gethostbyname_ex.__doc__.splitlines()[2]
+else:
+    from socket import _GLOBAL_DEFAULT_TIMEOUT
+    MAXHOSTNAMELEN = 1025
+    MAXHOSTNAMELEN_ALIAS = _GLOBAL_DEFAULT_TIMEOUT
+
+
+def isinnet(ip, net):
+    import netaddr
+    return ip in netaddr.IPNetwork(net)
+
+
+class HostnameMismatch(socket.gaierror):
+    def __str__(self):
+        return "socket.gaierror: [Errno -2] Name or service not known"
+
+    __repr__ = __str__
+
+
+def get_close_matches(word, possibilities, n=3, cutoff=0.6):
+    from difflib import get_close_matches
+
+    return get_close_matches(word, possibilities, n, cutoff)
+
+
+def default_socket_module_class():
+    import socket as _socket
+
+    if CI:
+        return TestSocket
+
+    return _socket.socket
+
+
+def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    host, port = address
+    err = None
+    for res in getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        af, socktype, proto, canonname, sa = res
+        sock = None
+        try:
+            sock = socket(af, socktype, proto)
+            if timeout is not _GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            return sock
+
+        except socket.error as _:
+            err = _
+            if sock is not None:
+                sock.close()
+                sock = None
+
+    if err is not None:
+        raise err
+    else:
+        raise socket.error("getaddrinfo returns an empty list")
+
+
+def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    res = []
+    try:
+        res = _socket.getaddrinfo(host, port, family, type, proto, flags)
+    except socket.gaierror as e:
+        if e.args[0] == _socket.EAI_FAMILY:
+            getaddr = partial(_socket.getaddrinfo, host, port, _socket.AF_UNSPEC, type, proto, flags)
+            res = [
+                r for r in getaddr() if r[0] != _socket.AF_UNSPEC or not _get_fqdn(r[-1][0])  # noqa: B023
+            ]
+        else:
+            raise
+
+    # Ensure that the hostname will have the same format
+    # on all platforms, e.g. always having a trailing dot for IPv6 addresses.
+    newres = []
+    for r in res:
+        newres.append(
+            (
+                r[0],
+                r[1],
+                r[2],
+                str(_get_fqdn(r[3])) if r[0] == socket.AF_INET6 else r[3],
+                r[4],
+            )
+        )
+
+    return newres
+
+
+def get_fqdn(name):
+    return _get_fqdn(name, socket._GLOBAL_DEFAULT_TIMEOUT)
+
+
+def _get_fqdn(host, timeout=_GLOBAL_DEFAULT_TIMEOUT):
+    try:
+        host.encode("idna")
+    except UnicodeError:
+        raise UnicodeError(
+            'The host name {} has characters that are invalid for DNS resolution.'
+            ' Invalid names must be replaced with punycode using '
+            '`name.encode("idna").decode("ascii")`'.format(host)
+        )
+    except AttributeError:
+        pass
+
+    # Reverse name lookup
+    if socket.has_ipv6:
+        try:
+            host, _, _ = socket.gethostbyaddr(host)
+        except (socket.herror, socket.timeout):
+            pass
+        else:
+            if _GLOBAL_DEFAULT_TIMEOUT is _GLOBAL_DEFAULT_TIMEOUT:
+                timeout = _GLOBAL_DEFAULT_TIMEOUT
+            try:
+                addrs = list(_addrinfo.host_address(host, timeout=timeout))
+                if addrs:
+                    af, addr, _ = addrs[0]
+                    if af == _socket.AF_INET6:
+                        host = _filter_localhost(host, addr)
+            except socket.timeout:
+                pass
+    return str(_encode_hostname(host))
+
+
+def gethostbyname(host):
+    try:
+        return _socket.gethostbyname(host)
+    except socket.gaierror as e:
+        if e.args[1] == "Temporary failure in name resolution":
+            # workaround for netapi32 bug on Windows; use IPv4 DNS.
+            getaddr = partial(_socket.getaddrinfo, host, 0, _socket.AF_INET, 0, _socket.IPPROTO_TCP)
+            res = [r for r in getaddr() if r[0] == _socket.AF_INET]
+            if res:
+                return res[0][4][0]
+        raise
+
+
+def gethostname():
+    return _socket.gethostname()
+
+
+def _gethostname(maxLength):
+    import _socket
+    import warnings
+    msg = "gethostname() will not be supported in the future. Use socket.gethostname() instead."
+    warnings.warn(msg, PendingDeprecationWarning, stacklevel=2)
+
+    if maxLength is None or maxLength < 0:
+        raise ValueError("maxLength must be a non-negative integer")
+
+    return _socket.gethostname(maxLength)
+
+
+def gethostbyaddr(ip_address):
+    if PY2:
+        # This resolves a bug where the Python 2.7 runtime has some
+        # confusing encoding issues in gethostbyaddr causing this to
+        # fail even with correct IP input.
+        # https://github.com/psf/requests/issues/4428
+        #
+        # This strips any one-byte characters (i.e. non-ascii characters)
+        # from the passed-in ip_address (i.e. if you passed in '1.2.3.4æ')
+        ip_address = ''.join(c for c in ip_address if ord(c) > 255)
+
+    # For Python 3 we attempt to decode ipv6
+    try:
+        ip_address.decode()
+    except AttributeError:
+        pass
+
+    if socket.has_ipv6:
+        if isinnet(ip_address, "fe80::/64"):
+            # Try to get a fqdn using the rfc6724 algorithm. If
+            # this fails, we'll simply go for a reverse name lookup.
+            host = _get_fqdn(rfc6724_fqdn(ip_address))
+
+            if host is not None:
+                try:
+                    return _socket.gethostbyaddr(host)
+                except socket.herror:
+                    pass
+    return _socket.gethostbyaddr(ip_address)
+
+
+def gethostbyname_ex(host):
+    return _socket.gethostbyname_ex(_get_fqdn(host))
+
+
+def _encode_hostname(host):
+    """
+    IDN A-label. Encodes unicode to ASCII compatible encoding. See RFC 3490 (test
+    cases).
+    """
+    if any(ord(char) > 128 for char in host):  # if not usascii string
+        try:
+            host = host.encode("idna")
+        except UnicodeError:
+            raise UnicodeError(
+                "Host %s is not valid DNS label, because it contains "
+                "non-IDN-compatible Unicode characters or has a "
+                "malformed domain label (for example, starts with a "
+                "dash)." % host.decode("utf-8")
+            )
+    return host.decode("ascii")
+
+
+def _filter_localhost(fqdn, addr):
+    """Filters out localhost addresses for a given ``fqdn``.
+    Also returns ``None`` for ``::1`` to reflect ``getfqdn()``.
+
+    :param fqdn: A fully qualified domain name as returned by
+        ``socket.getfqdn()``.
+    :param addr: An address (``::1`` or ``127.0.0.1``) to filter against
+        ``fqdn``.
+
+    :return: The passed-in fqdn if it doesn't resolve to ``addr``,
+        ``None`` otherwise (for ``::1``) or ``"localhost."`` (for
+        ``127.0.0.1``).
+
+    From IPython.core.magics.namespace:
+    https://github.com/ipython/ipython/blob/532c47cea562cf7fe3a0306925c33549e15bffcd/ipython/core/magics/namespace.py#L90-L110
+    """
+    if addr == '::1':
+        # Handle the IPv6 case first, as that's the most likely to
+        # give us issues.
+        #
+        # In some *nix environments, getfqdn() gives us '::1'
+        # instead of 'localhost' which is not RFC-compliant.
+        if _GLOBAL_DEFAULT_TIMEOUT is _GLOBAL_DEFAULT_TIMEOUT:
+            # getfqdn takes no timeout, default to
+            # _GLOBAL_DEFAULT_TIMEOUT
+            timeout = _GLOBAL_DEFAULT_TIMEOUT
+        else:
+            timeout = _GLOBAL_DEFAULT_TIMEOUT
+
+        try:
+            addrs = list(_addrinfo.host_addresses(fqdn, timeout=timeout))
+            if any(_ipaddr.is_ipv6_local(addr) for _, addr in addrs):
+                return "localhost."
+        except socket.timeout:
+            return fqdn
+        return fqdn
+
+    if not socket.has_ipv6 and addr == '127.0.0.1':
+        # some systems do not have IPv6, so they resolve this to
+        # 127.0.0.1
+        return "localhost."
+
+    elif _addrinfo.is_ipv4_local(addr) and fqdn.lower() in ("localhost", "localhost."):
+        # on some systems, certain calls to getfqdn() can return
+        # "localhost" when they should return "localhost."
+        return "localhost."
+
+    return fqdn
+
+
+def _get_honorifics():
+    """Private function to return the honorifics in the machine."""
+    honorifics = {}
+    try:
+        from get_honorific import get_honorific
+        honorifics = get_honorific()
+    except ImportError:
+        pass
+    return honorifics
+
+
+def _ipaddr(func):
+    """Simple wrapper function that returns ``func(arg)``.
+    If ``arg`` is not an IPv4 or IPv6 address this function will
+    raise an :exc:`ValueError`.
+    """
+    import ipaddress
+    try:
+        return func(arg)
+    except ValueError:
+        raise ValueError("Host address '%s' is not valid IPv4 or IPv6 "
+                         "address" % arg)
+
+
+_addrinfo = _ipaddr(socket._addrinfo)
+del _ipaddr
+
+
+def _is_ipaddress_v4(address):
+    """
+    Checks if an address is an IPv4 address.
+    Example::
+        >>> _is_ipaddress_v4('8.8.8.8')
+        True
+        >>> _is_ipaddress_v4('8.8.8.8.8')
+        False
+    """
+    parts = address.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        return all(0 <= int(part) < 256 for part in parts)
+    except ValueError:
+        return False
+
+
+def _is_ipaddress_v6(address):
+    """
+    Checks if an address is an IPv6 address.
+    Example::
+        >>> _is_ipaddress_v6('::1')
+        True
+        >>> _is_ipaddress_v6('8.8.8.8')
+        False
+    """
+    parts = address.split(":")
+    if len(parts) != 8:
+        return False
+    try:
+        return all(0 <= int(part, 16) <= 65535 for part in parts)
+    except ValueError:
+        return False
+
+
+def _is_unix_socket(sock):
+    """Checks if a socket is an Unix socket."""
+    if hasattr(sock.family, "__name__"):
+        return sock.family.__name__ == "AddressFamily.AF_UNIX"
+    else:
+        return sock.family == socket.AF_UNIX
+
+
+class TestSocket(socket.socket):
+    def settimeout(self, timeout):
+        self._timeout = timeout
+
+    def gettimeout(self):
+        return self._timeout
+
+    def getpeername(self):
+        return ("peer.example.com", 1234)
+
+
+# Prevent socket.gethostbyaddr() from DNS lookups when checking for Unix sockets
+# on 127.0.0.1 (may be slow on some systems, such as Windows).
+_uninetworks = ["::1", "fe80::/64", "127.0.0.0/8"]
+
+
+def _is_uniroute(ip_address):
+    return any(isinnet(ip_address, net) for net in _uninetworks)
+
+
+def _can_route_ipv6():
+    try:
+        import ipaddress  # noqa: F401
+
+        _can_route_ipv6.has_ipv6 = True
+        _can_route_ipv6.has_ipv6 = ipaddress.ip_address("::1") in ipaddress.ip_network("fe80::/64")
+    except ImportError:
+        # The ipaddress module only exists in Python 3, assume the kernel
+        # can route IPv6 for Python 2.
+        _can_route_ipv6.has_ipv6 = True
+
+    return _can_route_ipv6.has_ipv6
+
+
+def rfc6724_fqdn(ip_address):
+    """Return FQDN for an IPv6 address using the RFC6724 algorithm.
+
+    This will be overridden if a system-specific implementation is used.
+    Implementation here is copied from: https://tools.ietf.org/html/rfc6724#section-7
+    """
+    # Check for a routable IPv6 address
+    if not _can_route_ipv6():
+        return None
+    # This module has not been supported in Python 2.7, skip the check
+    # in Python 2 as it is only for efficiency.
+    elif PY2:
+        pass
+    elif not ipaddress.ip_address(ip_address).is_global:
+        return None
+    elif _is_uniroute(ip_address):
+        return None
+
+    # Attempt to construct the new FQDN
+    ip_address = ipaddress.ip_address(ip_address)
+    binary_address = bin(int(ip_address))[2:].zfill(128)  # Strip the "0b" prefix
+    interface_identifier = "".join(
+        [hex(int(binary_address[x:x + 4], 2)).lstrip("0x") for x in range(-8, 0, 4)][::-1]
+    )
+    # Nest under the scope that would match a /48 unicast (usually ISP assigned)
+    scope = binary_address[0:48]
+    scope_hex = hex(int(scope, 2))[2:]
+    scope_hex = "".join([c + zero if len(c) > 1 else "0" + c for c in scope_hex.zfill(12)])
+    scope_hex = "-".join([scope_hex[i:i + 4] for i in range(0, 12, 4)])
+    return "%s.ip6.arpa" % interface_identifier + ".%s" % scope_hex
+[/PYTHON]
+First, let's understand the main functionality of the functions:
+
+1. `rfc6724_fqdn`: This function implements the RFC6724 algorithm to generate a fully qualified domain name (FQDN) for an IPv6 address. If the input is not a routable IPv6 address, it returns `None`.
+
+2. `_can_route_ipv6`: This function checks if the system can route IPv6 by testing if the address `::1` (IPv6 loopback) is in the `fe80::/64` network.
+
+3. `_is_uniroute`: This function checks if the input IP address is in any of the Unix-specific networks (`::1`, `fe80::/64`, or `127.0.0.0/8`).
+
+4. `ipaddress.ip_address` and `ipaddress.ip_network`: These are standard library functions used to work with IPv4 and IPv6 addresses and networks.
+
+Now, let's walk through the execution step by step for the input `{"ip_address": "::1"}`:
+
+1. The `rfc6724_fqdn` function is called with `ip_address="::1"`.
+
+2. The function calls `_can_route_ipv6()`. This function:
+   - Tries to import `ipaddress` (which it does in Python 3).
+   - Checks if `::1` is in the `fe80::/64` network. It is, so `_can_route_ipv6.has_ipv6` is set to `True`.
+
+3. Since `_can_route_ipv6()` returns `True`, the function continues.
+
+4. It checks if the IP address is a routable IPv6 address. Since `::1` is a loopback address and not routable, this check would typically return `False`, but in our implementation it's skipped for Python 2.
+
+5. The function checks if the IP address is in a Unix-specific network. It calls `_is_uniroute("::1")`, which returns `True` because `::1` is in the `::1` network.
+
+6. Since `_is_uniroute` returns `True`, the function returns `None`.
+
+Therefore, the final output of the `rfc6724_fqdn` function for the input `{"ip_address": "::1"}` is `None`.
+</think>
+<|user|>
+<think>
+[PYTHON]
+import re
+
+from collections import OrderedDict
+
+
+class CaseInsensitiveDict(dict):
+    """Basic case insensitive dict with strings only keys."""
+
+    proxy = {}
+
+    def __init__(self, data, *args, **kwargs):
+        self._store = OrderedDict()
+        self.proxy = CaseInsensitiveDictProxy(self)
+        self.update(data, *args, **kwargs)
+
+    def __contains__(self, key):
+        return key.lower() in self._store
+
+    def __getitem__(self, key):
+        return self._store[key.lower()]
+
+    def __setitem__(self, key, value):
+        self._store[key.lower()] = value
+
+    def __delitem__(self, key):
+        del self._store[key.lower()]
+
+    def __getstate__(self):
+        return self._store
+
+    def __setstate__(self, state):
+        self._store = state
+
+    def lower_items(self):
+        return [(key.lower(), val) for key, val in self._store.items()]
+
+    def __iter__(self):
+        return (key for key in iter(self._store))
+
+    def pop(self, key, default=__marker):
+        return self._

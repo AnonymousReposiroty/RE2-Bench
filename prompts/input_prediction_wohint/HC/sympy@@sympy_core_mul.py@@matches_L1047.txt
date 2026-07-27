@@ -1,0 +1,989 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from typing import TYPE_CHECKING, ClassVar, overload, Literal
+from .sympify import sympify
+from .singleton import S
+from .operations import AssocOp, AssocOpDispatcher
+from .logic import fuzzy_not, _fuzzy_group
+from .expr import Expr
+from .kind import KindDispatcher
+
+class Mul(Expr, AssocOp):
+    __slots__ = ()
+    is_Mul = True
+    _args_type = Expr
+    _kind_dispatcher = KindDispatcher('Mul_kind_dispatcher', commutative=True)
+    identity: ClassVar[Expr]
+    if TYPE_CHECKING:
+
+        def __new__(cls, *args: Expr | complex, evaluate: bool=True) -> Expr:
+            ...
+
+        @property
+        def args(self) -> tuple[Expr, ...]:
+            ...
+
+    def matches(self, expr, repl_dict=None, old=False):
+        expr = sympify(expr)
+        if self.is_commutative and expr.is_commutative:
+            return self._matches_commutative(expr, repl_dict, old)
+        elif self.is_commutative is not expr.is_commutative:
+            return None
+        c1, nc1 = self.args_cnc()
+        c2, nc2 = expr.args_cnc()
+        c1, c2 = [c or [1] for c in [c1, c2]]
+        comm_mul_self = Mul(*c1)
+        comm_mul_expr = Mul(*c2)
+        repl_dict = comm_mul_self.matches(comm_mul_expr, repl_dict, old)
+        if not repl_dict and c1 != c2:
+            return None
+        nc1 = Mul._matches_expand_pows(nc1)
+        nc2 = Mul._matches_expand_pows(nc2)
+        repl_dict = Mul._matches_noncomm(nc1, nc2, repl_dict)
+        return repl_dict or None
+    _eval_is_commutative = lambda self: _fuzzy_group((a.is_commutative for a in self.args))
+
+    def args_cnc(self, cset=False, warn=True, split_1=True):
+        args = list(Mul.make_args(self))
+        for i, mi in enumerate(args):
+            if not mi.is_commutative:
+                c = args[:i]
+                nc = args[i:]
+                break
+        else:
+            c = args
+            nc = []
+        if c and split_1 and (c[0].is_Number and c[0].is_extended_negative and (c[0] is not S.NegativeOne)):
+            c[:1] = [S.NegativeOne, -c[0]]
+        if cset:
+            clen = len(c)
+            c = set(c)
+            if clen and warn and (len(c) != clen):
+                raise ValueError('repeated commutative arguments: %s' % [ci for ci in c if list(self.args).count(ci) > 1])
+        return [c, nc]
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.assumptions.getit
+
+def getit(self):
+    try:
+        return self._assumptions[fact]
+    except KeyError:
+        if self._assumptions is self.default_assumptions:
+            self._assumptions = self.default_assumptions.copy()
+        return _ask(fact, self)
+
+sympy.sympy.core.basic.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    if self == expr:
+        if repl_dict is None:
+            return {}
+        return repl_dict.copy()
+
+sympy.sympy.core.basic.__eq__
+
+def __eq__(self, other):
+    """Return a boolean indicating whether a == b on the basis of
+    their symbolic trees.
+
+    This is the same as a.compare(b) == 0 but faster.
+
+    Notes
+    =====
+
+    If a class that overrides __eq__() needs to retain the
+    implementation of __hash__() from a parent class, the
+    interpreter must be told this explicitly by setting
+    __hash__ : Callable[[object], int] = <ParentClass>.__hash__.
+    Otherwise the inheritance of __hash__() will be blocked,
+    just as if __hash__ had been explicitly set to None.
+
+    References
+    ==========
+
+    from https://docs.python.org/dev/reference/datamodel.html#object.__hash__
+    """
+    if self is other:
+        return True
+
+    if not isinstance(other, Basic):
+        return self._do_eq_sympify(other)
+
+    # check for pure number expr
+    if  not (self.is_Number and other.is_Number) and (
+            type(self) != type(other)):
+        return False
+    a, b = self._hashable_content(), other._hashable_content()
+    if a != b:
+        return False
+    # check number *in* an expression
+    for a, b in zip(a, b):
+        if not isinstance(a, Basic):
+            continue
+        if a.is_Number and type(a) != type(b):
+            return False
+    return True
+
+sympy.sympy.core.cache.wrapper
+
+@wraps(func)
+def wrapper(*args, **kwargs):
+    try:
+        retval = cfunc(*args, **kwargs)
+    except TypeError as e:
+        if not e.args or not e.args[0].startswith('unhashable type:'):
+            raise
+        retval = func(*args, **kwargs)
+    return retval
+
+sympy.sympy.core.expr.args_cnc
+
+def args_cnc(self, cset=False, warn=True, split_1=True):
+    """Return [commutative factors, non-commutative factors] of self.
+
+    Explanation
+    ===========
+
+    self is treated as a Mul and the ordering of the factors is maintained.
+    If ``cset`` is True the commutative factors will be returned in a set.
+    If there were repeated factors (as may happen with an unevaluated Mul)
+    then an error will be raised unless it is explicitly suppressed by
+    setting ``warn`` to False.
+
+    Note: -1 is always separated from a Number unless split_1 is False.
+
+    Examples
+    ========
+
+    >>> from sympy import symbols, oo
+    >>> A, B = symbols('A B', commutative=0)
+    >>> x, y = symbols('x y')
+    >>> (-2*x*y).args_cnc()
+    [[-1, 2, x, y], []]
+    >>> (-2.5*x).args_cnc()
+    [[-1, 2.5, x], []]
+    >>> (-2*x*A*B*y).args_cnc()
+    [[-1, 2, x, y], [A, B]]
+    >>> (-2*x*A*B*y).args_cnc(split_1=False)
+    [[-2, x, y], [A, B]]
+    >>> (-2*x*y).args_cnc(cset=True)
+    [{-1, 2, x, y}, []]
+
+    The arg is always treated as a Mul:
+
+    >>> (-2 + x + A).args_cnc()
+    [[], [x - 2 + A]]
+    >>> (-oo).args_cnc() # -oo is a singleton
+    [[-1, oo], []]
+    """
+    args = list(Mul.make_args(self))
+
+    for i, mi in enumerate(args):
+        if not mi.is_commutative:
+            c = args[:i]
+            nc = args[i:]
+            break
+    else:
+        c = args
+        nc = []
+
+    if c and split_1 and (
+        c[0].is_Number and
+        c[0].is_extended_negative and
+            c[0] is not S.NegativeOne):
+        c[:1] = [S.NegativeOne, -c[0]]
+
+    if cset:
+        clen = len(c)
+        c = set(c)
+        if clen and warn and len(c) != clen:
+            raise ValueError('repeated commutative arguments: %s' %
+                             [ci for ci in c if list(self.args).count(ci) > 1])
+    return [c, nc]
+
+sympy.sympy.core.mul.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    expr = sympify(expr)
+    if self.is_commutative and expr.is_commutative:
+        return self._matches_commutative(expr, repl_dict, old)
+    elif self.is_commutative is not expr.is_commutative:
+        return None
+
+    # Proceed only if both both expressions are non-commutative
+    c1, nc1 = self.args_cnc()
+    c2, nc2 = expr.args_cnc()
+    c1, c2 = [c or [1] for c in [c1, c2]]
+
+    # TODO: Should these be self.func?
+    comm_mul_self = Mul(*c1)
+    comm_mul_expr = Mul(*c2)
+
+    repl_dict = comm_mul_self.matches(comm_mul_expr, repl_dict, old)
+
+    # If the commutative arguments didn't match and aren't equal, then
+    # then the expression as a whole doesn't match
+    if not repl_dict and c1 != c2:
+        return None
+
+    # Now match the non-commutative arguments, expanding powers to
+    # multiplications
+    nc1 = Mul._matches_expand_pows(nc1)
+    nc2 = Mul._matches_expand_pows(nc2)
+
+    repl_dict = Mul._matches_noncomm(nc1, nc2, repl_dict)
+
+    return repl_dict or None
+
+sympy.sympy.core.mul.<listcomp>
+
+c1, c2 = [c or [1] for c in [c1, c2]]
+
+# TODO: Should these be self.func?
+
+
+sympy.sympy.core.mul._matches_expand_pows
+
+@staticmethod
+def _matches_expand_pows(arg_list):
+    new_args = []
+    for arg in arg_list:
+        if arg.is_Pow and arg.exp > 0:
+            new_args.extend([arg.base] * arg.exp)
+        else:
+            new_args.append(arg)
+    return new_args
+
+sympy.sympy.core.mul._matches_noncomm
+
+@staticmethod
+def _matches_noncomm(nodes, targets, repl_dict=None):
+    """Non-commutative multiplication matcher.
+
+    `nodes` is a list of symbols within the matcher multiplication
+    expression, while `targets` is a list of arguments in the
+    multiplication expression being matched against.
+    """
+    if repl_dict is None:
+        repl_dict = {}
+    else:
+        repl_dict = repl_dict.copy()
+
+    # List of possible future states to be considered
+    agenda = []
+    # The current matching state, storing index in nodes and targets
+    state = (0, 0)
+    node_ind, target_ind = state
+    # Mapping between wildcard indices and the index ranges they match
+    wildcard_dict = {}
+
+    while target_ind < len(targets) and node_ind < len(nodes):
+        node = nodes[node_ind]
+
+        if node.is_Wild:
+            Mul._matches_add_wildcard(wildcard_dict, state)
+
+        states_matches = Mul._matches_new_states(wildcard_dict, state,
+                                                 nodes, targets)
+        if states_matches:
+            new_states, new_matches = states_matches
+            agenda.extend(new_states)
+            if new_matches:
+                for match in new_matches:
+                    repl_dict[match] = new_matches[match]
+        if not agenda:
+            return None
+        else:
+            state = agenda.pop()
+            node_ind, target_ind = state
+
+    return repl_dict
+
+sympy.sympy.core.operations._matches_commutative
+
+def _matches_commutative(self, expr, repl_dict=None, old=False):
+    """
+    Matches Add/Mul "pattern" to an expression "expr".
+
+    repl_dict ... a dictionary of (wild: expression) pairs, that get
+                  returned with the results
+
+    This function is the main workhorse for Add/Mul.
+
+    Examples
+    ========
+
+    >>> from sympy import symbols, Wild, sin
+    >>> a = Wild("a")
+    >>> b = Wild("b")
+    >>> c = Wild("c")
+    >>> x, y, z = symbols("x y z")
+    >>> (a+sin(b)*c)._matches_commutative(x+sin(y)*z)
+    {a_: x, b_: y, c_: z}
+
+    In the example above, "a+sin(b)*c" is the pattern, and "x+sin(y)*z" is
+    the expression.
+
+    The repl_dict contains parts that were already matched. For example
+    here:
+
+    >>> (x+sin(b)*c)._matches_commutative(x+sin(y)*z, repl_dict={a: x})
+    {a_: x, b_: y, c_: z}
+
+    the only function of the repl_dict is to return it in the
+    result, e.g. if you omit it:
+
+    >>> (x+sin(b)*c)._matches_commutative(x+sin(y)*z)
+    {b_: y, c_: z}
+
+    the "a: x" is not returned in the result, but otherwise it is
+    equivalent.
+
+    """
+    from .function import _coeff_isneg
+    # make sure expr is Expr if pattern is Expr
+    from .expr import Expr
+    if isinstance(self, Expr) and not isinstance(expr, Expr):
+        return None
+
+    if repl_dict is None:
+        repl_dict = {}
+
+    # handle simple patterns
+    if self == expr:
+        return repl_dict
+
+    d = self._matches_simple(expr, repl_dict)
+    if d is not None:
+        return d
+
+    # eliminate exact part from pattern: (2+a+w1+w2).matches(expr) -> (w1+w2).matches(expr-a-2)
+    from .function import WildFunction
+    from .symbol import Wild
+    wild_part, exact_part = sift(self.args, lambda p:
+        p.has(Wild, WildFunction) and not expr.has(p),
+        binary=True)
+    if not exact_part:
+        wild_part = list(ordered(wild_part))
+        if self.is_Add:
+            # in addition to normal ordered keys, impose
+            # sorting on Muls with leading Number to put
+            # them in order
+            wild_part = sorted(wild_part, key=lambda x:
+                x.args[0] if x.is_Mul and x.args[0].is_Number else
+                0)
+    else:
+        exact = self._new_rawargs(*exact_part)
+        free = expr.free_symbols
+        if free and (exact.free_symbols - free):
+            # there are symbols in the exact part that are not
+            # in the expr; but if there are no free symbols, let
+            # the matching continue
+            return None
+        newexpr = self._combine_inverse(expr, exact)
+        if not old and (expr.is_Add or expr.is_Mul):
+            check = newexpr
+            if _coeff_isneg(check):
+                check = -check
+            if check.count_ops() > expr.count_ops():
+                return None
+        newpattern = self._new_rawargs(*wild_part)
+        return newpattern.matches(newexpr, repl_dict)
+
+    # now to real work ;)
+    i = 0
+    saw = set()
+    while expr not in saw:
+        saw.add(expr)
+        args = tuple(ordered(self.make_args(expr)))
+        if self.is_Add and expr.is_Add:
+            # in addition to normal ordered keys, impose
+            # sorting on Muls with leading Number to put
+            # them in order
+            args = tuple(sorted(args, key=lambda x:
+                x.args[0] if x.is_Mul and x.args[0].is_Number else
+                0))
+        expr_list = (self.identity,) + args
+        for last_op in reversed(expr_list):
+            for w in reversed(wild_part):
+                d1 = w.matches(last_op, repl_dict)
+                if d1 is not None:
+                    d2 = self.xreplace(d1).matches(expr, d1)
+                    if d2 is not None:
+                        return d2
+
+        if i == 0:
+            if self.is_Mul:
+                # make e**i look like Mul
+                if expr.is_Pow and expr.exp.is_Integer:
+                    from .mul import Mul
+                    if expr.exp > 0:
+                        expr = Mul(*[expr.base, expr.base**(expr.exp - 1)], evaluate=False)
+                    else:
+                        expr = Mul(*[1/expr.base, expr.base**(expr.exp + 1)], evaluate=False)
+                    i += 1
+                    continue
+
+            elif self.is_Add:
+                # make i*e look like Add
+                c, e = expr.as_coeff_Mul()
+                if abs(c) > 1:
+                    from .add import Add
+                    if c > 0:
+                        expr = Add(*[e, (c - 1)*e], evaluate=False)
+                    else:
+                        expr = Add(*[-e, (c + 1)*e], evaluate=False)
+                    i += 1
+                    continue
+
+                # try collection on non-Wild symbols
+                from sympy.simplify.radsimp import collect
+                was = expr
+                did = set()
+                for w in reversed(wild_part):
+                    c, w = w.as_coeff_mul(Wild)
+                    free = c.free_symbols - did
+                    if free:
+                        did.update(free)
+                        expr = collect(expr, free)
+                if expr != was:
+                    i += 0
+                    continue
+
+            break  # if we didn't continue, there is nothing more to do
+
+    return
+
+sympy.sympy.core.symbol.matches
+
+def matches(self, expr, repl_dict=None, old=False):
+    if any(expr.has(x) for x in self.exclude):
+        return None
+    if not all(f(expr) for f in self.properties):
+        return None
+    if repl_dict is None:
+        repl_dict = {}
+    else:
+        repl_dict = repl_dict.copy()
+    repl_dict[self] = expr
+    return repl_dict
+
+sympy.sympy.core.sympify.sympify
+
+def sympify(a, locals=None, convert_xor=True, strict=False, rational=False,
+        evaluate=None):
+    """
+    Converts an arbitrary expression to a type that can be used inside SymPy.
+
+    Explanation
+    ===========
+
+    It will convert Python ints into instances of :class:`~.Integer`, floats
+    into instances of :class:`~.Float`, etc. It is also able to coerce
+    symbolic expressions which inherit from :class:`~.Basic`. This can be
+    useful in cooperation with SAGE.
+
+    .. warning::
+        Note that this function uses ``eval``, and thus shouldn't be used on
+        unsanitized input.
+
+    If the argument is already a type that SymPy understands, it will do
+    nothing but return that value. This can be used at the beginning of a
+    function to ensure you are working with the correct type.
+
+    Examples
+    ========
+
+    >>> from sympy import sympify
+
+    >>> sympify(2).is_integer
+    True
+    >>> sympify(2).is_real
+    True
+
+    >>> sympify(2.0).is_real
+    True
+    >>> sympify("2.0").is_real
+    True
+    >>> sympify("2e-45").is_real
+    True
+
+    If the expression could not be converted, a SympifyError is raised.
+
+    >>> sympify("x***2")
+    Traceback (most recent call last):
+    ...
+    SympifyError: SympifyError: "could not parse 'x***2'"
+
+    When attempting to parse non-Python syntax using ``sympify``, it raises a
+    ``SympifyError``:
+
+    >>> sympify("2x+1")
+    Traceback (most recent call last):
+    ...
+    SympifyError: Sympify of expression 'could not parse '2x+1'' failed
+
+    To parse non-Python syntax, use ``parse_expr`` from ``sympy.parsing.sympy_parser``.
+
+    >>> from sympy.parsing.sympy_parser import parse_expr
+    >>> parse_expr("2x+1", transformations="all")
+    2*x + 1
+
+    For more details about ``transformations``: see :func:`~sympy.parsing.sympy_parser.parse_expr`
+
+    Locals
+    ------
+
+    The sympification happens with access to everything that is loaded
+    by ``from sympy import *``; anything used in a string that is not
+    defined by that import will be converted to a symbol. In the following,
+    the ``bitcount`` function is treated as a symbol and the ``O`` is
+    interpreted as the :class:`~.Order` object (used with series) and it raises
+    an error when used improperly:
+
+    >>> s = 'bitcount(42)'
+    >>> sympify(s)
+    bitcount(42)
+    >>> sympify("O(x)")
+    O(x)
+    >>> sympify("O + 1")
+    Traceback (most recent call last):
+    ...
+    TypeError: unbound method...
+
+    In order to have ``bitcount`` be recognized it can be defined in a
+    namespace dictionary and passed as locals:
+
+    >>> ns = {}
+    >>> exec('bitcount = lambda n: int(n).bit_length()', ns)
+    >>> sympify(s, locals=ns)
+    6
+
+    In order to have the ``O`` interpreted as a Symbol, identify it as such
+    in the namespace dictionary. This can be done in a variety of ways; all
+    three of the following are possibilities:
+
+    >>> from sympy import Symbol
+    >>> ns["O"] = Symbol("O")  # method 1
+    >>> exec('from sympy.abc import O', ns)  # method 2
+    >>> ns.update(dict(O=Symbol("O")))  # method 3
+    >>> sympify("O + 1", locals=ns)
+    O + 1
+
+    If you want *all* single-letter and Greek-letter variables to be symbols
+    then you can use the clashing-symbols dictionaries that have been defined
+    there as private variables: ``_clash1`` (single-letter variables),
+    ``_clash2`` (the multi-letter Greek names) or ``_clash`` (both single and
+    multi-letter names that are defined in ``abc``).
+
+    >>> from sympy.abc import _clash1
+    >>> set(_clash1)  # if this fails, see issue #23903
+    {'E', 'I', 'N', 'O', 'Q', 'S'}
+    >>> sympify('I & Q', _clash1)
+    I & Q
+
+    Strict
+    ------
+
+    If the option ``strict`` is set to ``True``, only the types for which an
+    explicit conversion has been defined are converted. In the other
+    cases, a SympifyError is raised.
+
+    >>> print(sympify(None))
+    None
+    >>> sympify(None, strict=True)
+    Traceback (most recent call last):
+    ...
+    SympifyError: SympifyError: None
+
+    .. deprecated:: 1.6
+
+       ``sympify(obj)`` automatically falls back to ``str(obj)`` when all
+       other conversion methods fail, but this is deprecated. ``strict=True``
+       will disable this deprecated behavior. See
+       :ref:`deprecated-sympify-string-fallback`.
+
+    Evaluation
+    ----------
+
+    If the option ``evaluate`` is set to ``False``, then arithmetic and
+    operators will be converted into their SymPy equivalents and the
+    ``evaluate=False`` option will be added. Nested ``Add`` or ``Mul`` will
+    be denested first. This is done via an AST transformation that replaces
+    operators with their SymPy equivalents, so if an operand redefines any
+    of those operations, the redefined operators will not be used. If
+    argument a is not a string, the mathematical expression is evaluated
+    before being passed to sympify, so adding ``evaluate=False`` will still
+    return the evaluated result of expression.
+
+    >>> sympify('2**2 / 3 + 5')
+    19/3
+    >>> sympify('2**2 / 3 + 5', evaluate=False)
+    2**2/3 + 5
+    >>> sympify('4/2+7', evaluate=True)
+    9
+    >>> sympify('4/2+7', evaluate=False)
+    4/2 + 7
+    >>> sympify(4/2+7, evaluate=False)
+    9.00000000000000
+
+    Extending
+    ---------
+
+    To extend ``sympify`` to convert custom objects (not derived from ``Basic``),
+    just define a ``_sympy_`` method to your class. You can do that even to
+    classes that you do not own by subclassing or adding the method at runtime.
+
+    >>> from sympy import Matrix
+    >>> class MyList1(object):
+    ...     def __iter__(self):
+    ...         yield 1
+    ...         yield 2
+    ...         return
+    ...     def __getitem__(self, i): return list(self)[i]
+    ...     def _sympy_(self): return Matrix(self)
+    >>> sympify(MyList1())
+    Matrix([
+    [1],
+    [2]])
+
+    If you do not have control over the class definition you could also use the
+    ``converter`` global dictionary. The key is the class and the value is a
+    function that takes a single argument and returns the desired SymPy
+    object, e.g. ``converter[MyList] = lambda x: Matrix(x)``.
+
+    >>> class MyList2(object):   # XXX Do not do this if you control the class!
+    ...     def __iter__(self):  #     Use _sympy_!
+    ...         yield 1
+    ...         yield 2
+    ...         return
+    ...     def __getitem__(self, i): return list(self)[i]
+    >>> from sympy.core.sympify import converter
+    >>> converter[MyList2] = lambda x: Matrix(x)
+    >>> sympify(MyList2())
+    Matrix([
+    [1],
+    [2]])
+
+    Notes
+    =====
+
+    The keywords ``rational`` and ``convert_xor`` are only used
+    when the input is a string.
+
+    convert_xor
+    -----------
+
+    >>> sympify('x^y',convert_xor=True)
+    x**y
+    >>> sympify('x^y',convert_xor=False)
+    x ^ y
+
+    rational
+    --------
+
+    >>> sympify('0.1',rational=False)
+    0.1
+    >>> sympify('0.1',rational=True)
+    1/10
+
+    Sometimes autosimplification during sympification results in expressions
+    that are very different in structure than what was entered. Until such
+    autosimplification is no longer done, the ``kernS`` function might be of
+    some use. In the example below you can see how an expression reduces to
+    $-1$ by autosimplification, but does not do so when ``kernS`` is used.
+
+    >>> from sympy.core.sympify import kernS
+    >>> from sympy.abc import x
+    >>> -2*(-(-x + 1/x)/(x*(x - 1/x)**2) - 1/(x*(x - 1/x))) - 1
+    -1
+    >>> s = '-2*(-(-x + 1/x)/(x*(x - 1/x)**2) - 1/(x*(x - 1/x))) - 1'
+    >>> sympify(s)
+    -1
+    >>> kernS(s)
+    -2*(-(-x + 1/x)/(x*(x - 1/x)**2) - 1/(x*(x - 1/x))) - 1
+
+    Parameters
+    ==========
+
+    a :
+        - any object defined in SymPy
+        - standard numeric Python types: ``int``, ``long``, ``float``, ``Decimal``
+        - strings (like ``"0.09"``, ``"2e-19"`` or ``'sin(x)'``)
+        - booleans, including ``None`` (will leave ``None`` unchanged)
+        - dicts, lists, sets or tuples containing any of the above
+
+    convert_xor : bool, optional
+        If true, treats ``^`` as exponentiation.
+        If False, treats ``^`` as XOR itself.
+        Used only when input is a string.
+
+    locals : any object defined in SymPy, optional
+        In order to have strings be recognized it can be imported
+        into a namespace dictionary and passed as locals.
+
+    strict : bool, optional
+        If the option strict is set to ``True``, only the types for which
+        an explicit conversion has been defined are converted. In the
+        other cases, a SympifyError is raised.
+
+    rational : bool, optional
+        If ``True``, converts floats into :class:`~.Rational`.
+        If ``False``, it lets floats remain as it is.
+        Used only when input is a string.
+
+    evaluate : bool, optional
+        If False, then arithmetic and operators will be converted into
+        their SymPy equivalents. If True the expression will be evaluated
+        and the result will be returned.
+
+    """
+    # XXX: If a is a Basic subclass rather than instance (e.g. sin rather than
+    # sin(x)) then a.__sympy__ will be the property. Only on the instance will
+    # a.__sympy__ give the *value* of the property (True). Since sympify(sin)
+    # was used for a long time we allow it to pass. However if strict=True as
+    # is the case in internal calls to _sympify then we only allow
+    # is_sympy=True.
+    #
+    # https://github.com/sympy/sympy/issues/20124
+    is_sympy = getattr(a, '__sympy__', None)
+    if is_sympy is True:
+        return a
+    elif is_sympy is not None:
+        if not strict:
+            return a
+        else:
+            raise SympifyError(a)
+
+    if isinstance(a, CantSympify):
+        raise SympifyError(a)
+
+    cls = getattr(a, "__class__", None)
+
+    #Check if there exists a converter for any of the types in the mro
+    for superclass in getmro(cls):
+        #First check for user defined converters
+        conv = _external_converter.get(superclass)
+        if conv is None:
+            #if none exists, check for SymPy defined converters
+            conv = _sympy_converter.get(superclass)
+        if conv is not None:
+            return conv(a)
+
+    if cls is type(None):
+        if strict:
+            raise SympifyError(a)
+        else:
+            return a
+
+    if evaluate is None:
+        evaluate = global_parameters.evaluate
+
+    # Support for basic numpy datatypes
+    if _is_numpy_instance(a):
+        import numpy as np
+        if np.isscalar(a):
+            return _convert_numpy_types(a, locals=locals,
+                convert_xor=convert_xor, strict=strict, rational=rational,
+                evaluate=evaluate)
+
+    _sympy_ = getattr(a, "_sympy_", None)
+    if _sympy_ is not None:
+        return a._sympy_()
+
+    if not strict:
+        # Put numpy array conversion _before_ float/int, see
+        # <https://github.com/sympy/sympy/issues/13924>.
+        flat = getattr(a, "flat", None)
+        if flat is not None:
+            shape = getattr(a, "shape", None)
+            if shape is not None:
+                from sympy.tensor.array import Array
+                return Array(a.flat, a.shape)  # works with e.g. NumPy arrays
+
+    if not isinstance(a, str):
+        if _is_numpy_instance(a):
+            import numpy as np
+            assert not isinstance(a, np.number)
+            if isinstance(a, np.ndarray):
+                # Scalar arrays (those with zero dimensions) have sympify
+                # called on the scalar element.
+                if a.ndim == 0:
+                    try:
+                        return sympify(a.item(),
+                                       locals=locals,
+                                       convert_xor=convert_xor,
+                                       strict=strict,
+                                       rational=rational,
+                                       evaluate=evaluate)
+                    except SympifyError:
+                        pass
+        elif hasattr(a, '__float__'):
+            # float and int can coerce size-one numpy arrays to their lone
+            # element.  See issue https://github.com/numpy/numpy/issues/10404.
+            return sympify(float(a))
+        elif hasattr(a, '__int__'):
+            return sympify(int(a))
+
+    if strict:
+        raise SympifyError(a)
+
+    if iterable(a):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor,
+                rational=rational, evaluate=evaluate) for x in a])
+        except TypeError:
+            # Not all iterables are rebuildable with their type.
+            pass
+
+    if not isinstance(a, str):
+        raise SympifyError('cannot sympify object of type %r' % type(a))
+
+    from sympy.parsing.sympy_parser import (parse_expr, TokenError,
+                                            standard_transformations)
+    from sympy.parsing.sympy_parser import convert_xor as t_convert_xor
+    from sympy.parsing.sympy_parser import rationalize as t_rationalize
+
+    transformations = standard_transformations
+
+    if rational:
+        transformations += (t_rationalize,)
+    if convert_xor:
+        transformations += (t_convert_xor,)
+
+    try:
+        a = a.replace('\n', '')
+        expr = parse_expr(a, local_dict=locals, transformations=transformations, evaluate=evaluate)
+    except (TokenError, SyntaxError) as exc:
+        raise SympifyError('could not parse %r' % a, exc)
+
+    return expr
+
+
+[/PYTHON]
+What will be the input of `matches`, given the following input:
+[OUTPUT]
+```
+{
+    "a_": "1",
+    "m_": "1",
+    "n_": "0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

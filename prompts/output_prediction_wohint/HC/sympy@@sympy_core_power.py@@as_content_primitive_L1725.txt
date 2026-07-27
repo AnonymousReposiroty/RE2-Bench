@@ -1,0 +1,740 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. You need to predict output variable values, and print output between [OUTPUT] and [/OUTPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[PYTHON]
+from typing import Callable, TYPE_CHECKING
+from .singleton import S
+from .expr import Expr
+from .numbers import Integer, Rational
+from .mul import Mul, _keep_coeff
+from sympy.functions.elementary.complexes import conjugate as c
+
+class Pow(Expr):
+    is_Pow = True
+    __slots__ = ('is_commutative',)
+    if TYPE_CHECKING:
+
+        @property
+        def args(self) -> tuple[Expr, Expr]:
+            ...
+
+    def as_base_exp(self):
+        b, e = self.args
+        if b.is_Rational and b.p == 1 and (b.q != 1):
+            return (Integer(b.q), -e)
+        return (b, e)
+
+    def as_content_primitive(self, radical=False, clear=True):
+        b, e = self.as_base_exp()
+        b = _keep_coeff(*b.as_content_primitive(radical=radical, clear=clear))
+        ce, pe = e.as_content_primitive(radical=radical, clear=clear)
+        if b.is_Rational:
+            h, t = pe.as_coeff_Add()
+            if h.is_Rational and b != S.Zero:
+                ceh = ce * h
+                c = self.func(b, ceh)
+                r = S.Zero
+                if not c.is_Rational:
+                    iceh, r = divmod(ceh.p, ceh.q)
+                    c = self.func(b, iceh)
+                return (c, self.func(b, _keep_coeff(ce, t + r / ce / ceh.q)))
+        e = _keep_coeff(ce, pe)
+        if e.is_Rational and b.is_Mul:
+            h, t = b.as_content_primitive(radical=radical, clear=clear)
+            c, m = self.func(h, e).as_coeff_Mul()
+            m, me = m.as_base_exp()
+            if m is S.One or me == e:
+                return (c, self.func(_keep_coeff(m, t), e))
+        return (S.One, self.func(b, e))
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.add.as_content_primitive
+
+def as_content_primitive(self, radical=False, clear=True):
+    """Return the tuple (R, self/R) where R is the positive Rational
+    extracted from self. If radical is True (default is False) then
+    common radicals will be removed and included as a factor of the
+    primitive expression.
+
+    Examples
+    ========
+
+    >>> from sympy import sqrt
+    >>> (3 + 3*sqrt(2)).as_content_primitive()
+    (3, 1 + sqrt(2))
+
+    Radical content can also be factored out of the primitive:
+
+    >>> (2*sqrt(2) + 4*sqrt(10)).as_content_primitive(radical=True)
+    (2, sqrt(2)*(1 + 2*sqrt(5)))
+
+    See docstring of Expr.as_content_primitive for more examples.
+    """
+    con, prim = self.func(*[_keep_coeff(*a.as_content_primitive(
+        radical=radical, clear=clear)) for a in self.args]).primitive()
+    if not clear and not con.is_Integer and prim.is_Add:
+        con, d = con.as_numer_denom()
+        _p = prim/d
+        if any(a.as_coeff_Mul()[0].is_Integer for a in _p.args):
+            prim = _p
+        else:
+            con /= d
+    if radical and prim.is_Add:
+        # look for common radicals that can be removed
+        args = prim.args
+        rads = []
+        common_q = None
+        for m in args:
+            term_rads = defaultdict(list)
+            for ai in Mul.make_args(m):
+                if ai.is_Pow:
+                    b, e = ai.as_base_exp()
+                    if e.is_Rational and b.is_Integer:
+                        term_rads[e.q].append(abs(int(b))**e.p)
+            if not term_rads:
+                break
+            if common_q is None:
+                common_q = set(term_rads.keys())
+            else:
+                common_q = common_q & set(term_rads.keys())
+                if not common_q:
+                    break
+            rads.append(term_rads)
+        else:
+            # process rads
+            # keep only those in common_q
+            for r in rads:
+                for q in list(r.keys()):
+                    if q not in common_q:
+                        r.pop(q)
+                for q in r:
+                    r[q] = Mul(*r[q])
+            # find the gcd of bases for each q
+            G = []
+            for q in common_q:
+                g = reduce(igcd, [r[q] for r in rads], 0)
+                if g != 1:
+                    G.append(g**Rational(1, q))
+            if G:
+                G = Mul(*G)
+                args = [ai/G for ai in args]
+                prim = G*prim.func(*args)
+
+    return con, prim
+
+sympy.sympy.core.add.as_coeff_Add
+
+def as_coeff_Add(self, rational=False, deps=None) -> tuple[Number, Expr]:
+    """
+    Efficiently extract the coefficient of a summation.
+    """
+    coeff, args = self.args[0], self.args[1:]
+
+    if coeff.is_Number and not rational or coeff.is_Rational:
+        return coeff, self._new_rawargs(*args) # type: ignore
+    return S.Zero, self
+
+sympy.sympy.core.basic.func
+
+@property
+def func(self):
+    """
+    The top-level function in an expression.
+
+    The following should hold for all objects::
+
+        >> x == x.func(*x.args)
+
+    Examples
+    ========
+
+    >>> from sympy.abc import x
+    >>> a = 2*x
+    >>> a.func
+    <class 'sympy.core.mul.Mul'>
+    >>> a.args
+    (2, x)
+    >>> a.func(*a.args)
+    2*x
+    >>> a == a.func(*a.args)
+    True
+
+    """
+    return self.__class__
+
+sympy.sympy.core.cache.wrapper
+
+@wraps(func)
+def wrapper(*args, **kwargs):
+    try:
+        retval = cfunc(*args, **kwargs)
+    except TypeError as e:
+        if not e.args or not e.args[0].startswith('unhashable type:'):
+            raise
+        retval = func(*args, **kwargs)
+    return retval
+
+sympy.sympy.core.decorators._func
+
+@wraps(func)
+def _func(self, other):
+    # XXX: The check for _op_priority here should be removed. It is
+    # needed to stop mutable matrices from being sympified to
+    # immutable matrices which breaks things in quantum...
+    if not hasattr(other, '_op_priority'):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return retval
+    if not isinstance(other, expectedcls):
+        return retval
+    return func(self, other)
+
+sympy.sympy.core.decorators.__sympifyit_wrapper
+
+@wraps(func)
+def __sympifyit_wrapper(a, b):
+    try:
+        # If an external class has _op_priority, it knows how to deal
+        # with SymPy objects. Otherwise, it must be converted.
+        if not hasattr(b, '_op_priority'):
+            b = sympify(b, strict=True)
+        return func(a, b)
+    except SympifyError:
+        return retval
+
+sympy.sympy.core.expr.as_base_exp
+
+def as_base_exp(self) -> tuple[Expr, Expr]:
+    # a -> b ** e
+    return self, S.One
+
+sympy.sympy.core.expr.as_content_primitive
+
+def as_content_primitive(self, radical=False, clear=True):
+    """This method should recursively remove a Rational from all arguments
+    and return that (content) and the new self (primitive). The content
+    should always be positive and ``Mul(*foo.as_content_primitive()) == foo``.
+    The primitive need not be in canonical form and should try to preserve
+    the underlying structure if possible (i.e. expand_mul should not be
+    applied to self).
+
+    Examples
+    ========
+
+    >>> from sympy import sqrt
+    >>> from sympy.abc import x, y, z
+
+    >>> eq = 2 + 2*x + 2*y*(3 + 3*y)
+
+    The as_content_primitive function is recursive and retains structure:
+
+    >>> eq.as_content_primitive()
+    (2, x + 3*y*(y + 1) + 1)
+
+    Integer powers will have Rationals extracted from the base:
+
+    >>> ((2 + 6*x)**2).as_content_primitive()
+    (4, (3*x + 1)**2)
+    >>> ((2 + 6*x)**(2*y)).as_content_primitive()
+    (1, (2*(3*x + 1))**(2*y))
+
+    Terms may end up joining once their as_content_primitives are added:
+
+    >>> ((5*(x*(1 + y)) + 2*x*(3 + 3*y))).as_content_primitive()
+    (11, x*(y + 1))
+    >>> ((3*(x*(1 + y)) + 2*x*(3 + 3*y))).as_content_primitive()
+    (9, x*(y + 1))
+    >>> ((3*(z*(1 + y)) + 2.0*x*(3 + 3*y))).as_content_primitive()
+    (1, 6.0*x*(y + 1) + 3*z*(y + 1))
+    >>> ((5*(x*(1 + y)) + 2*x*(3 + 3*y))**2).as_content_primitive()
+    (121, x**2*(y + 1)**2)
+    >>> ((x*(1 + y) + 0.4*x*(3 + 3*y))**2).as_content_primitive()
+    (1, 4.84*x**2*(y + 1)**2)
+
+    Radical content can also be factored out of the primitive:
+
+    >>> (2*sqrt(2) + 4*sqrt(10)).as_content_primitive(radical=True)
+    (2, sqrt(2)*(1 + 2*sqrt(5)))
+
+    If clear=False (default is True) then content will not be removed
+    from an Add if it can be distributed to leave one or more
+    terms with integer coefficients.
+
+    >>> (x/2 + y).as_content_primitive()
+    (1/2, x + 2*y)
+    >>> (x/2 + y).as_content_primitive(clear=False)
+    (1, x/2 + y)
+    """
+    return S.One, self
+
+sympy.sympy.core.expr.as_coeff_Mul
+
+def as_coeff_Mul(self, rational: bool = False) -> tuple['Number', Expr]:
+    """Efficiently extract the coefficient of a product."""
+    return S.One, self
+
+sympy.sympy.core.expr.as_coeff_Add
+
+def as_coeff_Add(self, rational=False) -> tuple['Number', Expr]:
+    """Efficiently extract the coefficient of a summation."""
+    return S.Zero, self
+
+sympy.sympy.core.mul.as_base_exp
+
+def as_base_exp(self):
+    e1 = None
+    bases = []
+    nc = 0
+    for m in self.args:
+        b, e = m.as_base_exp()
+        if not b.is_commutative:
+            nc += 1
+        if e1 is None:
+            e1 = e
+        elif e != e1 or nc > 1 or not e.is_Integer:
+            return self, S.One
+        bases.append(b)
+    return self.func(*bases), e1
+
+sympy.sympy.core.mul.as_content_primitive
+
+def as_content_primitive(self, radical=False, clear=True):
+    """Return the tuple (R, self/R) where R is the positive Rational
+    extracted from self.
+
+    Examples
+    ========
+
+    >>> from sympy import sqrt
+    >>> (-3*sqrt(2)*(2 - 2*sqrt(2))).as_content_primitive()
+    (6, -sqrt(2)*(1 - sqrt(2)))
+
+    See docstring of Expr.as_content_primitive for more examples.
+    """
+
+    coef = S.One
+    args = []
+    for a in self.args:
+        c, p = a.as_content_primitive(radical=radical, clear=clear)
+        coef *= c
+        if p is not S.One:
+            args.append(p)
+    # don't use self._from_args here to reconstruct args
+    # since there may be identical args now that should be combined
+    # e.g. (2+2*x)*(3+3*x) should be (6, (1 + x)**2) not (6, (1+x)*(1+x))
+    return coef, self.func(*args)
+
+sympy.sympy.core.mul._keep_coeff
+
+def _keep_coeff(coeff, factors, clear=True, sign=False):
+    """Return ``coeff*factors`` unevaluated if necessary.
+
+    If ``clear`` is False, do not keep the coefficient as a factor
+    if it can be distributed on a single factor such that one or
+    more terms will still have integer coefficients.
+
+    If ``sign`` is True, allow a coefficient of -1 to remain factored out.
+
+    Examples
+    ========
+
+    >>> from sympy.core.mul import _keep_coeff
+    >>> from sympy.abc import x, y
+    >>> from sympy import S
+
+    >>> _keep_coeff(S.Half, x + 2)
+    (x + 2)/2
+    >>> _keep_coeff(S.Half, x + 2, clear=False)
+    x/2 + 1
+    >>> _keep_coeff(S.Half, (x + 2)*y, clear=False)
+    y*(x + 2)/2
+    >>> _keep_coeff(S(-1), x + y)
+    -x - y
+    >>> _keep_coeff(S(-1), x + y, sign=True)
+    -(x + y)
+    """
+    if not coeff.is_Number:
+        if factors.is_Number:
+            factors, coeff = coeff, factors
+        else:
+            return coeff*factors
+    if factors is S.One:
+        return coeff
+    if coeff is S.One:
+        return factors
+    elif coeff is S.NegativeOne and not sign:
+        return -factors
+    elif factors.is_Add:
+        if not clear and coeff.is_Rational and coeff.q != 1:
+            args = [i.as_coeff_Mul() for i in factors.args]
+            args = [(_keep_coeff(c, coeff), m) for c, m in args]
+            if any(c.is_Integer for c, _ in args):
+                return Add._from_args([Mul._from_args(
+                    i[1:] if i[0] == 1 else i) for i in args])
+        return Mul(coeff, factors, evaluate=False)
+    elif factors.is_Mul:
+        margs = list(factors.args)
+        if margs[0].is_Number:
+            margs[0] *= coeff
+            if margs[0] == 1:
+                margs.pop(0)
+        else:
+            margs.insert(0, coeff)
+        return Mul._from_args(margs)
+    else:
+        m = coeff*factors
+        if m.is_Number and not factors.is_Number:
+            m = Mul._from_args((coeff, factors))
+        return m
+
+sympy.sympy.core.mul.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False) -> tuple['Number', Expr]:
+    """
+    Efficiently extract the coefficient of a product.
+    """
+    coeff, args = self.args[0], self.args[1:]
+
+    if coeff.is_Number:
+        if not rational or coeff.is_Rational:
+            if len(args) == 1:
+                return coeff, args[0] # type: ignore
+            else:
+                return coeff, self._new_rawargs(*args) # type: ignore
+        elif coeff.is_extended_negative:
+            return S.NegativeOne, self._new_rawargs(*((-coeff,) + args))
+    return S.One, self
+
+sympy.sympy.core.numbers.__eq__
+
+def __eq__(self, other):
+    if isinstance(other, int):
+        return (self.p == other)
+    elif isinstance(other, Integer):
+        return (self.p == other.p)
+    return Rational.__eq__(self, other)
+
+sympy.sympy.core.numbers.as_content_primitive
+
+def as_content_primitive(self, radical=False, clear=True):
+    """Return the tuple (R, self/R) where R is the positive Rational
+    extracted from self.
+
+    Examples
+    ========
+
+    >>> from sympy import S
+    >>> (S(-3)/2).as_content_primitive()
+    (3/2, -1)
+
+    See docstring of Expr.as_content_primitive for more examples.
+    """
+
+    if self:
+        if self.is_positive:
+            return self, S.One
+        return -self, S.NegativeOne
+    return S.One, self
+
+sympy.sympy.core.numbers.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False):
+    """Efficiently extract the coefficient of a product."""
+    return self, S.One
+
+sympy.sympy.core.numbers.as_coeff_Add
+
+def as_coeff_Add(self, rational=False):
+    """Efficiently extract the coefficient of a summation."""
+    return self, S.Zero
+
+sympy.sympy.core.numbers.__add__
+
+def __add__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p + other)
+        elif isinstance(other, Integer):
+            return Integer(self.p + other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.q + other.p, other.q, 1)
+        return Rational.__add__(self, other)
+    else:
+        return Add(self, other)
+
+sympy.sympy.core.numbers.__mul__
+
+def __mul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p*other)
+        elif isinstance(other, Integer):
+            return Integer(self.p*other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.p, other.q, igcd(self.p, other.q))
+        return Rational.__mul__(self, other)
+    return Rational.__mul__(self, other)
+
+sympy.sympy.core.numbers.__rmul__
+
+def __rmul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(other*self.p)
+        elif isinstance(other, Rational):
+            return Rational._new(other.p*self.p, other.q, igcd(self.p, other.q))
+        return Rational.__rmul__(self, other)
+    return Rational.__rmul__(self, other)
+
+sympy.sympy.core.numbers.__ne__
+
+def __ne__(self, other):
+    return not self == other
+
+sympy.sympy.core.power.as_content_primitive
+
+def as_content_primitive(self, radical=False, clear=True):
+    """Return the tuple (R, self/R) where R is the positive Rational
+    extracted from self.
+
+    Examples
+    ========
+
+    >>> from sympy import sqrt
+    >>> sqrt(4 + 4*sqrt(2)).as_content_primitive()
+    (2, sqrt(1 + sqrt(2)))
+    >>> sqrt(3 + 3*sqrt(2)).as_content_primitive()
+    (1, sqrt(3)*sqrt(1 + sqrt(2)))
+
+    >>> from sympy import expand_power_base, powsimp, Mul
+    >>> from sympy.abc import x, y
+
+    >>> ((2*x + 2)**2).as_content_primitive()
+    (4, (x + 1)**2)
+    >>> (4**((1 + y)/2)).as_content_primitive()
+    (2, 4**(y/2))
+    >>> (3**((1 + y)/2)).as_content_primitive()
+    (1, 3**((y + 1)/2))
+    >>> (3**((5 + y)/2)).as_content_primitive()
+    (9, 3**((y + 1)/2))
+    >>> eq = 3**(2 + 2*x)
+    >>> powsimp(eq) == eq
+    True
+    >>> eq.as_content_primitive()
+    (9, 3**(2*x))
+    >>> powsimp(Mul(*_))
+    3**(2*x + 2)
+
+    >>> eq = (2 + 2*x)**y
+    >>> s = expand_power_base(eq); s.is_Mul, s
+    (False, (2*x + 2)**y)
+    >>> eq.as_content_primitive()
+    (1, (2*(x + 1))**y)
+    >>> s = expand_power_base(_[1]); s.is_Mul, s
+    (True, 2**y*(x + 1)**y)
+
+    See docstring of Expr.as_content_primitive for more examples.
+    """
+
+    b, e = self.as_base_exp()
+    b = _keep_coeff(*b.as_content_primitive(radical=radical, clear=clear))
+    ce, pe = e.as_content_primitive(radical=radical, clear=clear)
+    if b.is_Rational:
+        #e
+        #= ce*pe
+        #= ce*(h + t)
+        #= ce*h + ce*t
+        #=> self
+        #= b**(ce*h)*b**(ce*t)
+        #= b**(cehp/cehq)*b**(ce*t)
+        #= b**(iceh + r/cehq)*b**(ce*t)
+        #= b**(iceh)*b**(r/cehq)*b**(ce*t)
+        #= b**(iceh)*b**(ce*t + r/cehq)
+        h, t = pe.as_coeff_Add()
+        if h.is_Rational and b != S.Zero:
+            ceh = ce*h
+            c = self.func(b, ceh)
+            r = S.Zero
+            if not c.is_Rational:
+                iceh, r = divmod(ceh.p, ceh.q)
+                c = self.func(b, iceh)
+            return c, self.func(b, _keep_coeff(ce, t + r/ce/ceh.q))
+    e = _keep_coeff(ce, pe)
+    # b**e = (h*t)**e = h**e*t**e = c*m*t**e
+    if e.is_Rational and b.is_Mul:
+        h, t = b.as_content_primitive(radical=radical, clear=clear)  # h is positive
+        c, m = self.func(h, e).as_coeff_Mul()  # so c is positive
+        m, me = m.as_base_exp()
+        if m is S.One or me == e:  # probably always true
+            # return the following, not return c, m*Pow(t, e)
+            # which would change Pow into Mul; we let SymPy
+            # decide what to do by using the unevaluated Mul, e.g
+            # should it stay as sqrt(2 + 2*sqrt(5)) or become
+            # sqrt(2)*sqrt(1 + sqrt(5))
+            return c, self.func(_keep_coeff(m, t), e)
+    return S.One, self.func(b, e)
+
+sympy.sympy.core.power.as_base_exp
+
+def as_base_exp(self):
+    """Return base and exp of self.
+
+    Explanation
+    ===========
+
+    If base a Rational less than 1, then return 1/Rational, -exp.
+    If this extra processing is not needed, the base and exp
+    properties will give the raw arguments.
+
+    Examples
+    ========
+
+    >>> from sympy import Pow, S
+    >>> p = Pow(S.Half, 2, evaluate=False)
+    >>> p.as_base_exp()
+    (2, -2)
+    >>> p.args
+    (1/2, 2)
+    >>> p.base, p.exp
+    (1/2, 2)
+
+    """
+    b, e = self.args
+    if b.is_Rational and b.p == 1 and b.q != 1:
+        return Integer(b.q), -e
+    return b, e
+
+
+[/PYTHON]
+What will be the output of `as_content_primitive`, given the following input:
+[INPUT]
+```
+{
+    "self": "sqrt(2)",
+    "args": {
+        "radical": false,
+        "clear": false
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]

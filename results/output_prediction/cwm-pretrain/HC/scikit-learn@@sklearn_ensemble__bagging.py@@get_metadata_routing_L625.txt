@@ -1,0 +1,465 @@
+<think>
+1. Inside `get_metadata_routing`, it creates a `MetadataRouter` object: router = MetadataRouter(owner=self).
+2. Inside `__init__`, it initializes `_route_mappings`, `_self_request`, and `owner`.
+3. It then creates a `MethodMapping` object and defines method mappings between caller and callee methods:
+    method_mapping.add(caller='fit', callee='fit').
+    method_mapping.add(caller='decision_function', callee='decision_function').
+    Since estimator has predict_proba method, it adds the mapping between predict and predict_proba.
+    It then checks if estimator has predict_log_proba or predict_proba and maps predict_log_proba to the appropriate method.
+4. It adds the estimator to the router using router.add(estimator=self._get_estimator(), method_mapping=method_mapping). It retrieves the routing object for the estimator and creates a RouterMappingPair to link the method mappings with the estimator's routing.
+5. It returns the router object with the added estimator.
+</think>
+
+[OUTPUT]
+```
+{
+    "output": "MetadataRouter(owner=<sklearn.ensemble._bagging.BaseBagging object>)"
+}
+```
+[/OUTPUT]
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+</think>
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import numpy as np
+
+from sklearn._config import config_context
+from sklearn.base import clone
+from sklearn.exceptions import NotFittedError
+from sklearn.utils._param_validation import Interval, RealNotInt
+from sklearn.utils.metaestimators import _BaseComposition
+from sklearn.utils.metadata_routing import MetadataRouter, MethodMapping, process_routing
+from sklearn.utils.parallel import Parallel, delayed
+from sklearn.utils.validation import (
+    _deprecate_positional_args,
+    _num_samples,
+    check_array,
+    check_is_fitted,
+    check_X_y,
+    has_fit_parameter,
+)
+
+from ..tree import _tree
+
+VALID_BASE_ESTIMATORS = (
+    _tree.BaseDecisionTree,
+    _tree.DecisionTreeClassifier,
+    _tree.ExtraTreeClassifier,
+    _tree.DecisionTreeRegressor,
+    _tree.ExtraTreeRegressor,
+)
+
+
+class BaseForest(_BaseComposition):
+    _parameter_constraints: dict = {'bootstrap': ['boolean'], 'max_samples': [Interval(RealNotInt, 0, 1, closed='right'), Interval(int, 1, None, closed='left')], 'n_jobs': [None, 'deprecated'], 'n_estimators': [Interval(int, 1, None, closed='left')], 'estimator': [None], 'estimator_params': ['dict', None], 'max_samples': [Interval(RealNotInt, 0, 1, closed='right'), Interval(int, 1, None, closed='left')]}
+
+    @_deprecate_positional_args
+    def __init__(self, estimator=None, *, n_estimators=10, estimator_params=(), bootstrap=None, oob_score=False, n_jobs=None, random_state=None, verbose=0, warm_start=False, class_weight=None, max_samples=None):
+        super().__init__(estimator)
+        self._n_estimators = n_estimators
+        self.estimator_params = estimator_params
+        self.bootstrap = bootstrap
+        self.oob_score = oob_score
+        self.n_jobs = n_jobs
+        self.random_state = random_state
+        self.verbose = verbose
+        self.warm_start = warm_start
+        self.class_weight = class_weight
+        self.max_samples = max_samples
+
+    def _validate_estimator(self, default=None):
+        """Check the estimator and set the `estimator_` attribute."""
+        if not isinstance(self.estimator, VALID_BASE_ESTIMATORS):
+            raise ValueError('The base estimator should be a DecisionTree*. Got %s instead.' % type(self.estimator))
+        self.estimator_ = self.estimator
+
+    @property
+    def _estimators(self):
+        return self.estimators_
+
+    @property
+    def _estimators_samples(self):
+        return self.estimators_samples_
+
+    def _make_estimator(self, appendix=''):
+        """Make and configure a copy of the `estimator_` attribute.
+
+        Warning: This method should be used to refactor existing code and not
+        for the future code.
+        """
+        estimator = clone(self.estimator_)
+        if self.estimator_params:
+            estimator.set_params(**self.estimator_params)
+        self._estimator_weight_idx = 0
+        return estimator
+
+    def _construct(self):
+        """Construct the estimators.
+
+        If a user set `warm_start` attribute to True, this method will not do
+        anything as the `estimators_` attribute is already set.
+        """
+        pass
+
+    def _more_tags(self):
+        return {'multioutput': self._get_tags()['multioutput']}
+
+    def _fit(self, X, y, sample_weight=None, X_idx_sorted='deprecated', check_input=True, n_jobs=1):
+        if check_input:
+            self._validate_params()
+        # The final estimation step not to violate the i.i.d. assumption
+        # due to re-using samples between fit and predict.
+        if self.warm_start and hasattr(self, '_final_estimator'):
+            del self._final_estimator
+        # Precompute a common startpoint.
+        # `self.n_features_` was set in _validate_estimator
+        if not self.bootstrap and self.max_samples is not None:
+            max_samples = self.max_samples
+        else:
+            max_samples = self.n_samples_
+        # _max_samples_ can be different than self.max_samples when max_samples
+        # is an integer and `max_samples < n_samples`. Additionally, the
+        # estimators should sample from np.arange(n_samples) (the index set of
+        # the training samples) instead of the set of integer up to
+        # `max(n_samples, n_samples_bootstrapped)` because a user could pass
+        # sample_weights given by a np.arange-like object which will be
+        # fragmented otherwise.
+        self._max_samples = int(round(max_samples * self.n_samples_))
+        if self.bootstrap:
+            self._n_samples_bootstrap = _max(
+                self._max_samples, self.n_samples_
+            )
+        else:
+            self._n_samples_bootstrap = self.n_samples_
+        self._n_samples_exec = self._n_samples_bootstrap
+        # Validate or initialize estimators
+        if self.estimators_ is None or len(self.estimators_) == 0:
+            if self.estimator is None:
+                raise ValueError('estimator is None. ')
+            self._validate_estimator()
+        self._n_jobs = n_jobs
+        # n_jobs==1; return list of estimators
+        new_estimators = []
+        try:
+            with config_context(estimator_config=self.estimator):
+                new_estimators = Parallel(n_jobs=n_jobs, prefer='threads')(
+                    delayed(_parallel_build_trees)(
+                        tree_idx, self.estimator, self._max_samples,
+                        self._n_samples_bootstrap, self.n_samples_,
+                        self._n_samples_exec, verbose=self.verbose,
+                        class_weight=self.class_weight,
+                        random_state=self._get_random_state(), X=X,
+                        y=y, sample_weight=sample_weight
+                    )
+                    for tree_idx in range(self.n_estimators)
+                )
+                self.estimators_ = new_estimators
+                self.n_features_ = X.shape[1]
+                return self
+        except (KeyboardInterrupt, Exception):
+            self._stop_logging_trees()
+            raise
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def _parallel_build_trees(tree_idx, tree, max_samples, n_samples_bootstrap, n_samples, n_samples_exec, verbose, class_weight, random_state, X, y, sample_weight=None):
+    """Private function used to fit a single tree in parallel."""
+    rng = check_random_state(random_state)
+    tree.set_params(random_state=rng)
+    if class_weight is not None:
+        if is_classifier(tree):
+            _n_classes = np.max(y) + 1
+            class_weight_ = compute_sample_weight(
+                'auto' if class_weight == 'balanced' else class_weight,
+                y=y,
+                indices=None,
+                pos_label=None,
+            )
+            class_weight_ = _check_class_weight(class_weight_)
+            if _n_classes != class_weight_.shape[0]:
+                raise ValueError(
+                    'class_weight must have the same number of elements '
+                    'as the number of classes in y. Found %d instead of %d.'
+                    % (class_weight_.shape[0], _n_classes)
+                )
+        else:
+            raise ValueError(
+                'class_weight is only supported with `criterion="gini"` '
+                'and `criterion="entropy"` for classification, got '
+                '`criterion="mse"` instead.'
+            )
+    if is_classifier(tree):
+        n_classes = np.unique(y).size
+        n_classes_ = tree.n_classes
+        if n_classes_ is not None and n_classes != n_classes_:
+            raise ValueError(
+                "Number of classes in the training targets "
+                f"({n_classes}) does not match the number of classes "
+                f"of the classifier ({n_classes_})."
+            )
+    if sample_weight is not None and max_samples is None:
+        if not isinstance(sample_weight, np.ndarray):
+            raise ValueError(
+                "Sample weights must be passed as a NumPy array or list."
+            )
+        sample_weight = np.asarray(sample_weight)
+        if (
+            sample_weight.shape[0] != n_samples or
+            sample_weight.ndim > 1 or
+            np.any(sample_weight < 0)
+        ):
+            raise ValueError("Invalid sample_weight: array-like of shape"
+                             " (n_samples,), with non-negative values.")
+    if sample_weight is not None and max_samples is not None:
+        _sample_weight = np.copy(sample_weight)
+        if n_samples < max_samples:
+            samples_range = range(n_samples)
+        else:
+            samples_range = rng.choice(
+                n_samples, size=max_samples, replace=True
+            )
+        for i in range(n_samples):
+            if i not in samples_range:
+                _sample_weight[i] = 0
+    else:
+        if max_samples is not None:
+            n_samples = min(max_samples, n_samples)
+            if max_samples < n_samples:
+                samples_range = rng.choice(
+                    n_samples, size=max_samples, replace=False
+                )
+            else:
+                samples_range = range(n_samples)
+        else:
+            samples_range = range(n_samples)
+
+        if sample_weight is not None:
+            _sample_weight = np.copy(sample_weight)
+            for i in range(n_samples):
+                if i not in samples_range:
+                    _sample_weight[i] = 0
+    if sample_weight is None:
+        _sample_weight = np.ones(n_samples)
+    try:
+        tree.fit(X, y, sample_weight=_sample_weight)
+    except Exception as e:
+        # Print why the tree failed
+        raise ValueError(f'Error while fitting tree number {tree_idx}:\n{e}')
+    return tree
+
+def _log_parallel_build_trees(num_total_samples, estimator, verbose):
+    """Private function used to log fitting information in parallel builds."""
+    # XXX: This does not really ensure that it will print a new message for
+    # each parallel progress bar, if the memory usage is changed by another
+    # method (e.g. multiprocessing).
+    if verbose > 1:
+        if hasattr(estimator, 'tree_'):
+            trees = [estimator]
+        else:
+            trees = [
+                estimator.estimators_[i] for i in range(estimator.n_estimators)
+            ]
+        all_n_node_splits = sum(
+            tree.tree_.n_node_samples - tree.tree_.n_samples for tree in trees
+        )
+        if num_total_samples != -1:
+            msg = f'{num_total_samples:,} samples added to {len(trees)} trees'
+            if verbose > 2:
+                msg += ', '
+                if len(trees) == 1:
+                    msg += f'with {trees[0].tree_.n_node_samples:,} '
+                else:
+                    msg += f'with {sum(tree.tree_.n_node_samples for tree in trees):,} '
+                msg += f'samples between {sum(tree.tree_.n_node_samples - tree.tree_.n_samples for tree in trees):,} '
+                msg += 'nodes'
+            print(msg)
+        else:
+            print(
+                'Computing total number of parallel'
+                ' runs required to complete job...'
+            )
+
+def _check_sample_weight(X, y, sample_weight=None):
+    """Validate sample_weight."""
+    n_samples = X.shape[0]
+    if y is not None:
+        n_samples = _num_samples(X)
+    if sample_weight is not None:
+        sample_weight = check_array(sample_weight, dtype=np.float64)
+        if sample_weight.ndim != 1:
+            raise ValueError("Sample weights must be 1D array or list")
+        if sample_weight.shape[0] != n_samples:
+            raise ValueError(
+                f"sample_weight.shape == {sample_weight.shape}, expected {n_samples}!"
+            )
+        if np.any(sample_weight < 0):
+            raise ValueError("sample_weight cannot contain negative weights")
+    return sample_weight
+
+def check_random_state(seed):
+    """Turn seed into a np.random.RandomState instance
+
+    Parameters
+    ----------
+    seed : {None, int, `numpy.random.Generator`,
+            `numpy.random.RandomState`}, optional
+
+        If `seed` is None (or `np.random`), the `numpy.random.RandomState`
+        singleton is used.
+        If `seed` is an int, a new ``RandomState`` instance is used,
+        seeded with `seed`.
+        If `seed` is already a ``Generator`` or ``RandomState`` instance then
+        that instance is used.
+
+    Returns
+    -------
+    random_state : {`numpy.random.Generator`, `numpy.random.RandomState`}
+        RandomState instance.
+    """
+    if seed is None or seed is np.random:
+        return np.random.mtrand._rand
+    if isinstance(seed, numbers.Integral):
+        return np.random.default_rng(seed)
+    if isinstance(seed, np.random.RandomState):
+        return seed
+    if isinstance(seed, np.random.Generator):
+        return seed
+    raise ValueError(
+        f"{seed!r} cannot be used to seed a numpy.random.RandomState instance"
+    )
+[/PYTHON]
+
+What will be the output of `_fit`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_n_estimators": 100,
+        "estimator_params": [],
+        "bootstrap": false,
+        "oob_score": false,
+        "

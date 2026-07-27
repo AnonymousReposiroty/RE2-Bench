@@ -1,0 +1,103 @@
+[THOUGHT]
+Let's analyze the input:  
+- `mapping = {"foo": "bar"}` (length = 1)  
+- `title = "Attributes"`  
+- `summarizer = {}` (an empty dict, but in the code it's used as a function; here it's a placeholder — we'll treat it as a callable that won't be called for state tracing)  
+- `expand_option_name = "display_expand_attrs"`  
+- `col_width = None`, `max_rows = None`  
+
+We need to trace the loop states in line 61:  
+```python
+summary += [summarizer(k, v, col_width) for k, v in mapping.items()]
+```  
+
+First, `col_width` is `None` at line 42, so line 43 sets `col_width = _calculate_col_width(mapping)`.  
+`_calculate_col_width` is not defined here, but we don't need its exact value for variable states.  
+
+Line 44-45: `max_rows = OPTIONS["display_max_rows"]`. Unknown, but in context, we must see if we enter the `else` block at line 61.  
+
+We check conditions:  
+- `mapping` is not empty → `if mapping:` at line 47 is true.  
+- `len_mapping = 1`.  
+- `_get_boolean_with_default(expand_option_name, default=True)` — we don't know its value, but likely returns `True` by default for `"display_expand_attrs"`.  
+- Line 50: if that returns `False`, summary gets modified, but it returns `True`, so skip.  
+- Line 52: `len_mapping > max_rows`? `max_rows` likely > 1, so `len_mapping=1` is not greater. So we go to line 61's else block: `len_mapping <= max_rows` → execute line 61.  
+
+`mapping.items()` for `{"foo": "bar"}` yields `[("foo", "bar")]`.  
+In list comprehension, iterate once:  
+- `k = "foo"`  
+- `v = "bar"`  
+
+So:  
+- `k` state through iterations: `["foo"]`  
+- `v` state through iterations: `["bar"]`  
+- `mapping.items()` is constant in each iteration: `[("foo", "bar")]`, repeated once.  
+
+[/THOUGHT]
+
+[ANSWER]
+1 import contextlib
+2 import functools
+3 from datetime import datetime, timedelta
+4 from itertools import chain, zip_longest
+5 from typing import Hashable
+6 import numpy as np
+7 import pandas as pd
+8 from pandas.errors import OutOfBoundsDatetime
+9 from .duck_array_ops import array_equiv
+10 from .options import OPTIONS, _get_boolean_with_default
+11 from .pycompat import dask_array_type, sparse_array_type
+12 from .utils import is_duck_array
+13 import sparse
+14 from .variable import IndexVariable
+15 
+16 EMPTY_REPR = "    *empty*"
+17 data_vars_repr = functools.partial(
+18     _mapping_repr,
+19     title="Data variables",
+20     summarizer=summarize_datavar,
+21     expand_option_name="display_expand_data_vars",
+22 )
+23 attrs_repr = functools.partial(
+24     _mapping_repr,
+25     title="Attributes",
+26     summarizer=summarize_attr,
+27     expand_option_name="display_expand_attrs",
+28 )
+29 diff_coords_repr = functools.partial(
+30     _diff_mapping_repr, title="Coordinates", summarizer=summarize_coord
+31 )
+32 diff_data_vars_repr = functools.partial(
+33     _diff_mapping_repr, title="Data variables", summarizer=summarize_datavar
+34 )
+35 diff_attrs_repr = functools.partial(
+36     _diff_mapping_repr, title="Attributes", summarizer=summarize_attr
+37 )
+38 
+39 def _mapping_repr(
+40     mapping, title, summarizer, expand_option_name, col_width=None, max_rows=None
+41 ):
+42     if col_width is None:
+43         col_width = _calculate_col_width(mapping)
+44     if max_rows is None:
+45         max_rows = OPTIONS["display_max_rows"]
+46     summary = [f"{title}:"]
+47     if mapping:
+48         len_mapping = len(mapping)
+49         if not _get_boolean_with_default(expand_option_name, default=True):
+50             summary = [f"{summary[0]} ({len_mapping})"]
+51         elif len_mapping > max_rows:
+52             summary = [f"{summary[0]} ({max_rows}/{len_mapping})"]
+53             first_rows = max_rows // 2 + max_rows % 2
+54             items = list(mapping.items())
+55             summary += [summarizer(k, v, col_width) for k, v in items[:first_rows]]
+56             if max_rows > 1:
+57                 last_rows = max_rows // 2
+58                 summary += [pretty_print("    ...", col_width) + " ..."]
+59                 summary += [summarizer(k, v, col_width) for k, v in items[-last_rows:]]
+60         else:
+61             summary += [summarizer(k, v, col_width) for k, v in mapping.items()]## [STATE]k=['foo'][/STATE] [STATE]v=['bar'][/STATE] [STATE]mapping.items()=[[('foo', 'bar')]][/STATE]
+62     else:
+63         summary += [EMPTY_REPR]
+64     return "\n".join(summary)
+[/ANSWER]

@@ -1,0 +1,304 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from collections import defaultdict
+from .exceptions import DMBadInputError, DMDomainError, DMShapeError
+
+class SDM(dict):
+    fmt = 'sparse'
+    is_DFM = False
+    is_DDM = False
+
+    def __init__(self, elemsdict, shape, domain):
+        super().__init__(elemsdict)
+        self.shape = self.rows, self.cols = m, n = shape
+        self.domain = domain
+        if not all((0 <= r < m for r in self)):
+            raise DMBadInputError('Row out of range')
+        if not all((0 <= c < n for row in self.values() for c in row)):
+            raise DMBadInputError('Column out of range')
+
+    def extract(self, rows, cols):
+        if not (self and rows and cols):
+            return self.zeros((len(rows), len(cols)), self.domain)
+        m, n = self.shape
+        if not -m <= min(rows) <= max(rows) < m:
+            raise IndexError('Row index out of range')
+        if not -n <= min(cols) <= max(cols) < n:
+            raise IndexError('Column index out of range')
+        rowmap = defaultdict(list)
+        colmap = defaultdict(list)
+        for i2, i1 in enumerate(rows):
+            rowmap[i1 % m].append(i2)
+        for j2, j1 in enumerate(cols):
+            colmap[j1 % n].append(j2)
+        rowset = set(rowmap)
+        colset = set(colmap)
+        sdm1 = self
+        sdm2 = {}
+        for i1 in rowset & sdm1.keys():
+            row1 = sdm1[i1]
+            row2 = {}
+            for j1 in colset & row1.keys():
+                row1_j1 = row1[j1]
+                for j2 in colmap[j1]:
+                    row2[j2] = row1_j1
+            if row2:
+                for i2 in rowmap[i1]:
+                    sdm2[i2] = row2.copy()
+        return self.new(sdm2, (len(rows), len(cols)), self.domain)
+
+    @classmethod
+    def new(cls, sdm, shape, domain):
+        return cls(sdm, shape, domain)
+
+    @classmethod
+    def zeros(cls, shape, domain):
+        return cls({}, shape, domain)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.numbers.__neg__
+
+def __neg__(self):
+    return Integer(-self.p)
+
+sympy.sympy.core.numbers.__rmod__
+
+def __rmod__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(other % self.p)
+        elif isinstance(other, Integer):
+            return Integer(other.p % self.p)
+        return Rational.__rmod__(self, other)
+    return Rational.__rmod__(self, other)
+
+sympy.sympy.core.numbers.__eq__
+
+def __eq__(self, other):
+    if isinstance(other, int):
+        return (self.p == other)
+    elif isinstance(other, Integer):
+        return (self.p == other.p)
+    return Rational.__eq__(self, other)
+
+sympy.sympy.core.numbers.__gt__
+
+def __gt__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p > other.p)
+    return Rational.__gt__(self, other)
+
+sympy.sympy.core.numbers.__le__
+
+def __le__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p <= other.p)
+    return Rational.__le__(self, other)
+
+sympy.sympy.core.numbers.__hash__
+
+def __hash__(self):
+    return hash(self.p)
+
+sympy.sympy.logic.boolalg.__bool__
+
+def __bool__(self):
+    return True
+
+sympy.sympy.polys.matrices.sdm.new
+
+@classmethod
+def new(cls, sdm, shape, domain):
+    """
+
+    Parameters
+    ==========
+
+    sdm: A dict of dicts for non-zero elements in SDM
+    shape: tuple representing dimension of SDM
+    domain: Represents :py:class:`~.Domain` of SDM
+
+    Returns
+    =======
+
+    An :py:class:`~.SDM` object
+
+    Examples
+    ========
+
+    >>> from sympy.polys.matrices.sdm import SDM
+    >>> from sympy import QQ
+    >>> elemsdict = {0:{1: QQ(2)}}
+    >>> A = SDM.new(elemsdict, (2, 2), QQ)
+    >>> A
+    {0: {1: 2}}
+
+    """
+    return cls(sdm, shape, domain)
+
+sympy.sympy.polys.matrices.sdm.zeros
+
+@classmethod
+def zeros(cls, shape, domain):
+    r"""
+
+    Returns a :py:class:`~.SDM` of size shape,
+    belonging to the specified domain
+
+    In the example below we declare a matrix A where,
+
+    .. math::
+        A := \left[\begin{array}{ccc}
+        0 & 0 & 0 \\
+        0 & 0 & 0 \end{array} \right]
+
+    >>> from sympy.polys.matrices.sdm import SDM
+    >>> from sympy import QQ
+    >>> A = SDM.zeros((2, 3), QQ)
+    >>> A
+    {}
+
+    """
+    return cls({}, shape, domain)
+
+
+[/PYTHON]
+What will be the input of `extract`, given the following input:
+[OUTPUT]
+```
+{
+    "0": {
+        "0": 1
+    },
+    "1": {
+        "0": 1
+    },
+    "2": {
+        "0": 1
+    }
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

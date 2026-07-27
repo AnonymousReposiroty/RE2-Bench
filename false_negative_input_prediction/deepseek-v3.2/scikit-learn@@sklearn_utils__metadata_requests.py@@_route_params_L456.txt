@@ -1,0 +1,213 @@
+<<FUNCTION_NAME>>
+
+_route_params
+
+<<CODE>>
+
+from warnings import warn
+from sklearn.exceptions import UnsetMetadataPassedError
+from sklearn.utils._bunch import Bunch
+
+class MethodMetadataRequest:
+    """Container for metadata requests associated with a single method.
+
+    Instances of this class get used within a :class:`MetadataRequest` - one per each
+    public method (`fit`, `transform`, ...) that its owning consumer has.
+
+    .. versionadded:: 1.3
+
+    Parameters
+    ----------
+    owner : object
+        The object owning these requests.
+
+    method : str
+        The name of the method to which these requests belong.
+
+    requests : dict of {str: bool, None or str}, default=None
+        The initial requests for this method.
+    """
+
+    def __init__(self, owner, method, requests=None):
+        self._requests = requests or dict()
+        self.owner = owner
+        self.method = method
+
+    def _check_warnings(self, *, params):
+        """Check whether metadata is passed which is marked as WARN.
+
+        If any metadata is passed which is marked as WARN, a warning is raised.
+
+        Parameters
+        ----------
+        params : dict
+            The metadata passed to a method.
+        """
+        params = {} if params is None else params
+        warn_params = {prop for prop, alias in self._requests.items() if alias == WARN and prop in params}
+        for param in warn_params:
+            warn(f'Support for {param} has recently been added to {self.owner} class. To maintain backward compatibility, it is ignored now. Using `set_{self.method}_request({param}={{True, False}})` on this method of the class, you can set the request value to False to silence this warning, or to True to consume and use the metadata.')
+
+    def _route_params(self, params, parent, caller):
+        """Prepare the given metadata to be passed to the method.
+
+        The output of this method can be used directly as the input to the
+        corresponding method as **kwargs.
+
+        Parameters
+        ----------
+        params : dict
+            A dictionary of provided metadata.
+
+        parent : object
+            Parent class object, that routes the metadata.
+
+        caller : str
+            Method from the parent class object, where the metadata is routed from.
+
+        Returns
+        -------
+        params : Bunch
+            A :class:`~sklearn.utils.Bunch` of {metadata: value} which can be
+            passed to the corresponding method.
+        """
+        self._check_warnings(params=params)
+        unrequested = dict()
+        args = {arg: value for arg, value in params.items() if value is not None}
+        res = Bunch()
+        for prop, alias in self._requests.items():
+            if alias is False or alias == WARN:
+                continue
+            elif alias is True and prop in args:
+                res[prop] = args[prop]
+            elif alias is None and prop in args:
+                unrequested[prop] = args[prop]
+            elif alias in args:
+                res[prop] = args[alias]
+        if unrequested:
+            if self.method in COMPOSITE_METHODS:
+                callee_methods = COMPOSITE_METHODS[self.method]
+            else:
+                callee_methods = [self.method]
+            set_requests_on = ''.join([f'.set_{method}_request({{metadata}}=True/False)' for method in callee_methods])
+            message = f"[{', '.join([key for key in unrequested])}] are passed but are not explicitly set as requested or not requested for {_routing_repr(self.owner)}.{self.method}, which is used within {_routing_repr(parent)}.{caller}. Call `{_routing_repr(self.owner)}" + set_requests_on + '` for each metadata you want to request/ignore. See the Metadata Routing User guide <https://scikit-learn.org/stable/metadata_routing.html> for more information.'
+            raise UnsetMetadataPassedError(message=message, unrequested_params=unrequested, routed_params=res)
+        return res
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'_requests': {'sample_weight': True, 'metadata': True}, 'owner': 'ConsumingTransformer(registry=[])', 'method': 'fit_transform'}, 'args': {'params': {'sample_weight': [1], 'metadata': 'a'}, 'parent': "ColumnTransformer(transformers=[('trans', ConsumingTransformer(registry=[]),\n                                 [0])])", 'caller': 'fit_transform'}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+{'sample_weight': [1], 'metadata': 'a'}
+
+<<LLM_RESPONSE>>
+
+Let's reason through step by step.
+
+We have the output of `_route_params` as:
+```
+{
+    "sample_weight": [1],
+    "metadata": "a"
+}
+```
+
+This is a `Bunch` object returned as `res`.  
+
+Looking at the `_route_params` method:  
+
+1. `self._check_warnings(params=params)` is called but doesn't affect the returned values directly.  
+2. `args = {arg: value for arg, value in params.items() if value is not None}` — only non-None params are kept.  
+3. Then we iterate over `self._requests` items (`prop`, `alias`):  
+   - If `alias` is `False` or `WARN`, skip.  
+   - If `alias` is `True` and `prop` in `args`, add `args[prop]` to `res`.  
+   - If `alias` is `None` and `prop` in `args`, add to `unrequested`.  
+   - If `alias` (some string) is in `args`, add `args[alias]` to `res` under key `prop`.  
+
+Since output shows `sample_weight: [1]` and `metadata: "a"`, both are in `res` and not in `unrequested`, meaning:  
+
+- For `sample_weight` in `_requests`:  
+  - Either `alias` is `True` and `prop` (`sample_weight`) is in `args`, and its value in `params` is `[1]`.  
+  - Or `alias` is some other string that is a key in `args`, but that would give us `args[alias]` stored under `sample_weight`, but then we wouldn't know what `alias` is. Let's check simpler case.  
+
+Similarly for `metadata`.  
+
+But wait: The output is exactly the values from `params` for keys `sample_weight` and `metadata`.  
+That means both `sample_weight` and `metadata` in `_requests` have `alias = True`, and both are in `args` (so both are not None).  
+
+Let's test:  
+If `_requests = {"sample_weight": True, "metadata": True}` and `params = {"sample_weight": [1], "metadata": "a"}`:  
+Then `alias` is `True`, `prop` in `args`, so `res[prop] = args[prop] = params[prop]`. Works.
+
+No `unrequested` means no alias `None` and `prop` in `args`. And no `alias` in `args` (string) case either.  
+
+Also `owner`, `method`, `parent`, `caller` don't affect `res` except in the error message if unrequested exists. Since no error, those can be arbitrary strings.
+
+Check `_check_warnings`: If `alias == WARN` and `prop` in `params`, would warn, but that’s fine; but in our case no alias is WARN since no warning mentioned in output. So `alias` is not `WARN`.  
+
+So:  
+`self._requests`:  
+- `"sample_weight": True`  
+- `"metadata": True`  
+
+`params`:  
+- `"sample_weight": [1]`  
+- `"metadata": "a"`  
+
+`parent` and `caller` can be anything.  
+`owner` and `method` arbitrary.  
+
+Thus final input structure fill:  
+
+```json
+{
+    "self": {
+        "_requests": {
+            "sample_weight": true,
+            "metadata": true
+        },
+        "owner": "SomeClass",
+        "method": "some_method"
+    },
+    "args": {
+        "params": {
+            "sample_weight": [1],
+            "metadata": "a"
+        },
+        "parent": "SomeParent",
+        "caller": "some_caller"
+    },
+    "kwargs": {}
+}
+```  
+
+[THOUGHT]
+The output Bunch contains "sample_weight": [1] and "metadata": "a". This means both metadata were requested (alias = True in self._requests) and passed as non-None values in params. No unrequested metadata error was raised, so no alias was None with prop in args. Also no alias was a string pointing to another key in args, since output matches params keys directly. self._check_warnings doesn't affect output values, so alias = WARN possible but would raise warning (not mentioned in output), so likely not WARN. Therefore: _requests maps each to True, params maps each to given values. Other fields (owner, method, parent, caller) are irrelevant for output, so can be placeholders.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_requests": {
+            "sample_weight": true,
+            "metadata": true
+        },
+        "owner": "SomeClass",
+        "method": "some_method"
+    },
+    "args": {
+        "params": {
+            "sample_weight": [1],
+            "metadata": "a"
+        },
+        "parent": "SomeParent",
+        "caller": "some_caller"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

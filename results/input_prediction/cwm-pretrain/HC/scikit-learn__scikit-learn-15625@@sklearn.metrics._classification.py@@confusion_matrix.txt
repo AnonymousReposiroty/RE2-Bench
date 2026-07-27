@@ -1,0 +1,490 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+</think>
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import abc
+import logging
+import time
+import traceback
+
+import six
+import attr
+
+from azure.core.pipeline.policies import HTTPLoggingPolicy
+from azure.core.pipeline.policies import RequestHistory
+from azure.core.pipeline.policies import DistributedTracingPolicy
+from azure.core.pipeline.policies import ContentDecodePolicy
+from azure.core.pipeline.policies import SanitizeHeaders
+from azure.core.pipeline import PipelineContext
+from azure.core.pipeline import PipelineRequest
+from azure.core.pipeline import PipelineResponse
+from azure.core.pipeline import SansIOHTTPPolicy
+from azure.core.pipeline.policies import SansIOHTTPPolicy
+from azure.core.pipeline.policies import ProxyPolicy
+from azure.core.pipeline.policies import NetworkTraceLoggingPolicy
+from azure.core.pipeline.policies import RedirectPolicy
+from azure.core.pipeline.policies import RetryPolicy
+from azure.core.pipeline.policies import UserAgentPolicy
+from azure.core.pipeline.policies import RequestIdPolicy
+from azure.core.pipeline.transport._base import HttpRequest
+from azure.core.pipeline.transport import AioHttpTransport
+from azure.core import case_insensitive_dict
+from azure.core.rest._awaitable import get_iterator_impl
+from azure.core.credentials import AzureSasCredential
+from azure.core.credentials import TokenCredential
+from azure.core.credentials_async import AsyncTokenCredential
+from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import HttpResponseError
+from azure.core.exceptions import ClientAuthenticationError
+from azure.core.exceptions import DecodeError
+from azure.core.exceptions import ServiceRequestError
+from azure.core.exceptions import ServiceResponseError
+from azure.core.exceptions import Oauth2LoginError
+from azure.core.exceptions import Oauth2DeviceFlowCodeGrantError
+from azure.core.exceptions import Oauth2DeviceFlowServerError
+from azure.core.exceptions import AzureError
+from azure.core import PipelineClient
+from azure.core import TracingPolicy
+from azure.core.utils import case_insensitive_dict
+from ._url import parse_connection_string
+from ._version import VERSION
+from ._configuration import Configuration
+from ._transport import AioHttpTransport
+from ._models import PipelineResponse
+from ._errors import HttpResponseError
+from ._errors import DecodeError
+from ._errors import Oauth2LoginError
+from ._errors import Oauth2DeviceFlowServerError
+from ._errors import Oauth2DeviceFlowCodeGrantError
+from ._errors import ServiceRequestError
+from ._errors import ServiceResponseError
+from ._errors import ResourceNotFoundError
+from ._errors import ClientAuthenticationError
+from ._pipeline import Pipeline
+from ._aio_caller import _aio_call
+from ._call_pipeline import _call_pipeline
+
+LOG = logging.getLogger(__name__)
+
+logger_enabled = LOG.isEnabledFor(logging.DEBUG)
+http_logger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
+
+_DEFAULT_CONFIG = Configuration()
+
+class BaseClient(object):
+    _sas_token_helper_attr = "__sas_token__"  # Private attribute to store SAS token value. This is because of an issue in botocore aws session.
+
+    def __init__(self, url=None, credential=None, logging_enable=False, **kwargs):
+        """Construct a new :class:`~azure.core.BaseClient`.
+
+        All the clients exposed by SDK libraries inherit from the BaseClient. Users should not create a BaseClient instance directly. Instead,
+        instantiate one of the sub-classes.
+
+        :param str url: The URL to use as the base for every request.
+        :param str credential: A credential to authenticate the client.
+        :param bool logging_enable: Set to True to log every request and response.
+        :param kwargs: A dict of keyword arguments to be sent to the service.
+        :return: A new BaseClient object
+        :rtype: :class:`~azure.core.BaseClient`
+        """
+        logging_enable = _DEFAULT_CONFIG.logging_enable if logging_enable is None else logging_enable
+        # pylint:disable=protected-access
+        configuration = kwargs.get("config", _DEFAULT_CONFIG)
+
+        credential_policy = CredentialPolicy(credential)
+        _policies = _get_default_policies(kwargs, logging_enable)
+        _policies.insert(0, credential_policy)
+        self._policies = _policies
+
+        self._config = configuration
+        self._base_url = _fix_base_url(url)
+
+        self._request_id = None  # A GUID to add to the User-Agent header for every request.
+        self._user_agent = UserAgentPolicy.get_user_agent(kwargs.get("user_agent"))
+        self._pipeline = Pipeline(self._policies, transport=self._get_transport())
+
+        # We want to accept any keyword arguments
+        if kwargs:
+            del kwargs['config']
+            setattr(self, "_client_options", kwargs)
+
+        self._pipeline.add_policy(SanitizeHeaders(self._sas_token_helper_attr), "<base_client_sanitizer>")
+
+        if logger_enabled:
+            LOG.debug('Client instantiated with User-Agent "%s"', self._user_agent)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        # pylint:disable=no-self-use
+        return False
+
+    def _get_transport(self):
+        # pylint:disable=no-self-use
+        return None
+
+    def _set_policies(self, *args, **kwargs):
+        # pylint:disable=no-self-use
+        return self
+
+    def get_policies(self):
+        # pylint:disable=no-self-use
+        return self._policies
+
+    def close(self):
+        """Close the :class:`~azure.core.Pipeline`, which closes the transport channel.
+        """
+        self._pipeline.close()
+        self._pipeline = None
+
+    def __del__(self):
+        if hasattr(self, '_pipeline'):
+            self.close()
+
+    def close_session(self, event, **kwargs):
+        # pylint:disable=no-self-use
+        """Handler for "close" session event.
+
+        :param str event: The session event type.
+
+        Return False to instruct the session to NOT close. Return true to close the session
+        """
+        return True
+
+    def __call__(self, action, **kwargs):
+        """Call with a given action
+
+        :param str action: The action to take.
+        :param \**kwargs: Other keyword arguments to send to the service.
+        :return: The API response.
+        """
+        # We want to accept any keyword arguments
+        setattr(self, "_action", action)
+
+        self._ctx = PipelineContext(action, **kwargs)
+
+        return _aio_call(self._pipeline, self._ctx)
+
+    async def _aio_call(self, action, **kwargs):
+        """Call with a given action
+
+        :param str action: The action to take.
+        :param \**kwargs: Other keyword arguments to send to the service.
+        :return: The API response.
+        """
+        # We want to accept any keyword arguments
+        setattr(self, "_action", action)
+
+        self._ctx = PipelineContext(action, **kwargs)
+
+        return await _aio_call(self._pipeline, self._ctx)
+
+    async def _process_storage_error(self, response=None):
+        """Interprets an HTTP response as a storage error and creates the right exception.
+
+        :param dict response: A Dictionary containing the HTTP response information.
+        :return: The storage exception corresponding to the error code.
+        :rtype: :class:`~azure.core.exceptions.ClientAuthenticationError` or :class:`~azure.core.exceptions.ServiceRequestError` or
+                :class:`~azure.core.exceptions.ResourceNotFoundError` or :class:`~azure.core.exceptions.ServiceResponseError`
+        """
+        error = response.get("error")
+        response = PipelineResponse(response)
+        code = response.http_response.status_code
+        error_msg = response.reason_phrase
+        if error:
+            code = error["code"]
+            error_msg = "{0}: {1}".format(code, error["message"])
+
+        if code == 404:
+            raise ResourceNotFoundError(error_msg, error=error, response=response)
+        elif code == 401:
+            raise ClientAuthenticationError(error_msg, error=error, response=response)
+        elif code == 400 or code == 409 or code == 412:
+            raise ServiceRequestError(error_msg, error=error, response=response)
+        else:
+            raise ServiceResponseError(error_msg, error=error, response=response)
+
+    def _format_tracing_info_for_headers(self, tracing_info):
+        return tracing_info
+
+    def _format_tracing_info_for_logs(self, tracing_info):
+        return "Correlation context: {}".format(str(tracing_info)) if tracing_info else ""
+
+    def _initialize_tracing(self, options):
+        tracing_options = options["config"].get_tracing_options()
+        enabled = tracing_options.is_enabled()
+        if enabled:
+            self._distributed_tracing_policy = DistributedTracingPolicy(tracing_options, self._format_tracing_info_for_headers,
+                                                                         self._format_tracing_info_for_logs)
+            self._pipeline.add_policy(self._distributed_tracing_policy, "distributed_tracing_policy")
+
+    async def open(self, **kwargs):
+        """Open the connection.
+
+        :param \**kwargs: Other keyword arguments to send to the service.
+        :return: The API response.
+        """
+        pass
+    close = abc.abstractmethod(close)
+
+    @property
+    def url(self):
+        return self._base_url
+
+    @property
+    def policies(self):
+        return self._pipeline.policies
+
+    @property
+    def transport(self):
+        return self._pipeline.transport
+
+    def send_request(self, request, stream=None, **kwargs):
+        """Send the given request object over the wire, using the given headers.
+
+        :param request: A :class:`azure.core.pipeline.transport.HttpRequest` object. The request will be modified in-place.
+        :type request: :class:`azure.core.pipeline.transport.HttpRequest`
+        :param \**kwargs: Any keyword arguments to be sent to the service. They will be used as headers in the HTTP request.
+        :return: The response received.
+        :rtype: :class:`azure.core.pipeline.PipelineResponse`
+        """
+        return self._pipeline.run(request, stream=stream)
+
+    def _generate_request_id(self):
+        """Generate a string of GUID which could be used as value of request-id
+
+        :rtype: str
+        """
+        from uuid import uuid4
+        if self._request_id is None:
+            self._request_id = str(uuid4()).replace('-', '')
+        return self._request_id
+
+    def get_request_id(self):
+        """Get the current request-id
+
+        :rtype: str
+        """
+        return self._request_id
+
+    def begin_session(self, connection_str, **kwargs):
+        """Create the session which contains all the info related to the connection
+        of resource endpoint of a particular service
+
+        :param str connection_str: The connection string with the exact connection options
+        :param \**kwargs: Other keyword arguments
+        :return: None
+        :rtype: :class:`azure.core.Configuration`
+        """
+        self._connection_str = connection_str
+        self._config = parse_connection_string(self._connection_str, kwargs)
+        return self._config
+
+    def _prepare_send(self, request, retry=None, **kwargs):
+        headers = kwargs
+        headers.update(getattr(self, '_client_options', {}))
+        headers['User-Agent'] = headers.get('User-Agent', self._user_agent)
+        if not headers.get('x-ms-request-id'):
+            headers['x-ms-request-id'] = self._generate_request_id()
+        if self._config.get_tracing_options():
+            headers['x-ms-correlation-request-id'] = self._generate_request_id()
+        headers.update(self._config.options)
+
+        return headers, self._config
+
+    def begin_session_with_connection_str(self, connection_str, **kwargs):
+        """Create the session which contains all the info related to the connection
+        of resource endpoint of a particular service
+
+        :param str connection_str: The connection string with the exact connection options
+        :param \**kwargs: Other keyword arguments
+        :return: None
+        :rtype: :class:`azure.core.Configuration`
+        """
+        self._connection_str = connection_str
+        self._config = parse_connection_string(self._connection_str, kwargs)
+        return self._config
+
+    def begin_session_with_config(self, config, **kwargs):
+        """Create the session which contains all the info related to the connection
+        of resource endpoint of a particular service
+
+        :param str connection_str: The connection string with the exact connection options
+        :param \**kwargs: Other keyword arguments
+        :return: None
+        :rtype: :class:`azure.core.Configuration`
+        """
+        self._config = config
+        return self._config
+
+    def begin_session_with_headers(self, credential=None, request_id=None, user_agent=None, session=None, transport=None, **kwargs):
+        """Create the session which contains all the info related to the connection
+        of resource endpoint of a particular service
+
+        :param str credential: The credential used to authenticate the session
+        :param str request_id: The request-id of the session
+        :param str user_agent: The user agent string
+        :param session: The PipelineClient object which contains the policies and transports
+        :type session: :class:`azure.core.PipelineClient`
+        :param transport: The transport which performs the requests
+        :type transport: :class:`azure.core.pipeline.transport.AioHttpTransport`
+        :return: The configuration object which has the updated keyword arguments
+        :rtype: :class:`azure.core.Configuration`
+        """
+        self._config = Configuration(**kwargs)
+        if credential is not None:
+            self._config.add_credential(credential)
+        self._request_id = request_id
+        self._user_agent = user_agent or self._user_agent
+
+        self._pipeline = session if session is not None else PipelineClient.from_conf(self._config, transport=transport)
+        return self._config
+
+    def close_session(self, event, **kwargs):
+        # pylint:disable=no-self-use
+        """Handler for "close" session event.
+
+        :param str event: The session event type.
+
+        Return False to instruct the session to NOT close. Return true to close the session
+        """
+        return True
+
+    def _get_transport(self, **kwargs):
+        """Internal helper to get the transport, which

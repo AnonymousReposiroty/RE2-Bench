@@ -1,0 +1,37 @@
+import numpy as np
+from sklearn.base import (
+    BaseEstimator,
+    ClassNamePrefixFeaturesOutMixin,
+    TransformerMixin,
+    _fit_context,
+)
+from sklearn.utils.validation import check_is_fitted, validate_data
+
+class _BaseSparseCoding(ClassNamePrefixFeaturesOutMixin, TransformerMixin):
+    """Base class from SparseCoder and DictionaryLearning algorithms."""
+
+    def __init__(self, transform_algorithm, transform_n_nonzero_coefs, transform_alpha, split_sign, n_jobs, positive_code, transform_max_iter):
+        self.transform_algorithm = transform_algorithm
+        self.transform_n_nonzero_coefs = transform_n_nonzero_coefs
+        self.transform_alpha = transform_alpha
+        self.transform_max_iter = transform_max_iter
+        self.split_sign = split_sign
+        self.n_jobs = n_jobs
+        self.positive_code = positive_code
+
+    def _transform(self, X, dictionary):
+        """Private method allowing to accommodate both DictionaryLearning and
+        SparseCoder."""
+        X = validate_data(self, X, reset=False)
+        if hasattr(self, 'alpha') and self.transform_alpha is None:
+            transform_alpha = self.alpha
+        else:
+            transform_alpha = self.transform_alpha
+        code = sparse_encode(X, dictionary, algorithm=self.transform_algorithm, n_nonzero_coefs=self.transform_n_nonzero_coefs, alpha=transform_alpha, max_iter=self.transform_max_iter, n_jobs=self.n_jobs, positive=self.positive_code)
+        if self.split_sign:
+            n_samples, n_features = code.shape
+            split_code = np.empty((n_samples, 2 * n_features))
+            split_code[:, :n_features] = np.maximum(code, 0)
+            split_code[:, n_features:] = -np.minimum(code, 0)
+            code = split_code
+        return code

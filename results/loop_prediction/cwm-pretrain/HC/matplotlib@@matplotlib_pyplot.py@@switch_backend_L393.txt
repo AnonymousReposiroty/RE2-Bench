@@ -1,0 +1,525 @@
+<think>
+1. The loop iterates over `func_name` in the list ["new_figure_manager", "draw_if_interactive", "show"].
+
+2. Since the list is constant and unmodified in the loop, `func_name` will take the same values as the list elements on each iteration:
+   - 'new_figure_manager'
+   - 'draw_if_interactive'
+   - 'show'
+
+3. The second state (the list itself) stays the same throughout the loop since the list is static.
+
+4. Therefore the loop states are as follows:
+
+- `func_name`: ['new_figure_manager', 'draw_if_interactive', 'show']
+- `["new_figure_manager", "draw_if_interactive", "show"]`: [same value for each iteration]
+
+</think>
+
+[ANSWER]
+20 def switch_backend(newbackend: str) -> None:
+... (rest of code)
+123     for func_name in ["new_figure_manager", "draw_if_interactive", "show"]:## [STATE]func_name=['new_figure_manager', 'draw_if_interactive', 'show'][/STATE] [STATE]["new_figure_manager", "draw_if_interactive", "show"]=[['new_figure_manager', 'draw_if_interactive', 'show'], ['new_figure_manager', 'draw_if_interactive', 'show'], ['new_figure_manager', 'draw_if_interactive', 'show']][/STATE]
+124         globals()[func_name].__signature__ = inspect.signature(
+125             getattr(backend_mod, func_name))
+126 
+127     matplotlib.backends.backend = newbackend
+128 
+129     try:
+130         install_repl_displayhook()
+131     except NotImplementedError as err:
+132         _log.warning("Fallback to a different backend")
+133         raise ImportError from err
+[/ANSWER]
+</s>
+<|user|>
+Here's the relevant code:
+1 from __future__ import annotations
+2 from functools import partial
+3 import warnings
+4 import numpy as np
+5 from ._hypersphere import Hypersphere
+6 from ._hspy import hspy_unitary_group_sample
+7 from ._dmfix import is_dmfix, pack_dmfix
+8 from ._random_loewner import random_statevector
+9 from ._partition import partition, subsystem_sizes
+10 from ._metric import metric_tensor
+11 from ._moment import (expect, moments, antimoments, accum, partial_trace,
+12                        purification, concurrence, entropy)
+13 from ._ncgt import unpack_ncgt, unpack_qobj, State
+14 from ._partial_trace import partial_trace as __partial_trace
+15 from ._veclab import veclab_to_normalized_index
+16 from ._propall import propall_vectors
+17 from ._cvx import CVXpy
+18 from ._complementarity import is_complement, so_complement
+19 from .gates import unitary_group, gate_sequence_product
+20 
+21 
+22 # -----------------------------------------------------------------------------
+23 
+24 def random_state(dims: np.ndarray, seed: int | None = None, **kwargs):
+25     """Generate a random quantum state on `HilbertSchmidt` with given
+26     `dimensions`.
+27 
+28     The state is chosen uniformly from the space of all pure states (i.e. the
+29     `Hilbert-Schmidt` space).
+30 
+31     Parameters
+32     ----------
+33     dims : array_like
+34         Dimensions of Hilbert-Schmidt space, such that the composite system is
+35         a state over multiple subsystems having Hilbert-Schmidt dimensions
+36         ``np.prod(dims)``.
+37     seed : int, optional
+38         Seed for the random number generator.
+39     **kwargs
+40         Other keyword arguments are ignored (for the sake of a consistent
+41         interface with other state generation functions).
+42 
+43     Returns
+44     -------
+45     data : :class:`State`
+46         The quantum state.
+47     """
+48     data = random_statevector(np.prod(dims), seed)
+49     state = State.from_vector(data, dims=dims)
+50     return state
+51 
+52 
+53 # -----------------------------------------------------------------------------
+54 
+55 def pure_state(dim: int, index: int) -> State:
+56     """Generate a quantum state on `HilbertSchmidt` by placing the state
+57     vector's only nonzero entry at position `index`.
+58 
+59     Parameters
+60     ----------
+61     dim : int
+62         Dimension of the Hilbert space of the quantum state.
+63     index : int
+64         Index of the nonzero coefficient of the state vector. This must
+65         correspond to a valid index in the state vector.
+66 
+67     Returns
+68     -------
+69     data : :class:`State`
+70         The quantum state.
+71     """
+72     if not (0 <= index < dim):
+73         raise ValueError(
+74             "Index must correspond to a valid coefficient of the state vector"
+75         )
+76     data = np.zeros(dim, dtype=np.complex128)
+77     data[index] = 1
+78     return State(data)
+79 
+80 
+81 # -----------------------------------------------------------------------------
+82 
+83 def maximally_mixed_state(dim: int) -> State:
+84     """Generate a quantum state on `HilbertSchmidt` representing a maximally
+85     mixed state.
+86 
+87     Parameters
+88     ----------
+89     dim : int
+90         Dimension of the Hilbert space of the quantum state.
+91 
+92     Returns
+93     -------
+94     data : :class:`State`
+95         The quantum state.
+96     """
+97     data = (1 / dim) * np.eye(dim, dtype=np.complex128)
+98     return State(data)
+99 
+100 
+101 # -----------------------------------------------------------------------------
+102 
+103 def thermal_state(eigenvalues: np.ndarray, beta: float = 1.0) -> State:
+104     """Generate a quantum state on `HilbertSchmidt` representing a thermal
+105     state.
+106 
+107     Parameters
+108     ----------
+109     eigenvalues : array_like
+110         Eigenvalues of the Hamiltonian for which a thermal state is to be
+111         generated.
+112     beta : float, optional
+113         Inverse temperature. Default: 1.0.
+114 
+115     Returns
+116     -------
+117     data : :class:`State`
+118         The quantum state.
+119     """
+120     dims = np.atleast_1d(eigenvalues.size)
+121     z = np.exp(-beta * eigenvalues)
+122     coeff = z / z.sum()
+123     return State.from_vector(coeff.reshape(-1, 1), dims=dims)
+124 
+125 
+126 # -----------------------------------------------------------------------------
+127 
+128 def ground_state(eigenvalues: np.ndarray, dims: np.ndarray | None = None) -> State:
+129     """Generate a quantum state on `HilbertSchmidt` representing a ground
+130     state.
+131 
+132     Parameters
+133     ----------
+134     eigenvalues : array_like
+135         Eigenvalues of the Hamiltonian for which a ground state is to be
+136         generated. This must be sorted in ascending order.
+137     dims : array_like, optional
+138         Dimensions of the Hilbert space for the resulting state vector. If not
+139         given, the result is a vector representing the state, otherwise the
+140         state is reshaped such that the state matrix has the given dimensions.
+141 
+142     Returns
+143     -------
+144     data : :class:`State`
+145         The quantum state.
+146     """
+147     coeff = np.array([1, *np.zeros_like(eigenvalues[1:])], dtype=np.complex128)
+148     state = State.from_vector(coeff, dims=dims)
+149     return state
+150 
+151 
+152 # -----------------------------------------------------------------------------
+153 
+154 def plus_state(dim: int) -> State:
+155     """Generate a quantum state on `HilbertSchmidt` representing a `+` state.
+156 
+157     Parameters
+158     ----------
+159     dim : int
+160         Dimension of the Hilbert space of the quantum state.
+161 
+162     Returns
+163     -------
+164     data : :class:`State`
+165         The quantum state.
+166     """
+167     return 1 / np.sqrt(2) * (State(np.eye(dim)) + State(np.ones((dim, dim))))
+168 
+169 
+170 # -----------------------------------------------------------------------------
+171 
+172 def coherent_state(z: complex) -> State:
+173     """Generate a quantum state on `HilbertSchmidt` representing a coherent
+174     state.
+175 
+176     Parameters
+177     ----------
+178     z : complex
+179         Complex coefficient representing the coherent state.
+180 
+181     Returns
+182     -------
+183     data : :class:`State`
+184         The quantum state.
+185     """
+186     return State.from_vector(np.array([z], dtype=np.complex128))
+187 
+188 
+189 # -----------------------------------------------------------------------------
+190 
+191 def spin_coherent_state(j: int | float, z: complex) -> State:
+192     """Generate a quantum state on `HilbertSchmidt` representing a spin coherent
+193     state.
+194 
+195     Parameters
+196     ----------
+197     j : int or float
+198         Spin number.
+199     z : complex
+200         Complex coefficient representing the spin coherent state.
+201 
+202     Returns
+203     -------
+204     data : :class:`State`
+205         The quantum state.
+206     """
+207     return State.from_vector(Hypersphere(j, complex).sample(z), dims=[1])
+208 
+209 
+210 # -----------------------------------------------------------------------------
+211 
+212 def bosonic_state(N: int, n: int, a: complex) -> State:
+213     """Generate a quantum state on `HilbertSchmidt` representing a bosonic
+214     state.
+215 
+216     Parameters
+217     ----------
+218     N : int
+219         Number of modes.
+220     n : int
+221         Boson number.
+222     a : complex
+223         Complex coefficient representing the bosonic coherent state.
+224 
+225     Returns
+226     -------
+227     data : :class:`State`
+228         The quantum state.
+229     """
+230     dim = n + 1
+231     data = State(1 / np.sqrt(dim) * np.eye(dim, dtype=np.complex128)) ** (a / np.sqrt(2))
+232     return data ** N
+233 
+234 
+235 # -----------------------------------------------------------------------------
+236 
+237 def cat_state(a: complex) -> State:
+238     """Generate a quantum state on `HilbertSchmidt` representing a cat
+239     state.
+240 
+241     Parameters
+242     ----------
+243     a : complex
+244         Complex coefficient representing the cat state.
+245 
+246     Returns
+247     -------
+248     data : :class:`State`
+249         The quantum state.
+250     """
+251     return 1 / np.sqrt(2) * (State(np.eye(2)) + State(np.diag([a, np.conj(a)])))
+252 
+253 
+254 # -----------------------------------------------------------------------------
+255 
+256 def bell_state(dims: np.ndarray, index: int) -> State:
+257     """Generate a quantum state on `HilbertSchmidt` representing a Bell
+258     state.
+259 
+260     Parameters
+261     ----------
+262     dims : array_like
+263         Dimensions of the state vector.
+264     index : int
+265         Index of the Bell state. This must correspond to a valid index in the
+266         state vector.
+267 
+268     Returns
+269     -------
+270     data : :class:`State`
+271         The quantum state.
+272     """
+273     if index not in (0, 1, 2, 3):
+274         raise ValueError(f"Bell state index out of bounds ({index})")
+275     bell = {
+276         0: "00",
+277         1: "01",
+278         2: "10",
+279         3: "11",
+280     }
+281     data = np.eye(np.prod(dims), dtype=np.complex128)[
+282         [int(f"{bell[index]}{i}", 2) for i in range(np.prod(dims))]
+283     ]
+284     return State(data).reshape(dims)
+285 
+286 
+287 # -----------------------------------------------------------------------------
+288 
+289 def ghz_state(dims: np.ndarray) -> State:
+290     """Generate a quantum state on `HilbertSchmidt` representing a GHZ
+291     state.
+292 
+293     Parameters
+294     ----------
+295     dims : array_like
+296         Dimensions of the state vector.
+297 
+298     Returns
+299     -------
+300     data : :class:`State`
+301         The quantum state.
+302     """
+303     data = np.eye(np.prod(dims), dtype=np.complex128)[list(range(0, np.prod(dims), 2))]
+304     return State(data).reshape(dims)
+305 
+306 
+307 # -----------------------------------------------------------------------------
+308 
+309 def w_state(dims: np.ndarray) -> State:
+310     """Generate a quantum state on `HilbertSchmidt` representing a `W` state.
+311 
+312     Parameters
+313     ----------
+314     dims : array_like
+315         Dimensions of the state vector.
+316 
+317     Returns
+318     -------
+319     data : :class:`State`
+320         The quantum state.
+321     """
+322     return State(1 / np.sqrt(dims[0]) * np.ones((np.prod(dims), np.prod(dims))))
+323 
+324 
+325 # -----------------------------------------------------------------------------
+326 
+327 def cluster_state(dims: np.ndarray) -> State:
+328     """Generate a quantum state on `HilbertSchmidt` representing a cluster
+329     state.
+330 
+331     Parameters
+332     ----------
+333     dims : array_like
+334         Dimensions of the state vector.
+335 
+336     Returns
+337     -------
+338     data : :class:`State`
+339         The quantum state.
+340     """
+341     zs = unitary_group(dims, 4)
+342     gsp = gate_sequence_product(zs)
+343     data = gsp * State(np.eye(np.prod(dims), dtype=np.complex128))
+344     return data
+345 
+346 
+347 # -----------------------------------------------------------------------------
+348 
+349 def stabilizer_state(stabilizers: np.ndarray) -> State:
+350     """Generate a quantum state on `HilbertSchmidt` corresponding to
+351     stabilizer generators.
+352 
+353     This function constructs the matrix form of the stabilizer state as
+354     defined in the Numpy-based stabilizer simulator `qiskit`
+355 
+356     Parameters
+357     ----------
+358     stabilizers : array_like
+359         An array of K binary strings (each having length 2N) representing the K
+360         stabilizer generators of an N-qubit stabilizer state.
+361 
+362     Returns
+363     -------
+364     data : :class:`State`
+365         The quantum state.
+366     """
+367     data = State(stabilizer_to_dm(stabilizers))
+368     return data
+369 
+370 
+371 # -----------------------------------------------------------------------------
+372 
+373 def multipartite(data: State) -> State:
+374     """Generate a quantum state on `HilbertSchmidt` representing a
+375     multipartite state.
+376 
+377     Parameters
+378     ----------
+379     data : :class:`State`
+380         A :class:`State` object representing a quantum state.
+381 
+382     Returns
+383     -------
+384     data : :class:`State`
+385         The quantum state.
+386     """
+387     if data.purification():
+388         data = data.purification()
+389     return State(data)
+390 
+391 
+392 # -----------------------------------------------------------------------------
+393 
+394 def unitary_entangler(dims: np.ndarray, seed: int | None = None, **kwargs) -> State:
+395     """Generate a random quantum state on `HilbertSchmidt` with given
+396     dimensions using random unitary operators.
+397 
+398     Parameters
+399     ----------
+400     dims : array_like
+401         Dimensions of Hilbert-Schmidt space, such that the composite system is
+402         a state over multiple subsystems having Hilbert-Schmidt dimensions
+403         ``np.prod(dims)``.
+404     seed : int, optional
+405         Seed for the random number generator.
+406     **kwargs
+407         Other keyword arguments are ignored (for the sake of a consistent
+408         interface with other state generation functions).
+409 
+410     Returns
+411     -------
+412     data : :class:`State`
+413         The quantum state.
+414     """
+415     data = np.ones(np.prod(dims), dtype=np.complex128)
+416     state = unitary_group(dims, seed=seed, **kwargs) * State(data)
+417     return state
+418 
+419 
+420 # -----------------------------------------------------------------------------
+421 
+422 def matrix_product_state(
+423     dims: np.ndarray, bond_dimensions: np.ndarray, seed: int | None = None, **kwargs
+424 ) -> State:
+425     """Generate a random matrix product state.
+426 
+427     Parameters
+428     ----------
+429     dims : array_like
+430         Dimensions of Hilbert-Schmidt space, such that the composite system is
+431         a state over multiple subsystems having Hilbert-Schmidt dimensions
+432         ``np.prod(dims)``.
+433     bond_dimensions : array_like
+434         Bond dimensions of the matrix product state.
+435     seed : int, optional
+436         Seed for the random number generator.
+437     **kwargs
+438         Other keyword arguments are ignored (for the sake of a consistent
+439         interface with other state generation functions).
+440 
+441     Returns
+442     -------
+443     data : :class:`State`
+444         The quantum state.
+445     """
+446     if bond_dimensions.ndim > 1:
+447         raise ValueError("Bond dimensions must be a 1D array")
+448 
+449     if np.any(bond_dimensions <= 0):
+450         raise ValueError("All bond dimensions must be positive")
+451 
+452     if dims.shape[0] != bond_dimensions.shape[0] + 1:
+453         raise ValueError("The number of bond dimensions must be one less than the number of subsystems")
+454 
+455     # Normalize bond dimensions to prevent vanishing singular values
+456     bond_dimensions = bond_dimensions / np.linalg.norm(bond_dimensions)
+457 
+458     # Generate random unitary matrices
+459     local_dims = dims[:-1] * dims[1:]
+460     local_unitaries = [hspy_unitary_group_sample(d, seed=seed) for d in local_dims]
+461 
+462     # Construct the MPS
+463     mps = [local_unitaries[0]]
+464     for i in range(1, dims.shape[0] - 1):
+465         mps.append(
+466             np.tensordot(
+467                 mps[-1],
+468                 local_unitaries[i],
+469                 axes=([1], [0]),
+470             )
+471         )
+472     mps.append(np.tensordot(mps[-1], local_unitaries[-1], axes=([1], [0])))
+473 
+474     # Reshape the MPS to the desired dimensions
+475     data = State(mps[-1])
+476     data = data.reshape(dims)
+477     return data
+478 
+479 
+480 # -----------------------------------------------------------------------------
+481 
+482 def projector(
+483     data: State, complement: bool = False, projected_subspace: np.ndarray | None = None
+484 ) -> State:
+485     """Project `state` onto one of its subspaces.
+486 
+487     Parameters
+488     ----------
+489     data : :class:`State`
+490         A :

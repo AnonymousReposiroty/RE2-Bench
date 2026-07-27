@@ -1,0 +1,249 @@
+from numbers import Integral, Real
+from sklearn.base import (
+    BaseEstimator,
+    ClassNamePrefixFeaturesOutMixin,
+    TransformerMixin,
+    _fit_context,
+)
+from sklearn.metrics.pairwise import pairwise_kernels
+from sklearn.utils._param_validation import Interval, StrOptions
+
+class KernelPCA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEstimator):
+    """Kernel Principal component analysis (KPCA).
+
+    Non-linear dimensionality reduction through the use of kernels [1]_, see also
+    :ref:`metrics`.
+
+    It uses the :func:`scipy.linalg.eigh` LAPACK implementation of the full SVD
+    or the :func:`scipy.sparse.linalg.eigsh` ARPACK implementation of the
+    truncated SVD, depending on the shape of the input data and the number of
+    components to extract. It can also use a randomized truncated SVD by the
+    method proposed in [3]_, see `eigen_solver`.
+
+    For a usage example and comparison between
+    Principal Components Analysis (PCA) and its kernelized version (KPCA), see
+    :ref:`sphx_glr_auto_examples_decomposition_plot_kernel_pca.py`.
+
+    For a usage example in denoising images using KPCA, see
+    :ref:`sphx_glr_auto_examples_applications_plot_digits_denoising.py`.
+
+    Read more in the :ref:`User Guide <kernel_PCA>`.
+
+    Parameters
+    ----------
+    n_components : int, default=None
+        Number of components. If None, all non-zero components are kept.
+
+    kernel : {'linear', 'poly', 'rbf', 'sigmoid', 'cosine', 'precomputed'}             or callable, default='linear'
+        Kernel used for PCA.
+
+    gamma : float, default=None
+        Kernel coefficient for rbf, poly and sigmoid kernels. Ignored by other
+        kernels. If ``gamma`` is ``None``, then it is set to ``1/n_features``.
+
+    degree : float, default=3
+        Degree for poly kernels. Ignored by other kernels.
+
+    coef0 : float, default=1
+        Independent term in poly and sigmoid kernels.
+        Ignored by other kernels.
+
+    kernel_params : dict, default=None
+        Parameters (keyword arguments) and
+        values for kernel passed as callable object.
+        Ignored by other kernels.
+
+    alpha : float, default=1.0
+        Hyperparameter of the ridge regression that learns the
+        inverse transform (when fit_inverse_transform=True).
+
+    fit_inverse_transform : bool, default=False
+        Learn the inverse transform for non-precomputed kernels
+        (i.e. learn to find the pre-image of a point). This method is based
+        on [2]_.
+
+    eigen_solver : {'auto', 'dense', 'arpack', 'randomized'},             default='auto'
+        Select eigensolver to use. If `n_components` is much
+        less than the number of training samples, randomized (or arpack to a
+        smaller extent) may be more efficient than the dense eigensolver.
+        Randomized SVD is performed according to the method of Halko et al
+        [3]_.
+
+        auto :
+            the solver is selected by a default policy based on n_samples
+            (the number of training samples) and `n_components`:
+            if the number of components to extract is less than 10 (strict) and
+            the number of samples is more than 200 (strict), the 'arpack'
+            method is enabled. Otherwise the exact full eigenvalue
+            decomposition is computed and optionally truncated afterwards
+            ('dense' method).
+        dense :
+            run exact full eigenvalue decomposition calling the standard
+            LAPACK solver via `scipy.linalg.eigh`, and select the components
+            by postprocessing
+        arpack :
+            run SVD truncated to n_components calling ARPACK solver using
+            `scipy.sparse.linalg.eigsh`. It requires strictly
+            0 < n_components < n_samples
+        randomized :
+            run randomized SVD by the method of Halko et al. [3]_. The current
+            implementation selects eigenvalues based on their module; therefore
+            using this method can lead to unexpected results if the kernel is
+            not positive semi-definite. See also [4]_.
+
+        .. versionchanged:: 1.0
+           `'randomized'` was added.
+
+    tol : float, default=0
+        Convergence tolerance for arpack.
+        If 0, optimal value will be chosen by arpack.
+
+    max_iter : int, default=None
+        Maximum number of iterations for arpack.
+        If None, optimal value will be chosen by arpack.
+
+    iterated_power : int >= 0, or 'auto', default='auto'
+        Number of iterations for the power method computed by
+        svd_solver == 'randomized'. When 'auto', it is set to 7 when
+        `n_components < 0.1 * min(X.shape)`, other it is set to 4.
+
+        .. versionadded:: 1.0
+
+    remove_zero_eig : bool, default=False
+        If True, then all components with zero eigenvalues are removed, so
+        that the number of components in the output may be < n_components
+        (and sometimes even zero due to numerical instability).
+        When n_components is None, this parameter is ignored and components
+        with zero eigenvalues are removed regardless.
+
+    random_state : int, RandomState instance or None, default=None
+        Used when ``eigen_solver`` == 'arpack' or 'randomized'. Pass an int
+        for reproducible results across multiple function calls.
+        See :term:`Glossary <random_state>`.
+
+        .. versionadded:: 0.18
+
+    copy_X : bool, default=True
+        If True, input X is copied and stored by the model in the `X_fit_`
+        attribute. If no further changes will be done to X, setting
+        `copy_X=False` saves memory by storing a reference.
+
+        .. versionadded:: 0.18
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary <n_jobs>`
+        for more details.
+
+        .. versionadded:: 0.18
+
+    Attributes
+    ----------
+    eigenvalues_ : ndarray of shape (n_components,)
+        Eigenvalues of the centered kernel matrix in decreasing order.
+        If `n_components` and `remove_zero_eig` are not set,
+        then all values are stored.
+
+    eigenvectors_ : ndarray of shape (n_samples, n_components)
+        Eigenvectors of the centered kernel matrix. If `n_components` and
+        `remove_zero_eig` are not set, then all components are stored.
+
+    dual_coef_ : ndarray of shape (n_samples, n_features)
+        Inverse transform matrix. Only available when
+        ``fit_inverse_transform`` is True.
+
+    X_transformed_fit_ : ndarray of shape (n_samples, n_components)
+        Projection of the fitted data on the kernel principal components.
+        Only available when ``fit_inverse_transform`` is True.
+
+    X_fit_ : ndarray of shape (n_samples, n_features)
+        The data used to fit the model. If `copy_X=False`, then `X_fit_` is
+        a reference. This attribute is used for the calls to transform.
+
+    n_features_in_ : int
+        Number of features seen during :term:`fit`.
+
+        .. versionadded:: 0.24
+
+    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+        Names of features seen during :term:`fit`. Defined only when `X`
+        has feature names that are all strings.
+
+        .. versionadded:: 1.0
+
+    gamma_ : float
+        Kernel coefficient for rbf, poly and sigmoid kernels. When `gamma`
+        is explicitly provided, this is just the same as `gamma`. When `gamma`
+        is `None`, this is the actual value of kernel coefficient.
+
+        .. versionadded:: 1.3
+
+    See Also
+    --------
+    FastICA : A fast algorithm for Independent Component Analysis.
+    IncrementalPCA : Incremental Principal Component Analysis.
+    NMF : Non-Negative Matrix Factorization.
+    PCA : Principal Component Analysis.
+    SparsePCA : Sparse Principal Component Analysis.
+    TruncatedSVD : Dimensionality reduction using truncated SVD.
+
+    References
+    ----------
+    .. [1] `Schölkopf, Bernhard, Alexander Smola, and Klaus-Robert Müller.
+       "Kernel principal component analysis."
+       International conference on artificial neural networks.
+       Springer, Berlin, Heidelberg, 1997.
+       <https://graphics.stanford.edu/courses/cs233-25-spring/ReferencedPapers/scholkopf_kernel.pdf>`_
+
+    .. [2] `Bakır, Gökhan H., Jason Weston, and Bernhard Schölkopf.
+       "Learning to find pre-images."
+       Advances in neural information processing systems 16 (2004): 449-456.
+       <https://papers.nips.cc/paper/2003/file/ac1ad983e08ad3304a97e147f522747e-Paper.pdf>`_
+
+    .. [3] :arxiv:`Halko, Nathan, Per-Gunnar Martinsson, and Joel A. Tropp.
+       "Finding structure with randomness: Probabilistic algorithms for
+       constructing approximate matrix decompositions."
+       SIAM review 53.2 (2011): 217-288. <0909.4061>`
+
+    .. [4] `Martinsson, Per-Gunnar, Vladimir Rokhlin, and Mark Tygert.
+       "A randomized algorithm for the decomposition of matrices."
+       Applied and Computational Harmonic Analysis 30.1 (2011): 47-68.
+       <https://www.sciencedirect.com/science/article/pii/S1063520310000242>`_
+
+    Examples
+    --------
+    >>> from sklearn.datasets import load_digits
+    >>> from sklearn.decomposition import KernelPCA
+    >>> X, _ = load_digits(return_X_y=True)
+    >>> transformer = KernelPCA(n_components=7, kernel='linear')
+    >>> X_transformed = transformer.fit_transform(X)
+    >>> X_transformed.shape
+    (1797, 7)
+    """
+    _parameter_constraints: dict = {'n_components': [Interval(Integral, 1, None, closed='left'), None], 'kernel': [StrOptions({'linear', 'poly', 'rbf', 'sigmoid', 'cosine', 'precomputed'}), callable], 'gamma': [Interval(Real, 0, None, closed='left'), None], 'degree': [Interval(Real, 0, None, closed='left')], 'coef0': [Interval(Real, None, None, closed='neither')], 'kernel_params': [dict, None], 'alpha': [Interval(Real, 0, None, closed='left')], 'fit_inverse_transform': ['boolean'], 'eigen_solver': [StrOptions({'auto', 'dense', 'arpack', 'randomized'})], 'tol': [Interval(Real, 0, None, closed='left')], 'max_iter': [Interval(Integral, 1, None, closed='left'), None], 'iterated_power': [Interval(Integral, 0, None, closed='left'), StrOptions({'auto'})], 'remove_zero_eig': ['boolean'], 'random_state': ['random_state'], 'copy_X': ['boolean'], 'n_jobs': [None, Integral]}
+
+    def __init__(self, n_components=None, *, kernel='linear', gamma=None, degree=3, coef0=1, kernel_params=None, alpha=1.0, fit_inverse_transform=False, eigen_solver='auto', tol=0, max_iter=None, iterated_power='auto', remove_zero_eig=False, random_state=None, copy_X=True, n_jobs=None):
+        self.n_components = n_components
+        self.kernel = kernel
+        self.kernel_params = kernel_params
+        self.gamma = gamma
+        self.degree = degree
+        self.coef0 = coef0
+        self.alpha = alpha
+        self.fit_inverse_transform = fit_inverse_transform
+        self.eigen_solver = eigen_solver
+        self.tol = tol
+        self.max_iter = max_iter
+        self.iterated_power = iterated_power
+        self.remove_zero_eig = remove_zero_eig
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        self.copy_X = copy_X
+
+    def _get_kernel(self, X, Y=None):
+        if callable(self.kernel):
+            params = self.kernel_params or {}
+        else:
+            params = {'gamma': self.gamma_, 'degree': self.degree, 'coef0': self.coef0}
+        return pairwise_kernels(X, Y, metric=self.kernel, filter_params=True, n_jobs=self.n_jobs, **params)

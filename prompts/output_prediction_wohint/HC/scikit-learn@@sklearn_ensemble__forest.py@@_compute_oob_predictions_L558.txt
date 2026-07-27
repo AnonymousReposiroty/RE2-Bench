@@ -1,0 +1,384 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. You need to predict output variable values, and print output between [OUTPUT] and [/OUTPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[PYTHON]
+from abc import ABCMeta, abstractmethod
+from numbers import Integral, Real
+from warnings import catch_warnings, simplefilter, warn
+import numpy as np
+from scipy.sparse import issparse
+from sklearn.base import ClassifierMixin, MultiOutputMixin, RegressorMixin, TransformerMixin, _fit_context, is_classifier
+from sklearn.ensemble._base import BaseEnsemble, _partition_estimators
+from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
+
+class BaseForest(MultiOutputMixin, BaseEnsemble, metaclass=ABCMeta):
+    _parameter_constraints: dict = {'n_estimators': [Interval(Integral, 1, None, closed='left')], 'bootstrap': ['boolean'], 'oob_score': ['boolean', callable], 'n_jobs': [Integral, None], 'random_state': ['random_state'], 'verbose': ['verbose'], 'warm_start': ['boolean'], 'max_samples': [None, Interval(RealNotInt, 0.0, 1.0, closed='right'), Interval(Integral, 1, None, closed='left')]}
+
+    @abstractmethod
+    def __init__(self, estimator, n_estimators=100, *, estimator_params=tuple(), bootstrap=False, oob_score=False, n_jobs=None, random_state=None, verbose=0, warm_start=False, class_weight=None, max_samples=None):
+        super().__init__(estimator=estimator, n_estimators=n_estimators, estimator_params=estimator_params)
+        self.bootstrap = bootstrap
+        self.oob_score = oob_score
+        self.n_jobs = n_jobs
+        self.random_state = random_state
+        self.verbose = verbose
+        self.warm_start = warm_start
+        self.class_weight = class_weight
+        self.max_samples = max_samples
+
+    def _compute_oob_predictions(self, X, y):
+        if issparse(X):
+            X = X.tocsr()
+        n_samples = y.shape[0]
+        n_outputs = self.n_outputs_
+        if is_classifier(self) and hasattr(self, 'n_classes_'):
+            oob_pred_shape = (n_samples, self.n_classes_[0], n_outputs)
+        else:
+            oob_pred_shape = (n_samples, 1, n_outputs)
+        oob_pred = np.zeros(shape=oob_pred_shape, dtype=np.float64)
+        n_oob_pred = np.zeros((n_samples, n_outputs), dtype=np.int64)
+        n_samples_bootstrap = _get_n_samples_bootstrap(n_samples, self.max_samples)
+        for estimator in self.estimators_:
+            unsampled_indices = _generate_unsampled_indices(estimator.random_state, n_samples, n_samples_bootstrap)
+            y_pred = self._get_oob_predictions(estimator, X[unsampled_indices, :])
+            oob_pred[unsampled_indices, ...] += y_pred
+            n_oob_pred[unsampled_indices, :] += 1
+        for k in range(n_outputs):
+            if (n_oob_pred == 0).any():
+                warn('Some inputs do not have OOB scores. This probably means too few trees were used to compute any reliable OOB estimates.', UserWarning)
+                n_oob_pred[n_oob_pred == 0] = 1
+            oob_pred[..., k] /= n_oob_pred[..., [k]]
+        return oob_pred
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.base.is_classifier
+
+def is_classifier(estimator):
+    """Return True if the given estimator is (probably) a classifier.
+
+    Parameters
+    ----------
+    estimator : estimator instance
+        Estimator object to test.
+
+    Returns
+    -------
+    out : bool
+        True if estimator is a classifier and False otherwise.
+
+    Examples
+    --------
+    >>> from sklearn.base import is_classifier
+    >>> from sklearn.cluster import KMeans
+    >>> from sklearn.svm import SVC, SVR
+    >>> classifier = SVC()
+    >>> regressor = SVR()
+    >>> kmeans = KMeans()
+    >>> is_classifier(classifier)
+    True
+    >>> is_classifier(regressor)
+    False
+    >>> is_classifier(kmeans)
+    False
+    """
+    return get_tags(estimator).estimator_type == "classifier"
+
+scikit-learn.sklearn.ensemble._forest._get_oob_predictions
+
+@staticmethod
+def _get_oob_predictions(tree, X):
+    """Compute the OOB predictions for an individual tree.
+
+    Parameters
+    ----------
+    tree : DecisionTreeClassifier object
+        A single decision tree classifier.
+    X : ndarray of shape (n_samples, n_features)
+        The OOB samples.
+
+    Returns
+    -------
+    y_pred : ndarray of shape (n_samples, n_classes, n_outputs)
+        The OOB associated predictions.
+    """
+    y_pred = tree.predict_proba(X, check_input=False)
+    y_pred = np.asarray(y_pred)
+    if y_pred.ndim == 2:
+        # binary and multiclass
+        y_pred = y_pred[..., np.newaxis]
+    else:
+        # Roll the first `n_outputs` axis to the last axis. We will reshape
+        # from a shape of (n_outputs, n_samples, n_classes) to a shape of
+        # (n_samples, n_classes, n_outputs).
+        y_pred = np.rollaxis(y_pred, axis=0, start=3)
+    return y_pred
+
+scikit-learn.sklearn.ensemble._forest._generate_unsampled_indices
+
+def _generate_unsampled_indices(random_state, n_samples, n_samples_bootstrap):
+    """
+    Private function used to forest._set_oob_score function."""
+    sample_indices = _generate_sample_indices(
+        random_state, n_samples, n_samples_bootstrap
+    )
+    sample_counts = np.bincount(sample_indices, minlength=n_samples)
+    unsampled_mask = sample_counts == 0
+    indices_range = np.arange(n_samples)
+    unsampled_indices = indices_range[unsampled_mask]
+
+    return unsampled_indices
+
+scikit-learn.sklearn.ensemble._forest._get_n_samples_bootstrap
+
+def _get_n_samples_bootstrap(n_samples, max_samples):
+    """
+    Get the number of samples in a bootstrap sample.
+
+    Parameters
+    ----------
+    n_samples : int
+        Number of samples in the dataset.
+    max_samples : int or float
+        The maximum number of samples to draw from the total available:
+            - if float, this indicates a fraction of the total and should be
+              the interval `(0.0, 1.0]`;
+            - if int, this indicates the exact number of samples;
+            - if None, this indicates the total number of samples.
+
+    Returns
+    -------
+    n_samples_bootstrap : int
+        The total number of samples to draw for the bootstrap sample.
+    """
+    if max_samples is None:
+        return n_samples
+
+    if isinstance(max_samples, Integral):
+        if max_samples > n_samples:
+            msg = "`max_samples` must be <= n_samples={} but got value {}"
+            raise ValueError(msg.format(n_samples, max_samples))
+        return max_samples
+
+    if isinstance(max_samples, Real):
+        return max(round(n_samples * max_samples), 1)
+
+
+[/PYTHON]
+What will be the output of `_compute_oob_predictions`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "estimator": "DecisionTreeClassifier()",
+        "n_estimators": 40,
+        "estimator_params": [
+            "criterion",
+            "max_depth",
+            "min_samples_split",
+            "min_samples_leaf",
+            "min_weight_fraction_leaf",
+            "max_features",
+            "max_leaf_nodes",
+            "min_impurity_decrease",
+            "random_state",
+            "ccp_alpha",
+            "monotonic_cst"
+        ],
+        "bootstrap": true,
+        "oob_score": true,
+        "n_jobs": null,
+        "random_state": 0,
+        "verbose": 0,
+        "warm_start": false,
+        "class_weight": null,
+        "max_samples": null,
+        "criterion": "gini",
+        "max_depth": null,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "min_weight_fraction_leaf": 0.0,
+        "max_features": "sqrt",
+        "max_leaf_nodes": null,
+        "min_impurity_decrease": 0.0,
+        "monotonic_cst": null,
+        "ccp_alpha": 0.0,
+        "n_features_in_": 20,
+        "_n_samples": 150,
+        "n_outputs_": 1,
+        "classes_": [
+            "array([0, 1])"
+        ],
+        "n_classes_": [
+            2
+        ],
+        "_n_samples_bootstrap": 150,
+        "estimator_": "DecisionTreeClassifier()",
+        "estimators_": [
+            "DecisionTreeClassifier(max_features='sqrt', random_state=209652396)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=398764591)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=924231285)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1478610112)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=441365315)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1537364731)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=192771779)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1491434855)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1819583497)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=530702035)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=626610453)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1650906866)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1879422756)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1277901399)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1682652230)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=243580376)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1991416408)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1171049868)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1646868794)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=2051556033)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1252949478)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1340754471)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=124102743)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=2061486254)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=292249176)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1686997841)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1827923621)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1443447321)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=305097549)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1449105480)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=374217481)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=636393364)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=86837363)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1581585360)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1428591347)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1963466437)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1194674174)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=602801999)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1589190063)",
+            "DecisionTreeClassifier(max_features='sqrt', random_state=1589512640)"
+        ]
+    },
+    "args": {
+        "X": "<Compressed Sparse Column sparse matrix of dtype 'float32'\n\twith 3000 stored elements and shape (150, 20)>",
+        "y": "array([[0.],\n       [0.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [0.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [0.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [0.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [1.],\n       [0.],\n       [1.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [1.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [0.],\n       [0.],\n       [1.],\n       [0.]])"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]

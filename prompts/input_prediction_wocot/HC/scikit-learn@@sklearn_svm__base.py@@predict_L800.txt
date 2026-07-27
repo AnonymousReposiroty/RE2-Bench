@@ -1,0 +1,375 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from abc import ABCMeta, abstractmethod
+import numpy as np
+from sklearn.base import BaseEstimator, ClassifierMixin, _fit_context
+from sklearn.utils._param_validation import Interval, StrOptions
+from sklearn.utils.multiclass import _ovr_decision_function, check_classification_targets
+from sklearn.utils.validation import _check_large_sparse, _check_sample_weight, _num_samples, check_consistent_length, check_is_fitted, validate_data
+
+class BaseSVC(ClassifierMixin, BaseLibSVM, metaclass=ABCMeta):
+    _parameter_constraints: dict = {**BaseLibSVM._parameter_constraints, 'decision_function_shape': [StrOptions({'ovr', 'ovo'})], 'break_ties': ['boolean']}
+    for unused_param in ['epsilon', 'nu']:
+        _parameter_constraints.pop(unused_param)
+
+    @abstractmethod
+    def __init__(self, kernel, degree, gamma, coef0, tol, C, nu, shrinking, probability, cache_size, class_weight, verbose, max_iter, decision_function_shape, random_state, break_ties):
+        self.decision_function_shape = decision_function_shape
+        self.break_ties = break_ties
+        super().__init__(kernel=kernel, degree=degree, gamma=gamma, coef0=coef0, tol=tol, C=C, nu=nu, epsilon=0.0, shrinking=shrinking, probability=probability, cache_size=cache_size, class_weight=class_weight, verbose=verbose, max_iter=max_iter, random_state=random_state)
+
+    def decision_function(self, X):
+        dec = self._decision_function(X)
+        if self.decision_function_shape == 'ovr' and len(self.classes_) > 2:
+            return _ovr_decision_function(dec < 0, -dec, len(self.classes_))
+        return dec
+
+    def predict(self, X):
+        check_is_fitted(self)
+        if self.break_ties and self.decision_function_shape == 'ovo':
+            raise ValueError("break_ties must be False when decision_function_shape is 'ovo'")
+        if self.break_ties and self.decision_function_shape == 'ovr' and (len(self.classes_) > 2):
+            y = np.argmax(self.decision_function(X), axis=1)
+        else:
+            y = super().predict(X)
+        return self.classes_.take(np.asarray(y, dtype=np.intp))
+
+    def _decision_function(self, X):
+        X = self._validate_for_predict(X)
+        X = self._compute_kernel(X)
+        if self._sparse:
+            dec_func = self._sparse_decision_function(X)
+        else:
+            dec_func = self._dense_decision_function(X)
+        if self._impl in ['c_svc', 'nu_svc'] and len(self.classes_) == 2:
+            return -dec_func.ravel()
+        return dec_func
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.svm._base.predict
+
+def predict(self, X):
+    """Perform regression on samples in X.
+
+    For a one-class model, +1 (inlier) or -1 (outlier) is returned.
+
+    Parameters
+    ----------
+    X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        For kernel="precomputed", the expected shape of X is
+        (n_samples_test, n_samples_train).
+
+    Returns
+    -------
+    y_pred : ndarray of shape (n_samples,)
+        The predicted values.
+    """
+    X = self._validate_for_predict(X)
+    predict = self._sparse_predict if self._sparse else self._dense_predict
+    return predict(X)
+
+scikit-learn.sklearn.svm._base.decision_function
+
+def decision_function(self, X):
+    """Evaluate the decision function for the samples in X.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        The input samples.
+
+    Returns
+    -------
+    X : ndarray of shape (n_samples, n_classes * (n_classes-1) / 2)
+        Returns the decision function of the sample for each class
+        in the model.
+        If decision_function_shape='ovr', the shape is (n_samples,
+        n_classes).
+
+    Notes
+    -----
+    If decision_function_shape='ovo', the function values are proportional
+    to the distance of the samples X to the separating hyperplane. If the
+    exact distances are required, divide the function values by the norm of
+    the weight vector (``coef_``). See also `this question
+    <https://stats.stackexchange.com/questions/14876/
+    interpreting-distance-from-hyperplane-in-svm>`_ for further details.
+    If decision_function_shape='ovr', the decision function is a monotonic
+    transformation of ovo decision function.
+    """
+    dec = self._decision_function(X)
+    if self.decision_function_shape == "ovr" and len(self.classes_) > 2:
+        return _ovr_decision_function(dec < 0, -dec, len(self.classes_))
+    return dec
+
+scikit-learn.sklearn.utils.validation.check_is_fitted
+
+def check_is_fitted(estimator, attributes=None, *, msg=None, all_or_any=all):
+    """Perform is_fitted validation for estimator.
+
+    Checks if the estimator is fitted by verifying the presence of
+    fitted attributes (ending with a trailing underscore) and otherwise
+    raises a :class:`~sklearn.exceptions.NotFittedError` with the given message.
+
+    If an estimator does not set any attributes with a trailing underscore, it
+    can define a ``__sklearn_is_fitted__`` method returning a boolean to
+    specify if the estimator is fitted or not. See
+    :ref:`sphx_glr_auto_examples_developing_estimators_sklearn_is_fitted.py`
+    for an example on how to use the API.
+
+    If no `attributes` are passed, this function will pass if an estimator is stateless.
+    An estimator can indicate it's stateless by setting the `requires_fit` tag. See
+    :ref:`estimator_tags` for more information. Note that the `requires_fit` tag
+    is ignored if `attributes` are passed.
+
+    Parameters
+    ----------
+    estimator : estimator instance
+        Estimator instance for which the check is performed.
+
+    attributes : str, list or tuple of str, default=None
+        Attribute name(s) given as string or a list/tuple of strings
+        Eg.: ``["coef_", "estimator_", ...], "coef_"``
+
+        If `None`, `estimator` is considered fitted if there exist an
+        attribute that ends with a underscore and does not start with double
+        underscore.
+
+    msg : str, default=None
+        The default error message is, "This %(name)s instance is not fitted
+        yet. Call 'fit' with appropriate arguments before using this
+        estimator."
+
+        For custom messages if "%(name)s" is present in the message string,
+        it is substituted for the estimator name.
+
+        Eg. : "Estimator, %(name)s, must be fitted before sparsifying".
+
+    all_or_any : callable, {all, any}, default=all
+        Specify whether all or any of the given attributes must exist.
+
+    Raises
+    ------
+    TypeError
+        If the estimator is a class or not an estimator instance
+
+    NotFittedError
+        If the attributes are not found.
+
+    Examples
+    --------
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> from sklearn.utils.validation import check_is_fitted
+    >>> from sklearn.exceptions import NotFittedError
+    >>> lr = LogisticRegression()
+    >>> try:
+    ...     check_is_fitted(lr)
+    ... except NotFittedError as exc:
+    ...     print(f"Model is not fitted yet.")
+    Model is not fitted yet.
+    >>> lr.fit([[1, 2], [1, 3]], [1, 0])
+    LogisticRegression()
+    >>> check_is_fitted(lr)
+    """
+    if isclass(estimator):
+        raise TypeError("{} is a class, not an instance.".format(estimator))
+    if msg is None:
+        msg = (
+            "This %(name)s instance is not fitted yet. Call 'fit' with "
+            "appropriate arguments before using this estimator."
+        )
+
+    if not hasattr(estimator, "fit"):
+        raise TypeError("%s is not an estimator instance." % (estimator))
+
+    tags = get_tags(estimator)
+
+    if not tags.requires_fit and attributes is None:
+        return
+
+    if not _is_fitted(estimator, attributes, all_or_any):
+        raise NotFittedError(msg % {"name": type(estimator).__name__})
+
+
+[/PYTHON]
+What will be the input of `predict`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "array([2, 2, 2, 0, 1, 0, 2, 2, 2, 1, 0, 2, 0, 2, 1, 2, 0, 2, 1, 1, 2, 1,\n       2, 1, 2, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 2, 0, 2])"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "decision_function_shape": XXX,
+        "break_ties": XXX,
+        "kernel": XXX,
+        "degree": XXX,
+        "gamma": XXX,
+        "coef0": XXX,
+        "tol": XXX,
+        "C": XXX,
+        "nu": XXX,
+        "epsilon": XXX,
+        "shrinking": XXX,
+        "probability": XXX,
+        "cache_size": XXX,
+        "class_weight": XXX,
+        "verbose": XXX,
+        "max_iter": XXX,
+        "random_state": XXX,
+        "_sparse": XXX,
+        "n_features_in_": XXX,
+        "class_weight_": XXX,
+        "classes_": XXX,
+        "_gamma": XXX,
+        "support_": XXX,
+        "support_vectors_": XXX,
+        "_n_support": XXX,
+        "dual_coef_": XXX,
+        "intercept_": XXX,
+        "_probA": XXX,
+        "_probB": XXX,
+        "fit_status_": XXX,
+        "_num_iter": XXX,
+        "shape_fit_": XXX,
+        "_intercept_": XXX,
+        "_dual_coef_": XXX,
+        "n_iter_": XXX
+    },
+    "args": {
+        "X": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

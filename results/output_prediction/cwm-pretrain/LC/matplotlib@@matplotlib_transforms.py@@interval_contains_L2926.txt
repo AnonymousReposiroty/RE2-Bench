@@ -1,0 +1,520 @@
+<|assistant|>
+
+<|assistant|>
+
+<think> 
+1. interval = array([-107.73502692, -7.73502692])
+2. val = -80.0
+3. a, b = -107.73502692, -7.73502692
+4. Since a > b, swap them: a = -7.73502692, b = -107.73502692
+5. Check if a <= val <= b: -7.73502692 <= -80.0 <= -107.73502692
+6. This is false since -80.0 is not between -107.73502692 and -7.73502692 
+</think>
+
+[OUTPUT]
+```
+{
+    "output": false        
+}
+```
+[/OUTPUT]
+
+</s>
+
+[FILEPATH] pymatch/src/extract_simprompt.py [/FILEPATH]
+import json
+from argparse import Namespace
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+import torch
+import os
+import random
+import warnings
+warnings.filterwarnings('ignore')
+
+# GPU 설정
+os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3, 4, 5, 6, 7"
+random.seed(42)
+
+# 사용자 인자 처리
+args = Namespace(
+    model_name_or_path='meta-llama/Llama-2-7b-chat-hf',
+    device_map='auto',
+    seed=42,
+    num_return_sequences=1,
+    prompt_path='/home/wkdwhend/gpum/work2/work2_1/artemis/extract_dataset/prompt/configure_pipenv.json',
+    input_path='/home/wkdwhend/gpum/work2/work2_1/artemis/extract_dataset/testcode/data/',
+    output_path='/home/wkdwhend/gpum/work2/work2_1/artemis/extract_dataset/testcode/output/'
+)
+
+# 모델과 토크나이저 로드
+model = AutoModelForCausalLM.from_pretrained(
+    args.model_name_or_path,
+    torch_dtype=torch.float16,
+    load_in_8bit=True,
+    device_map=args.device_map
+)
+
+tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+
+# Dataset 정보 로드
+with open(args.prompt_path, 'r') as f:
+    dataset = json.load(f)
+
+# 시드 고정
+torch.manual_seed(args.seed)
+
+# 파이프라인 초기화
+llm_pipeline = pipeline(
+    'text-generation',
+    model=model,
+    tokenizer=tokenizer,
+    device_map=args.device_map,
+    torch_dtype=torch.float16,
+    top_k=30,
+    temperature=0.1,
+    max_new_tokens=2000,
+    batch_size=4
+)
+
+# 출력 디렉토리 생성
+if not os.path.exists(args.output_path):
+    os.makedirs(args.output_path)
+
+# 입력 JSON 파일 순회
+for filename in os.listdir(args.input_path):
+    if filename.endswith('.json'):
+        input_file_path = os.path.join(args.input_path, filename)
+        with open(input_file_path, 'r') as f:
+            inputs = json.load(f)
+
+        # 결과를 저장할 리스트 초기화
+        results = []
+
+        # 배치 처리
+        for i in range(0, len(inputs), args.num_return_sequences):
+            batch = inputs[i:i + args.num_return_sequences]
+            prompts = [item['prompt'] for item in batch]
+
+            # 배치 생성
+            llm_pipeline_outputs = llm_pipeline(prompts)
+            batch_results = []
+
+            for input_item, output in zip(batch, llm_pipeline_outputs):
+                # 출력에서 리스트만 추출
+                output_list = output[0]['generated_text'].split("```", 1)[-1].split("```", 1)[0]
+
+                # 예외 케이스 처리
+                if "UsageError" in output_list or "AssertionError" in output_list:
+                    output_list = "UsageError"
+
+                # 예외 케이스 제거
+                output_list = [item for item in output_list if item not in ["UsageError", "AssertionError", "SyntaxError", "TypeError", "ValueError", "IndexError"]]
+
+                # 예외 케이스에 대한 'output' 값 변경
+                if "UsageError" in output_list:
+                    for item in batch:
+                        if "UsageError" in item['ex']:
+                            output_list = "UsageError"
+                        elif "ValueError" in item['ex']:
+                            output_list = "ValueError"
+                        elif "SyntaxError" in item['ex']:
+                            output_list = "SyntaxError"
+                        elif "IndexError" in item['ex']:
+                            output_list = "IndexError"
+                        elif "TypeError" in item['ex']:
+                            output_list = "TypeError"
+                        elif "AssertionError" in item['ex']:
+                            output_list = "AssertionError"
+
+                # 결과 추가
+                batch_results.append({
+                    'output': output_list,
+                    **input_item
+                })
+
+            # 결과 리스트에 배치 결과 추가
+            results.extend(batch_results)
+
+        # 결과 JSON 파일로 저장
+        output_file_path = os.path.join(args.output_path, filename)
+        with open(output_file_path, 'w') as f:
+            json.dump(results, f, indent=4)
+
+[FILEPATH] pymatch/src/mergetoyml.py [/FILEPATH]
+import os
+import yaml
+from typing import Dict, Any, List
+import argparse
+
+# 전역 변수 설정
+num_programs_to_merge = 5
+
+def read_yml(file_path: str) -> Dict[str, Any]:
+    """
+    YAML 파일을 읽어 딕셔너리로 반환
+    """
+    with open(file_path, 'r') as file:
+        return yaml.safe_load(file)
+
+def parse_args() -> argparse.Namespace:
+    """
+    명령행 인자 파싱
+    """
+    parser = argparse.ArgumentParser(description="Merge YAML files")
+    parser.add_argument("--input_dir", type=str, required=True, help="Input directory containing YAML files")
+    parser.add_argument("--output_file", type=str, required=True, help="Output YAML file name")
+    return parser.parse_args()
+
+def merge_files(file_paths: List[str], num_programs_to_merge: int) -> Dict[str, Any]:
+    """
+    여러 YAML 파일을 머징하여 하나의 딕셔너리로 변환
+    """
+    merged_data = {}
+    for file_path in file_paths[:num_programs_to_merge]:
+        data = read_yml(file_path)
+        for key, value in data.items():
+            merged_data.setdefault(key, []).extend(value)
+    return merged_data
+
+def save_to_yml(data: Dict[str, Any], output_file: str) -> None:
+    """
+    데이터를 YAML 파일로 저장
+    """
+    with open(output_file, 'w') as file:
+        yaml.safe_dump(data, file)
+
+def main():
+    args = parse_args()
+
+    input_dir = args.input_dir
+    output_file = args.output_file
+
+    file_paths = sorted([os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith('.yml')])
+    merged_data = merge_files(file_paths, num_programs_to_merge)
+    save_to_yml(merged_data, output_file)
+
+if __name__ == "__main__":
+    main()
+
+[FILEPATH] pymatch/src/checkdataset.py [/FILEPATH]
+import os
+import json
+import argparse
+
+def count_json_files(directory):
+    return len([f for f in os.listdir(directory) if f.endswith('.json')])
+
+def main():
+    parser = argparse.ArgumentParser(description='Count JSON files in a directory.')
+    parser.add_argument('directory', type=str, help='The directory to search for JSON files.')
+    args = parser.parse_args()
+
+    num_files = count_json_files(args.directory)
+    print(f'Number of JSON files in {args.directory}: {num_files}')
+
+if __name__ == '__main__':
+    main()
+
+[FILEPATH] pymatch/src/configure.py [/FILEPATH]
+import os
+import json
+import random
+from tqdm import tqdm
+from argparse import ArgumentParser
+
+# Parse command-line arguments
+parser = ArgumentParser()
+parser.add_argument("--directory", type=str, default="dataset")
+parser.add_argument("--output_path", type=str, default="filtered_dataset.json")
+args = parser.parse_args()
+
+directory_path = args.directory
+output_path = args.output_path
+
+# Function to handle non-JSON files
+def handle_non_json_file(file_path, issue_content):
+    filename = os.path.basename(file_path)
+    print(f"File {filename} is not a valid JSON file. Example content:")
+    print(issue_content[:500])  # Print first 500 characters for review
+    print("..." if len(issue_content) > 500 else "")  # Indicate if content is truncated
+
+# Function to count file extensions in a directory
+def count_file_extensions(directory):
+    extension_counts = {}
+
+    for filename in os.listdir(directory):
+        file_path = os.path.join(directory, filename)
+        
+        if not os.path.isfile(file_path):
+            continue  # Skip directories and special files
+
+        _, ext = os.path.splitext(filename)
+        ext = ext.lower()
+
+        if ext in extension_counts:
+            extension_counts[ext] += 1
+        else:
+            extension_counts[ext] = 1
+
+    return extension_counts
+
+# Function to create random data
+def create_random_data(num_items, num_iterations):
+    data = {
+        "user_id": ["user_" + str(i) for i in range(num_items)],
+        "query": ["query_" + str(i) for i in range(num_items)],
+        "repo": ["repo_" + str(i) for i in range(num_items)],
+        "time": [i for i in range(num_items)],
+        "message_id": [i for i in range(num_items)],
+        "issue": ["issue_" + str(i) for i in range(num_items)],
+        "full_issue": [create_full_issue_text(i) for i in range(num_items)],
+        "content": ["content_" + str(i) for i in range(num_items)]
+    }
+    
+    result = []
+    for i in range(num_items):
+        result.append(
+            {"user_id": data["user_id"][i], "query": data["query"][i], "repo": data["repo"][i],
+             "time": data["time"][i], "message_id": data["message_id"][i], "issue": data["issue"][i],
+             "full_issue": data["full_issue"][i], "content": data["content"][i]}
+        )
+    
+    for i in range(num_iterations):
+        for entry in result:
+            entry["content"] = generate_random_array()
+    
+    return result
+
+# Function to create full issue text
+def create_full_issue_text(i):
+    return f"This is a full issue for item {i}"
+
+# Function to generate random array
+def generate_random_array():
+    return [random.randint(1, 100) for _ in range(random.randint(1, 10))]
+
+# Function to count issues containing 'example' and calculate the percentage
+def count_issues_containing_example(directory):
+    count = 0
+    total_files = 0
+
+    for filename in os.listdir(directory):
+        if filename.endswith('.json'):
+            total_files += 1
+            file_path = os.path.join(directory, filename)
+            with open(file_path, 'r') as file:
+                data = json.load(file)
+                if 'content' in data and 'example' in data['content']:
+                    count += 1
+
+    percentage = (count / total_files) * 100 if total_files > 0 else 0
+    return count, percentage
+
+# Function to check if the given string is a valid JSON string
+def is_valid_json(json_string):
+    try:
+        json.loads(json_string)
+        return True
+    except json.JSONDecodeError:
+        return False
+
+# Function to filter lines containing "Failed with output "
+def filter_failed_lines(data):
+    filtered_data = []
+    for line in data.splitlines():
+        if "Failed with output" not in line:
+            filtered_data.append(line)
+    return "\n".join(filtered_data)
+
+# Main script execution
+if __name__ == "__main__":
+    extension_counts = count_file_extensions(directory_path)
+    
+    print("File extension counts:")
+    for ext, count in extension_counts.items():
+        print(f"{ext}: {count}")
+    
+    num_items = 1  # You can change this to the desired number of items
+    num_iterations = 5  # You can change this to the desired number of iterations
+    
+    random_data = create_random_data(num_items, num_iterations)
+    
+    num_issues_containing_example, percentage = count_issues_containing_example(directory_path)
+    
+    print(f"Number of issues containing 'example': {num_issues_containing_example}")
+    print(f"Percentage of issues containing 'example': {percentage}%")
+    
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+
+    for filename in os.listdir(directory_path):
+        if filename.endswith('.json'):
+            file_path = os.path.join(directory_path, filename)
+            try:
+                with open(file_path, 'r') as file:
+                    issue_content = file.read()
+                    if is_valid_json(issue_content):
+                        data = json.loads(issue_content)
+                        print(f"Content of {filename}:")
+                        print(data.get('content', ''))
+                    else:
+                        handle_non_json_file(file_path, issue_content)
+                        continue
+            except Exception as e:
+                print(f"Error processing file {file_path}: {e}")
+
+    # Iterate through all JSON files in the directory
+    for filename in os.listdir(directory_path):
+        if filename.endswith('.json'):
+            file_path = os.path.join(directory_path, filename)
+            try:
+                with open(file_path, 'r') as file:
+                    issue_content = file.read()
+                    if is_valid_json(issue_content):
+                        data = json.loads(issue_content)
+                        # Split the content into lines
+                        lines = data.get('content', '').splitlines()
+                        # Filter out lines containing "Failed with output"
+                        filtered_lines = [line for line in lines if "Failed with output" not in line]
+                        # Join the filtered lines back into a single string
+                        data['content'] = "\n".join(filtered_lines)
+                        # Save the modified data back to the JSON file
+                        with open(file_path, 'w') as file:
+                            json.dump(data, file)
+            except Exception as e:
+                print(f"Error processing file {file_path}: {e}")
+
+[FILEPATH] pymatch/src/mergedataset.py [/FILEPATH]
+import os
+import json
+from argparse import ArgumentParser
+from typing import List, Dict, Any
+from tqdm import tqdm
+
+def load_json_files(directory: str) -> List[Dict[str, Any]]:
+    """Load all JSON files from the specified directory."""
+    json_files = []
+    for filename in os.listdir(directory):
+        if filename.endswith('.json'):
+            file_path = os.path.join(directory, filename)
+            with open(file_path, 'r') as file:
+                try:
+                    data = json.load(file)
+                    json_files.append(data)
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON in file {file_path}: {e}")
+                    continue
+    return json_files
+
+def merge_json_files(json_files: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge the loaded JSON files into a single dictionary."""
+    merged_data = {}
+    for data in json_files:
+        for key, value in data.items():
+            merged_data.setdefault(key, []).extend(value)
+    return merged_data
+
+def save_merged_data(output_path: str, merged_data: Dict[str, Any]) -> None:
+    """Save the merged data to a JSON file at the specified output path."""
+    with open(output_path, 'w') as file:
+        json.dump(merged_data, file, indent=4)
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--input_dir", type=str, required=True, help="Directory containing JSON files to merge")
+    parser.add_argument("--output_path", type=str, required=True, help="Path to save the merged JSON file")
+    args = parser.parse_args()
+
+    json_files = load_json_files(args.input_dir)
+    merged_data = merge_json_files(json_files)
+    save_merged_data(args.output_path, merged_data)
+
+[FILEPATH] pymatch/src/count.py [/FILEPATH]
+import os
+import json
+from argparse import ArgumentParser
+
+def count_keys(directory: str) -> int:
+    """Count the number of keys in JSON files in the specified directory."""
+    total_keys = 0
+    for filename in os.listdir(directory):
+        if filename.endswith('.json'):
+            file_path = os.path.join(directory, filename)
+            with open(file_path, 'r') as file:
+                data = json.load(file)
+                total_keys += len(data)
+    return total_keys
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--directory", type=str, required=True, help="Directory containing JSON files")
+    args = parser.parse_args()
+
+    num_keys = count_keys(args.directory)
+    print(f"Number of keys in JSON files: {num_keys}")
+
+[FILEPATH] pyscop/src/deepeval/tests/test_metamorphic_test.py [/FILEPATH]
+from unittest.mock import patch
+from deepeval import evaluate
+from deepeval.metrics import MetamorphicTestMetric
+from deepeval.dataset import EvaluationDataset
+from deepeval.test_case import LLMTestCase
+import unittest
+from deepeval import prompt_template_verifier
+from deepeval.metrics import PromptTemplate, Verifier
+
+
+@patch("deepeval.models.moderation_mistral.Model.moderate_text")
+@patch("deepeval.metrics._metamorphic_test.MetamorphicTestRunner.run_test")
+class TestMetamorphicTestMetric(unittest.TestCase):
+    def test_metric_initialization(self, mock_run_test, mock_moderate_text):
+        model = MetamorphicTestMetric(
+            test_case=LLMTestCase(
+                input="question",
+                actual_output="this is what the LLM returned",
+                retrieved_context=["test 1"],
+            ),
+            threshold=0.4,
+            k=4,
+        )
+
+        self.assertEqual(model.k, 4)
+        self.assertEqual(model.threshold, 0.4)
+        self.assertIsInstance(model.verifier, Verifier)
+
+    def test_metric_evaluation(self, mock_run_test, mock_moderate_text):
+        test_case = LLMTestCase(
+            input="question",
+            actual_output="this is what the LLM returned",
+            retrieved_context=["test 1"],
+            expected_output="this is the expected output from the test case",
+        )
+        model = MetamorphicTestMetric(
+            test_case=test_case,
+            threshold=0.7,
+        )
+
+        # Setting up mock data
+        expected_data = EvaluationDataset()
+        expected_data.load_data(
+            test_cases=[
+                test_case,
+                LLMTestCase(
+                    input="question",
+                    actual_output="another output from the LLM",
+                    retrieved_context=["test 1", "test 2"],
+                ),
+            ],
+            batch_size=2,
+        )
+        verifier = Verifier(
+            prompt_template_verifier, model="gpt-3.5-turbo", augment_with_retrieved=True
+        )
+        verifier.verify(test_cases=expected_data.test_cases)
+        model.verifier = verifier
+
+        expected_data.load_data(
+            test_cases=[
+                test_case,
+                LLMTestCase(
+                    input="question

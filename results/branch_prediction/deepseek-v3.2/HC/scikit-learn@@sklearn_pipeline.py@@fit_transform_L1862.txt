@@ -1,0 +1,198 @@
+[THOUGHT]
+Let's trace through the code step by step for the given input.
+
+The input shows:
+- `self.transformer_list` has two transformers: `["simpleimputer", "SimpleImputer(strategy='most_frequent')"]` and `["missingindicator", "MissingIndicator()"]`. Note that these look like strings representing estimators, not actual estimator objects.
+- `X` is a 2D array with NaNs.
+- `y` is None.
+- No additional kwargs.
+
+We're calling `fit_transform` method. We'll need to simulate execution.
+
+First, line 54: `if _routing_enabled():` – We don't have the value of `_routing_enabled()`. In sklearn, metadata routing is typically disabled by default unless explicitly enabled. The input doesn't show it being enabled. Likely `_routing_enabled()` returns False, so this branch is **N** and else branch is **Y**.
+
+Then, lines 57-66: In the else branch, we iterate over `self.transformer_list`. For each (name, obj):
+- First iteration: name="simpleimputer", obj="SimpleImputer(strategy='most_frequent')". It's a string, not an estimator object. Does it have `fit_transform`? Strings don't have that attribute, so `hasattr(obj, 'fit_transform')` is **N**, else branch **Y**.
+- Second iteration: name="missingindicator", obj="MissingIndicator()". Also a string, so same: `hasattr` returns **N**, else branch **Y**.
+
+But note: The code as written in lines 59-66 seems buggy: line 64 overwrites `routed_params[name]` after setting it to `Bunch(fit={})`. That's odd, but we only care about branches.
+
+Next, after building `routed_params`, we call `self._parallel_func` (line 66).
+
+In `_parallel_func`:
+- line 79: `self.transformer_list = list(self.transformer_list)` – no branches.
+- line 80: `self._validate_transformers()` – let's examine.
+
+In `_validate_transformers`:
+- line 30: iterate over transformers (the second element of each tuple). For each t:
+  - First t = "SimpleImputer(strategy='most_frequent')". Check if t in ('drop', 'passthrough'): It's not, so branch **N**.
+  - Then check if has fit/fit_transform and transform. Since t is a string, it doesn't have those attributes, so it would raise TypeError. But wait – in practice, the input likely is meant to be actual estimator objects, not strings. However the given input shows strings. Possibly the input representation is simplified. But we must follow the code as given: strings do not have fit/transform, so the code would raise an error. However the problem likely expects execution to proceed normally assuming the transformers are valid objects. Given typical usage, the transformer_list contains actual estimator instances, not strings. Probably the input representation is just shorthand. So we assume that the transformers are actual estimator objects. Then `hasattr(t, 'fit')` would be True. So no branch taken for the first if, and no error.
+
+  Similarly for second transformer.
+
+Thus, for both transformers, the branch at line 31 is **N**.
+
+- line 36: `_validate_transformer_weights`: line 37: `if not self.transformer_weights:` – `self.transformer_weights` is null (from input), so condition True, branch **Y**, then return.
+
+Back to `_parallel_func`: line 82: `transformers = list(self._iter())`.
+
+In `_iter`:
+- line 47: `if trans == 'drop':` – trans is first transformer object (or string? but assume object). It's not 'drop', so branch **N**.
+- line 49: `if trans == 'passthrough':` – not 'passthrough', so branch **N**.
+- Then yield.
+
+Similarly for second transformer: same branches **N**, **N**.
+
+Thus for each transformer, branch 47: N, branch 49: N.
+
+Now back to `fit_transform` after `_parallel_func` returns results: line 67: `if not results:` – `results` will contain two transformed outputs, so not empty, branch **N**.
+
+Now we also have `_log_message` branch later (line 74): called from `_parallel_func` line 83 via `self._log_message`. `self.verbose` is false (from input), so `if not self.verbose:` is True, branch **Y**.
+
+Also, in `_hstack` (line 87): This is called at line 71. We need to check each X in Xs. Since we don't know the exact transformed outputs, but typically they are 2D arrays, so `len(X.shape) == 2`, so condition `len(X.shape) != 2` is False, branch **N** for each transformer.
+
+But we need to count: `_hstack` iterates over `zip(Xs, self.transformer_list)`. There are two transformers, so two iterations. For each, we check branch 87. So we have two branch outcomes: first iteration: **N**, second iteration: **N**.
+
+Now let's list all branch points in order of execution:
+
+1. Line 31: In `_validate_transformers`, loop over two transformers, each checks if t in ('drop','passthrough'). For each: **N** (two times).
+2. Line 37: `_validate_transformer_weights`: one check: **Y**.
+3. Line 47: In `_iter`, loop over two transformers, each checks if trans == 'drop': **N**, **N**.
+4. Line 49: In `_iter`, loop over two transformers, each checks if trans == 'passthrough': **N**, **N**.
+5. Line 54: `if _routing_enabled()`: **N**.
+6. Line 56: `else:` (taken because line 54 false): **Y**.
+7. Line 59: In else branch loop over two transformers, each `hasattr(obj, 'fit_transform')`: **N**, **N** (since strings? or actual objects? But likely they have fit_transform? Wait, SimpleImputer and MissingIndicator have fit_transform method? Yes, they inherit from TransformerMixin which provides fit_transform. So they do have fit_transform. But the input shows strings, not objects. However typical usage: they are estimator instances. If they are instances, they have fit_transform. So branch should be **Y**? Let's check: The code in the else branch (lines 57-66) is only executed when routing is disabled. It's a fallback for backward compatibility. In that case, for each transformer, if it has fit_transform, we route params to fit_transform, else we split into fit and transform. Since SimpleImputer and MissingIndicator have fit_transform (they are sklearn estimators), `hasattr(obj, 'fit_transform')` returns True. So branch 59: **Y** for each transformer. Then branch 62: **N** for each. That seems more plausible.
+
+Given the confusion, let's examine the input: it shows `"SimpleImputer(strategy='most_frequent')"` as a string, but likely it's meant to be the actual object. In real execution, it's an object. So we assume they are objects with fit_transform. So branch 59: **Y**, branch 62: **N** for each transformer (two each: Y, Y for 59; N, N for 62).
+
+8. Line 67: `if not results:`: **N**.
+9. Line 74: `if not self.verbose:`: **Y** (called multiple times? Actually called once per transformer? In `_log_message`, it's called in each parallel task. But the branch is inside `_log_message`. In `_parallel_func`, line 83, `self._log_message(name, idx, len(transformers))` is called for each transformer (twice). For each call, `self.verbose` is false, so branch taken. So two times: **Y**, **Y**.
+10. Line 87: In `_hstack`, loop over two transformers: each check `len(X.shape) != 2`: likely False, so **N**, **N**.
+
+Now we need to fill in the `taken=??` with lists in order of execution for each branch point.
+
+Let's map:
+
+- Line 31: two iterations: ['N', 'N']
+- Line 37: one check: ['Y']
+- Line 47: two iterations: ['N', 'N']
+- Line 49: two iterations: ['N', 'N']
+- Line 54: one check: ['N']
+- Line 56: one check: ['Y'] (but note: line 56 is an else branch marker; it's taken when line 54 is false, so we treat it as branch outcome for the else path? The marker is on the else line, so we need to indicate if that else block is entered. Since line 54 is N, else is taken: so ['Y'].)
+- Line 59: two iterations: ['Y', 'Y'] (assuming objects have fit_transform)
+- Line 62: two iterations: ['N', 'N']
+- Line 67: one check: ['N']
+- Line 74: two calls: ['Y', 'Y']
+- Line 87: two iterations: ['N', 'N']
+
+Now we must put these lists in place of ?? in the code.
+
+Let's double-check branch 56: The marker is on `else: ## [BRANCH]taken=??[/BRANCH]`. It's taken if the if condition is false. So we set taken=['Y'] because the else block is executed.
+
+All good.
+
+Now output the annotated code.
+
+[/THOUGHT]
+
+[ANSWER]
+1 import numpy as np
+2 from scipy import sparse
+3 from sklearn.base import TransformerMixin, _fit_context, clone
+4 from sklearn.preprocessing import FunctionTransformer
+5 from sklearn.utils import Bunch
+6 from sklearn.utils._set_output import _get_container_adapter, _safe_set_output
+7 from sklearn.utils.metadata_routing import (
+8     MetadataRouter,
+9     MethodMapping,
+10     _raise_for_params,
+11     _routing_enabled,
+12     get_routing_for_object,
+13     process_routing,
+14 )
+15 from sklearn.utils.metaestimators import _BaseComposition, available_if
+16 from sklearn.utils.parallel import Parallel, delayed
+17 
+18 class FeatureUnion(TransformerMixin, _BaseComposition):
+19 
+20     def __init__(self, transformer_list, *, n_jobs=None, transformer_weights=None, verbose=False, verbose_feature_names_out=True):
+21         self.transformer_list = transformer_list
+22         self.n_jobs = n_jobs
+23         self.transformer_weights = transformer_weights
+24         self.verbose = verbose
+25         self.verbose_feature_names_out = verbose_feature_names_out
+26 
+27     def _validate_transformers(self):
+28         names, transformers = zip(*self.transformer_list)
+29         self._validate_names(names)
+30         for t in transformers:
+31             if t in ('drop', 'passthrough'): ## [BRANCH]taken=['N','N'][/BRANCH]
+32                 continue
+33             if not (hasattr(t, 'fit') or hasattr(t, 'fit_transform')) or not hasattr(t, 'transform'):
+34                 raise TypeError("All estimators should implement fit and transform. '%s' (type %s) doesn't" % (t, type(t)))
+35 
+36     def _validate_transformer_weights(self):
+37         if not self.transformer_weights: ## [BRANCH]taken=['Y'][/BRANCH]
+38             return
+39         transformer_names = set((name for name, _ in self.transformer_list))
+40         for name in self.transformer_weights:
+41             if name not in transformer_names:
+42                 raise ValueError(f'Attempting to weight transformer "{name}", but it is not present in transformer_list.')
+43 
+44     def _iter(self):
+45         get_weight = (self.transformer_weights or {}).get
+46         for name, trans in self.transformer_list:
+47             if trans == 'drop': ## [BRANCH]taken=['N','N'][/BRANCH]
+48                 continue
+49             if trans == 'passthrough': ## [BRANCH]taken=['N','N'][/BRANCH]
+50                 trans = FunctionTransformer(feature_names_out='one-to-one')
+51             yield (name, trans, get_weight(name))
+52 
+53     def fit_transform(self, X, y=None, **params):
+54         if _routing_enabled(): ## [BRANCH]taken=['N'][/BRANCH]
+55             routed_params = process_routing(self, 'fit_transform', **params)
+56         else: ## [BRANCH]taken=['Y'][/BRANCH]
+57             routed_params = Bunch()
+58             for name, obj in self.transformer_list:
+59                 if hasattr(obj, 'fit_transform'): ## [BRANCH]taken=['Y','Y'][/BRANCH]
+60                     routed_params[name] = Bunch(fit_transform={})
+61                     routed_params[name].fit_transform = params
+62                 else: ## [BRANCH]taken=['N','N'][/BRANCH]
+63                     routed_params[name] = Bunch(fit={})
+64                     routed_params[name] = Bunch(transform={})
+65                     routed_params[name].fit = params
+66         results = self._parallel_func(X, y, _fit_transform_one, routed_params)
+67         if not results: ## [BRANCH]taken=['N'][/BRANCH]
+68             return np.zeros((X.shape[0], 0))
+69         Xs, transformers = zip(*results)
+70         self._update_transformer_list(transformers)
+71         return self._hstack(Xs)
+72 
+73     def _log_message(self, name, idx, total):
+74         if not self.verbose: ## [BRANCH]taken=['Y','Y'][/BRANCH]
+75             return None
+76         return '(step %d of %d) Processing %s' % (idx, total, name)
+77 
+78     def _parallel_func(self, X, y, func, routed_params):
+79         self.transformer_list = list(self.transformer_list)
+80         self._validate_transformers()
+81         self._validate_transformer_weights()
+82         transformers = list(self._iter())
+83         return Parallel(n_jobs=self.n_jobs)((delayed(func)(transformer, X, y, weight, message_clsname='FeatureUnion', message=self._log_message(name, idx, len(transformers)), params=routed_params[name]) for idx, (name, transformer, weight) in enumerate(transformers, 1)))
+84 
+85     def _hstack(self, Xs):
+86         for X, (name, _) in zip(Xs, self.transformer_list):
+87             if hasattr(X, 'shape') and len(X.shape) != 2: ## [BRANCH]taken=['N','N'][/BRANCH]
+88                 raise ValueError(f"Transformer '{name}' returned an array or dataframe with {len(X.shape)} dimensions, but expected 2 dimensions (n_samples, n_features).")
+89         adapter = _get_container_adapter('transform', self)
+90         if adapter and all((adapter.is_supported_container(X) for X in Xs)):
+91             return adapter.hstack(Xs)
+92         if any((sparse.issparse(f) for f in Xs)):
+93             return sparse.hstack(Xs).tocsr()
+94         return np.hstack(Xs)
+95 
+96     def _update_transformer_list(self, transformers):
+97         transformers = iter(transformers)
+98         self.transformer_list[:] = [(name, old if old == 'drop' else next(transformers)) for name, old in self.transformer_list]
+99 
+[/ANSWER]

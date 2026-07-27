@@ -1,0 +1,302 @@
+<<FUNCTION_NAME>>
+
+format_data
+
+<<CODE>>
+
+import locale
+import math
+import matplotlib as mpl
+from matplotlib import _api, cbook
+from matplotlib import font_manager
+
+class ScalarFormatter(Formatter):
+    """
+    Format tick values as a number.
+
+    Parameters
+    ----------
+    useOffset : bool or float, default: :rc:`axes.formatter.useoffset`
+        Whether to use offset notation. See `.set_useOffset`.
+    useMathText : bool, default: :rc:`axes.formatter.use_mathtext`
+        Whether to use fancy math formatting. See `.set_useMathText`.
+    useLocale : bool, default: :rc:`axes.formatter.use_locale`.
+        Whether to use locale settings for decimal sign and positive sign.
+        See `.set_useLocale`.
+    usetex : bool, default: :rc:`text.usetex`
+        To enable/disable the use of TeX's math mode for rendering the
+        numbers in the formatter.
+
+        .. versionadded:: 3.10
+
+    Notes
+    -----
+    In addition to the parameters above, the formatting of scientific vs.
+    floating point representation can be configured via `.set_scientific`
+    and `.set_powerlimits`).
+
+    **Offset notation and scientific notation**
+
+    Offset notation and scientific notation look quite similar at first sight.
+    Both split some information from the formatted tick values and display it
+    at the end of the axis.
+
+    - The scientific notation splits up the order of magnitude, i.e. a
+      multiplicative scaling factor, e.g. ``1e6``.
+
+    - The offset notation separates an additive constant, e.g. ``+1e6``. The
+      offset notation label is always prefixed with a ``+`` or ``-`` sign
+      and is thus distinguishable from the order of magnitude label.
+
+    The following plot with x limits ``1_000_000`` to ``1_000_010`` illustrates
+    the different formatting. Note the labels at the right edge of the x axis.
+
+    .. plot::
+
+        lim = (1_000_000, 1_000_010)
+
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, gridspec_kw={'hspace': 2})
+        ax1.set(title='offset notation', xlim=lim)
+        ax2.set(title='scientific notation', xlim=lim)
+        ax2.xaxis.get_major_formatter().set_useOffset(False)
+        ax3.set(title='floating-point notation', xlim=lim)
+        ax3.xaxis.get_major_formatter().set_useOffset(False)
+        ax3.xaxis.get_major_formatter().set_scientific(False)
+
+    """
+
+    def __init__(self, useOffset=None, useMathText=None, useLocale=None, *, usetex=None):
+        useOffset = mpl._val_or_rc(useOffset, 'axes.formatter.useoffset')
+        self._offset_threshold = mpl.rcParams['axes.formatter.offset_threshold']
+        self.set_useOffset(useOffset)
+        self.set_usetex(usetex)
+        self.set_useMathText(useMathText)
+        self.orderOfMagnitude = 0
+        self.format = ''
+        self._scientific = True
+        self._powerlimits = mpl.rcParams['axes.formatter.limits']
+        self.set_useLocale(useLocale)
+
+    def set_usetex(self, val):
+        """Set whether to use TeX's math mode for rendering numbers in the formatter."""
+        self._usetex = mpl._val_or_rc(val, 'text.usetex')
+    usetex = property(fget=get_usetex, fset=set_usetex)
+
+    def set_useOffset(self, val):
+        """
+        Set whether to use offset notation.
+
+        When formatting a set numbers whose value is large compared to their
+        range, the formatter can separate an additive constant. This can
+        shorten the formatted numbers so that they are less likely to overlap
+        when drawn on an axis.
+
+        Parameters
+        ----------
+        val : bool or float
+            - If False, do not use offset notation.
+            - If True (=automatic mode), use offset notation if it can make
+              the residual numbers significantly shorter. The exact behavior
+              is controlled by :rc:`axes.formatter.offset_threshold`.
+            - If a number, force an offset of the given value.
+
+        Examples
+        --------
+        With active offset notation, the values
+
+        ``100_000, 100_002, 100_004, 100_006, 100_008``
+
+        will be formatted as ``0, 2, 4, 6, 8`` plus an offset ``+1e5``, which
+        is written to the edge of the axis.
+        """
+        if isinstance(val, bool):
+            self.offset = 0
+            self._useOffset = val
+        else:
+            self._useOffset = False
+            self.offset = val
+    useOffset = property(fget=get_useOffset, fset=set_useOffset)
+
+    def set_useLocale(self, val):
+        """
+        Set whether to use locale settings for decimal sign and positive sign.
+
+        Parameters
+        ----------
+        val : bool or None
+            *None* resets to :rc:`axes.formatter.use_locale`.
+        """
+        self._useLocale = mpl._val_or_rc(val, 'axes.formatter.use_locale')
+    useLocale = property(fget=get_useLocale, fset=set_useLocale)
+
+    def _format_maybe_minus_and_locale(self, fmt, arg):
+        """
+        Format *arg* with *fmt*, applying Unicode minus and locale if desired.
+        """
+        return self.fix_minus((','.join((locale.format_string(part, (arg,), True).replace(',', '{,}') for part in fmt.split(','))) if self._useMathText else locale.format_string(fmt, (arg,), True)) if self._useLocale else fmt % arg)
+
+    def set_useMathText(self, val):
+        """
+        Set whether to use fancy math formatting.
+
+        If active, scientific notation is formatted as :math:`1.2 \\times 10^3`.
+
+        Parameters
+        ----------
+        val : bool or None
+            *None* resets to :rc:`axes.formatter.use_mathtext`.
+        """
+        if val is None:
+            self._useMathText = mpl.rcParams['axes.formatter.use_mathtext']
+            if self._useMathText is False:
+                try:
+                    from matplotlib import font_manager
+                    ufont = font_manager.findfont(font_manager.FontProperties(family=mpl.rcParams['font.family']), fallback_to_default=False)
+                except ValueError:
+                    ufont = None
+                if ufont == str(cbook._get_data_path('fonts/ttf/cmr10.ttf')):
+                    _api.warn_external('cmr10 font should ideally be used with mathtext, set axes.formatter.use_mathtext to True')
+        else:
+            self._useMathText = val
+    useMathText = property(fget=get_useMathText, fset=set_useMathText)
+
+    def format_data(self, value):
+        e = math.floor(math.log10(abs(value)))
+        s = round(value / 10 ** e, 10)
+        significand = self._format_maybe_minus_and_locale('%d' if s % 1 == 0 else '%1.10g', s)
+        if e == 0:
+            return significand
+        exponent = self._format_maybe_minus_and_locale('%d', e)
+        if self._useMathText or self._usetex:
+            exponent = '10^{%s}' % exponent
+            return exponent if s == 1 else f'{significand} \\times {exponent}'
+        else:
+            return f'{significand}e{exponent}'
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'_offset_threshold': 2, 'offset': 0, '_useOffset': True, '_usetex': False, '_useMathText': False, 'orderOfMagnitude': 0, 'format': '', '_scientific': True, '_powerlimits': [-7, 7], '_useLocale': False}, 'args': {'value': 0.11}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+1.1e-1
+
+<<LLM_RESPONSE>>
+
+Let’s reason through the code step-by-step.
+
+The `format_data` method:
+1. Takes `value`, finds exponent e: `e = floor(log10(abs(value)))`
+2. Computes `s = round(value / 10**e, 10)` — so s is the significand in scientific notation, rounded to 10 decimal places.
+3. If s % 1 == 0, the format for significand is `'%d'` else `'%1.10g'`.
+4. Formats significand with locale/minus handling.
+5. If e == 0, returns significand alone.
+6. Otherwise, formats exponent with locale/minus handling.
+7. If `_useMathText` or `_usetex` is True, returns something like `'1.1 \\times 10^{1}'`, else returns `'1.1e1'` style.
+
+Given output `"1.1e-1"`:
+- `e` is not zero.
+- No MathText (`_useMathText` and `_usetex` must be False or not affecting the formatting) else we’d see `\\times` or `10^{...}`.
+- `_useMathText` or `_usetex` being True would have given `'\\times 10^{...}'` style. Here it’s plain `e` notation, so both are False.
+- `_useLocale` must be False — otherwise, locale might insert thousands separators or decimal commas, but here decimal point is `.`.
+- The significand `1.1` is from s = 1.1.
+- Exponent is `-1`.
+
+From `s = round(value / 10**e, 10)` and `e = floor(log10(abs(value)))`:
+We have `"1.1e-1"` → value = 1.1 × 10^{-1} = 0.11.
+Check: e = -1, s = 1.1.
+
+Check rounding: value = 0.11  
+abs(value) = 0.11  
+log10(0.11) ≈ -0.958607…  
+floor(…) = -1  
+e = -1  
+
+Then s = round(0.11 / 10**(-1), 10) = round(0.11 / 0.1, 10) = round(1.1, 10) = 1.1.
+
+Thus s % 1 != 0 (1.1 mod 1 = 0.1), so format for s is `'%1.10g'` → `'1.1'`.
+
+Now locale/minus formatting: since `_useLocale` is False and `_useMathText` is False, `_format_maybe_minus_and_locale` just does `fmt % arg` for s and e.
+
+`fmt` for s is `'%1.10g'`, arg = 1.1 → `'1.1'`.
+`fmt` for e is `'%d'`, arg = -1 → `'-1'`.
+
+Exponent sign handling: in plain format, `'%d' % -1` → `'-1'`, so exponent string is `'-1'`.
+
+Combine: significand `'1.1'`, exponent `'-1'` → `'1.1e-1'`.
+
+So inputs:
+- value = 0.11
+- _useMathText = False
+- _usetex = False
+- _useLocale = False
+- _useOffset, offset, _offset_threshold, orderOfMagnitude, format, _scientific, _powerlimits don’t matter for this simple case.
+
+But need to check if `_useOffset` matters: Not used in `format_data`, only in `__call__` for offsets, so irrelevant here.
+
+Also check `_scientific` and `_powerlimits` not used here.
+
+We’ll set all other attributes to defaults from rcParams or usual values.
+
+Thus we need:
+```
+self = {
+    "_offset_threshold": mpl.rcParams['axes.formatter.offset_threshold'],
+    "offset": 0,
+    "_useOffset": True or False (doesn't matter),
+    "_usetex": False,
+    "_useMathText": False,
+    "orderOfMagnitude": 0,
+    "format": '',
+    "_scientific": True,
+    "_powerlimits": mpl.rcParams['axes.formatter.limits'],
+    "_useLocale": False
+}
+value = 0.11
+```
+
+But `_useOffset` — from code: `set_useOffset` sets `self.offset` and `self._useOffset`. Since we didn’t set any offset in output formatting, it doesn’t matter, can pick default `True` and offset 0.
+
+Set `_useOffset = True` (default from rcParams maybe).
+
+From rcParams:
+- axes.formatter.offset_threshold → probably 4
+- axes.formatter.limits → probably [-5, 6]
+
+Let’s assign plausible defaults. I’ll fill in plausible RC default values.
+
+[THOUGHT]
+1. Output "1.1e-1" means scientific notation with plain 'e', no locale, no MathText, no TeX.
+2. value = 0.11 gives s = 1.1, e = -1.
+3. _useLocale must be False to avoid locale formatting (commas).
+4. _useMathText and _usetex must be False to avoid "\\times 10^{...}".
+5. offset and _useOffset don't affect `format_data`, so we can leave them as defaults: offset=0, _useOffset=True.
+6. _offset_threshold and _powerlimits can be rc defaults: 4 and [-5, 6] respectively.
+7. _scientific, orderOfMagnitude, format not used here, can be defaults: True, 0, ''.
+
+So we fill accordingly.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_offset_threshold": 4,
+        "offset": 0,
+        "_useOffset": true,
+        "_usetex": false,
+        "_useMathText": false,
+        "orderOfMagnitude": 0,
+        "format": "",
+        "_scientific": true,
+        "_powerlimits": [-5, 6],
+        "_useLocale": false
+    },
+    "args": {
+        "value": 0.11
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

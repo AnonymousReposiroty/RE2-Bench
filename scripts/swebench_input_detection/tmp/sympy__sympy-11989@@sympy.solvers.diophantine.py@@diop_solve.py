@@ -1,0 +1,1 @@
+from sympy.solvers.diophantine import diop_solve

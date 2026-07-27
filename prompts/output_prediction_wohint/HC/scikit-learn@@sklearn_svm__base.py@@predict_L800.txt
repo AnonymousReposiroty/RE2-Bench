@@ -1,0 +1,365 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. You need to predict output variable values, and print output between [OUTPUT] and [/OUTPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[PYTHON]
+from abc import ABCMeta, abstractmethod
+import numpy as np
+from sklearn.base import BaseEstimator, ClassifierMixin, _fit_context
+from sklearn.utils._param_validation import Interval, StrOptions
+from sklearn.utils.multiclass import _ovr_decision_function, check_classification_targets
+from sklearn.utils.validation import _check_large_sparse, _check_sample_weight, _num_samples, check_consistent_length, check_is_fitted, validate_data
+
+class BaseSVC(ClassifierMixin, BaseLibSVM, metaclass=ABCMeta):
+    _parameter_constraints: dict = {**BaseLibSVM._parameter_constraints, 'decision_function_shape': [StrOptions({'ovr', 'ovo'})], 'break_ties': ['boolean']}
+    for unused_param in ['epsilon', 'nu']:
+        _parameter_constraints.pop(unused_param)
+
+    @abstractmethod
+    def __init__(self, kernel, degree, gamma, coef0, tol, C, nu, shrinking, probability, cache_size, class_weight, verbose, max_iter, decision_function_shape, random_state, break_ties):
+        self.decision_function_shape = decision_function_shape
+        self.break_ties = break_ties
+        super().__init__(kernel=kernel, degree=degree, gamma=gamma, coef0=coef0, tol=tol, C=C, nu=nu, epsilon=0.0, shrinking=shrinking, probability=probability, cache_size=cache_size, class_weight=class_weight, verbose=verbose, max_iter=max_iter, random_state=random_state)
+
+    def decision_function(self, X):
+        dec = self._decision_function(X)
+        if self.decision_function_shape == 'ovr' and len(self.classes_) > 2:
+            return _ovr_decision_function(dec < 0, -dec, len(self.classes_))
+        return dec
+
+    def predict(self, X):
+        check_is_fitted(self)
+        if self.break_ties and self.decision_function_shape == 'ovo':
+            raise ValueError("break_ties must be False when decision_function_shape is 'ovo'")
+        if self.break_ties and self.decision_function_shape == 'ovr' and (len(self.classes_) > 2):
+            y = np.argmax(self.decision_function(X), axis=1)
+        else:
+            y = super().predict(X)
+        return self.classes_.take(np.asarray(y, dtype=np.intp))
+
+    def _decision_function(self, X):
+        X = self._validate_for_predict(X)
+        X = self._compute_kernel(X)
+        if self._sparse:
+            dec_func = self._sparse_decision_function(X)
+        else:
+            dec_func = self._dense_decision_function(X)
+        if self._impl in ['c_svc', 'nu_svc'] and len(self.classes_) == 2:
+            return -dec_func.ravel()
+        return dec_func
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.svm._base.predict
+
+def predict(self, X):
+    """Perform regression on samples in X.
+
+    For a one-class model, +1 (inlier) or -1 (outlier) is returned.
+
+    Parameters
+    ----------
+    X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        For kernel="precomputed", the expected shape of X is
+        (n_samples_test, n_samples_train).
+
+    Returns
+    -------
+    y_pred : ndarray of shape (n_samples,)
+        The predicted values.
+    """
+    X = self._validate_for_predict(X)
+    predict = self._sparse_predict if self._sparse else self._dense_predict
+    return predict(X)
+
+scikit-learn.sklearn.svm._base.decision_function
+
+def decision_function(self, X):
+    """Evaluate the decision function for the samples in X.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        The input samples.
+
+    Returns
+    -------
+    X : ndarray of shape (n_samples, n_classes * (n_classes-1) / 2)
+        Returns the decision function of the sample for each class
+        in the model.
+        If decision_function_shape='ovr', the shape is (n_samples,
+        n_classes).
+
+    Notes
+    -----
+    If decision_function_shape='ovo', the function values are proportional
+    to the distance of the samples X to the separating hyperplane. If the
+    exact distances are required, divide the function values by the norm of
+    the weight vector (``coef_``). See also `this question
+    <https://stats.stackexchange.com/questions/14876/
+    interpreting-distance-from-hyperplane-in-svm>`_ for further details.
+    If decision_function_shape='ovr', the decision function is a monotonic
+    transformation of ovo decision function.
+    """
+    dec = self._decision_function(X)
+    if self.decision_function_shape == "ovr" and len(self.classes_) > 2:
+        return _ovr_decision_function(dec < 0, -dec, len(self.classes_))
+    return dec
+
+scikit-learn.sklearn.utils.validation.check_is_fitted
+
+def check_is_fitted(estimator, attributes=None, *, msg=None, all_or_any=all):
+    """Perform is_fitted validation for estimator.
+
+    Checks if the estimator is fitted by verifying the presence of
+    fitted attributes (ending with a trailing underscore) and otherwise
+    raises a :class:`~sklearn.exceptions.NotFittedError` with the given message.
+
+    If an estimator does not set any attributes with a trailing underscore, it
+    can define a ``__sklearn_is_fitted__`` method returning a boolean to
+    specify if the estimator is fitted or not. See
+    :ref:`sphx_glr_auto_examples_developing_estimators_sklearn_is_fitted.py`
+    for an example on how to use the API.
+
+    If no `attributes` are passed, this function will pass if an estimator is stateless.
+    An estimator can indicate it's stateless by setting the `requires_fit` tag. See
+    :ref:`estimator_tags` for more information. Note that the `requires_fit` tag
+    is ignored if `attributes` are passed.
+
+    Parameters
+    ----------
+    estimator : estimator instance
+        Estimator instance for which the check is performed.
+
+    attributes : str, list or tuple of str, default=None
+        Attribute name(s) given as string or a list/tuple of strings
+        Eg.: ``["coef_", "estimator_", ...], "coef_"``
+
+        If `None`, `estimator` is considered fitted if there exist an
+        attribute that ends with a underscore and does not start with double
+        underscore.
+
+    msg : str, default=None
+        The default error message is, "This %(name)s instance is not fitted
+        yet. Call 'fit' with appropriate arguments before using this
+        estimator."
+
+        For custom messages if "%(name)s" is present in the message string,
+        it is substituted for the estimator name.
+
+        Eg. : "Estimator, %(name)s, must be fitted before sparsifying".
+
+    all_or_any : callable, {all, any}, default=all
+        Specify whether all or any of the given attributes must exist.
+
+    Raises
+    ------
+    TypeError
+        If the estimator is a class or not an estimator instance
+
+    NotFittedError
+        If the attributes are not found.
+
+    Examples
+    --------
+    >>> from sklearn.linear_model import LogisticRegression
+    >>> from sklearn.utils.validation import check_is_fitted
+    >>> from sklearn.exceptions import NotFittedError
+    >>> lr = LogisticRegression()
+    >>> try:
+    ...     check_is_fitted(lr)
+    ... except NotFittedError as exc:
+    ...     print(f"Model is not fitted yet.")
+    Model is not fitted yet.
+    >>> lr.fit([[1, 2], [1, 3]], [1, 0])
+    LogisticRegression()
+    >>> check_is_fitted(lr)
+    """
+    if isclass(estimator):
+        raise TypeError("{} is a class, not an instance.".format(estimator))
+    if msg is None:
+        msg = (
+            "This %(name)s instance is not fitted yet. Call 'fit' with "
+            "appropriate arguments before using this estimator."
+        )
+
+    if not hasattr(estimator, "fit"):
+        raise TypeError("%s is not an estimator instance." % (estimator))
+
+    tags = get_tags(estimator)
+
+    if not tags.requires_fit and attributes is None:
+        return
+
+    if not _is_fitted(estimator, attributes, all_or_any):
+        raise NotFittedError(msg % {"name": type(estimator).__name__})
+
+
+[/PYTHON]
+What will be the output of `predict`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "decision_function_shape": "ovr",
+        "break_ties": false,
+        "kernel": "rbf",
+        "degree": 3,
+        "gamma": "scale",
+        "coef0": 0.0,
+        "tol": 0.001,
+        "C": 1.0,
+        "nu": 0.0,
+        "epsilon": 0.0,
+        "shrinking": true,
+        "probability": false,
+        "cache_size": 200,
+        "class_weight": null,
+        "verbose": false,
+        "max_iter": -1,
+        "random_state": 16930041,
+        "_sparse": false,
+        "n_features_in_": 1,
+        "class_weight_": "array([1., 1., 1.])",
+        "classes_": "array([0, 1, 2])",
+        "_gamma": 1.7539247982371269,
+        "support_": "array([ 4, 21, 54,  3,  6, 12, 16, 25, 38, 39, 55, 56, 65, 66,  5,  8, 10,\n       14, 20, 26, 28, 44, 52, 68], dtype=int32)",
+        "support_vectors_": "array([[0.6],\n       [0.5],\n       [0.1],\n       [1.8],\n       [1.6],\n       [1.7],\n       [1. ],\n       [1.6],\n       [1. ],\n       [1.5],\n       [1.5],\n       [1. ],\n       [1.5],\n       [1.3],\n       [1.4],\n       [1.8],\n       [1.7],\n       [1.8],\n       [1.5],\n       [1.8],\n       [1.6],\n       [1.5],\n       [1.8],\n       [2.5]])",
+        "_n_support": "array([ 3, 11, 10], dtype=int32)",
+        "dual_coef_": "array([[ 3.        ,  0.35879615,  0.        , -0.01974129, -0.        ,\n        -0.        , -0.3565403 , -0.        , -1.        , -0.        ,\n        -0.        , -1.98251456, -0.        , -0.        , -1.        ,\n        -0.        , -0.        , -0.        , -0.        , -0.        ,\n        -0.        , -0.01264989, -0.        , -0.67915217],\n       [ 1.23675666,  0.        ,  0.4550454 ,  1.        ,  3.        ,\n         2.        ,  0.        ,  2.        ,  0.        ,  3.        ,\n         1.        ,  0.        ,  1.        ,  0.67783947, -1.        ,\n        -1.67783947, -1.        , -1.        , -2.        , -3.        ,\n        -1.        , -1.        , -2.        , -0.        ]])",
+        "intercept_": "array([-0.15192272, -0.2007334 , -0.42362183])",
+        "_probA": "array([], dtype=float64)",
+        "_probB": "array([], dtype=float64)",
+        "fit_status_": 0,
+        "_num_iter": "array([ 7, 14, 16], dtype=int32)",
+        "shape_fit_": [
+            112,
+            1
+        ],
+        "_intercept_": "array([-0.15192272, -0.2007334 , -0.42362183])",
+        "_dual_coef_": "array([[ 3.        ,  0.35879615,  0.        , -0.01974129, -0.        ,\n        -0.        , -0.3565403 , -0.        , -1.        , -0.        ,\n        -0.        , -1.98251456, -0.        , -0.        , -1.        ,\n        -0.        , -0.        , -0.        , -0.        , -0.        ,\n        -0.        , -0.01264989, -0.        , -0.67915217],\n       [ 1.23675666,  0.        ,  0.4550454 ,  1.        ,  3.        ,\n         2.        ,  0.        ,  2.        ,  0.        ,  3.        ,\n         1.        ,  0.        ,  1.        ,  0.67783947, -1.        ,\n        -1.67783947, -1.        , -1.        , -2.        , -3.        ,\n        -1.        , -1.        , -2.        , -0.        ]])",
+        "n_iter_": "array([ 7, 14, 16], dtype=int32)"
+    },
+    "args": {
+        "X": "array([[2.3],\n       [1.9],\n       [1.8],\n       [0.2],\n       [1.5],\n       [0.2],\n       [2.1],\n       [2.1],\n       [1.8],\n       [1.2],\n       [0.2],\n       [2.3],\n       [0.4],\n       [1.8],\n       [1.3],\n       [1.6],\n       [0.3],\n       [2.1],\n       [1. ],\n       [1.5],\n       [2. ],\n       [1.4],\n       [1.8],\n       [1.4],\n       [2.4],\n       [0.2],\n       [0.2],\n       [0.2],\n       [0.2],\n       [0.4],\n       [1.9],\n       [2.3],\n       [1.3],\n       [1.3],\n       [1.5],\n       [2. ],\n       [0.3],\n       [2.1]])"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]

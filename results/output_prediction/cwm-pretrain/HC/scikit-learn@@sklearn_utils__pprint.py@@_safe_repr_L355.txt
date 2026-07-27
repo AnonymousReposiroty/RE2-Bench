@@ -1,0 +1,474 @@
+</think>
+[OUTPUT]
+</s>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+</think>
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import itertools
+
+def node_importances(X, classes, nodes, max_depth=0):
+    """Compute node importances in the decision tree.
+
+    Parameters
+    ----------
+    X : array-like, shape=(n_samples, n_features)
+        The training input samples. Internally, it will be converted to
+        `dtype=np.float32`.
+
+    classes : ndarray, shape (n_samples,)
+        The class values or target values of all the samples.
+
+    nodes : ndarray, dtype=int32, shape (node_count,)
+        Split nodes indicating the start of each node.
+        Leaves are indicated by -1.
+
+    max_depth : int, default=0
+        Restrict the depth of the returned node importances. E.g., 0 means
+        only return the root, 1 means return the root and all split nodes
+        one step below it, and so on.
+        Note: leaf nodes are included in `max_depth`.
+
+    Returns
+    -------
+    node_importances : ndarray, shape=(n_features, node_count)
+        The node importances (see section 'Notes') with
+        shape (n_features, node_count), where node_count is the number
+        of (unique) split nodes or leaves. If `max_depth` is specified
+        and only some split nodes are returned, the shape will be
+        (n_features, node_count_at_depth).
+    """
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    classes = np.ascontiguousarray(classes)
+
+    depth_increment = 1
+    counter = [0]  # using a list to allow append by reference
+    # nodelist keeps track of all seen nodes to avoid duplication
+    nodelist = np.empty(X.shape[0], dtype=np.int32)
+    unique_nodes = set()
+    # node_indices keeps track of the start and end index of
+    # each node. By subtracting them, we have the sample
+    # count in each node.
+    node_indices = np.empty(X.shape[0] + 1, dtype=np.int32)
+    node_importances_ = np.empty(
+        (X.shape[1], X.shape[0] + 1), dtype=np.float64
+    )
+    for m in nodes:
+        if m in unique_nodes or m == -1:
+            continue
+        unique_nodes.add(m)
+        node_indices[counter[0]] = node_indices[counter[0] - 1] + counter[0] - depth_increment
+        counter.append(counter[0])
+        node_indices[counter[0]] = counter[0] - 1
+        depth_increment = counter[0]
+        node_importances_[:, counter[0]] = np.array([0.0] * X.shape[1])
+        counter[0] += 1
+        depth_increment += 1
+
+    node_indices[counter[0]] = node_indices[counter[0] - 1] + counter[0] - depth_increment
+    nodelist = nodelist[: counter[0]]
+    node_indices = node_indices[: counter[0] + 1]
+    node_importances_ = node_importances_[:, : counter[0] + 1]
+
+    return node_importances_
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.tree._criterion.Criterion.__init__
+
+def __init__(self, n_outputs, n_samples, sample_weight):
+    self.n_outputs = n_outputs
+    self.n_samples = n_samples
+    self.sample_weight = sample_weight
+    self.n_node_samples = np.empty(1, dtype=np.int32)
+    self.weighted_n_node_samples = np.empty(1, dtype=np.float64)
+    self.weighted_n_left = np.empty(1, dtype=np.float64)
+    self.weighted_n_right = np.empty(1, dtype=np.float64)
+    self.impurity = np.empty(1, dtype=np.float64)
+    self.n_classes = np.empty(1, dtype=np.intp)
+    self.classes = np.empty(1, dtype=np.int32)
+    self.value = np.empty(1, dtype=np.float32)
+[/PYTHON]
+
+What will be the output of `node_importances`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "n_features": 5,
+        "n_outputs": 3,
+        "n_classes": 2,
+        "n_samples": 5,
+        "sample_weight": 1,
+        "criterion": "Criterion()",
+        "max_depth": null
+    },
+    "args": {
+        "X": "1, 2, 3, 4, 5; 1, 2, 3, 4, 5; 1, 2, 3, 4, 5; 1, 2, 3, 4, 5; 1, 2, 3, 4, 5",
+        "classes": "1, 0, 1, 0, 1",
+        "nodes": "-1, -1, -1, -1, -1, 0, 1, 2, 3, 4"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "node_importances": XXX        
+}
+```
+[/STRUCTURE]
+
+<think>
+
+ Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. </s>
+<|assistant|>
+</think>
+[OUTPUT]
+</s>
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+</think>
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from ._shutil import copyfileobj, samefile
+from .abc import Traversable
+from ._utils import force_text, is_binary_str, _check_pathish
+from ._os import scandir, fspath
+
+def islink(s):
+    """Backport implementation of os.islink()."""
+    s = fspath(s)
+    if sys.version_info < (3, 2):
+        return os.path.islink(s)
+    try:
+        os.stat(s, follow_symlinks=False)
+    except OSError as e:
+        if not _IGNORED_ERRNOS[errno.ENOENT]:
+            raise
+        # Ignore missing links
+        return False
+    except ValueError as e:
+        # Non-filesystem object
+        if not _IGNORED_ERRNOS[errno.ENOENT]:
+            raise
+        return False
+    return True
+
+def isfile(f):
+    return os.path.isfile(f)
+
+def isdir(f):
+    return os.path.isdir(f)
+
+def __str__(self):
+    return force_text(self.as_uri())
+
+def _open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+    # TODO: read opening mode from path instance
+    if self.is_dir():
+        raise IOError("%s is a directory." % self)
+    if self.is_symlink():
+        raise IOError("%s is a symbolic link." % self)
+    if encoding or errors or newline:
+        return self.open(mode, buffering, encoding, errors, newline)
+    else:
+        return self.open(mode, buffering, encoding)
+
+def resolve(self, strict=False):
+    if not self.is_absolute():
+        raise ValueError("can't make a relative path absolute without a base")
+    return self._from_parsed_parts(self.drive, self.root, self._parts, self._flavour)
+
+def expanduser(self):
+    if not (self._drv or self._root) and self._parts and self._parts[0][:1] == "~":
+        homedir = os.path.expanduser(self._parts[0])
+        if homedir[:1] == "~":
+            homedir = "~"
+        return self._from_parts([homedir] + self._parts[1:])
+
+def __repr__(self):
+    try:
+        return "{}({!r})".format(self.__class__.__name__, self._str)
+    except UnicodeEncodeError:
+        return "{}({!r})".format(self.__class__.__name__, self.as_posix())
+
+def match(self, path_pattern):
+    return _match(self, path_pattern, regex=True)
+
+def open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+    return self._accessor.open(self, mode, buffering, encoding, errors, newline)
+
+def iterdir(self):
+    if not self.is_dir():
+        raise NotADirectoryError("{!r} is not a directory".format(self))
+    return self._accessor.iterdir(self)
+
+def mkdir(self, mode=0o777, parents=False, exist_ok=False):
+    self._accessor.mkdir(self, mode, parents, exist_ok)
+
+def chmod(self, mode, follow_symlinks=True):
+    self._accessor.chmod(self, mode, follow_symlinks)
+
+def lchmod(self, mode):
+    self._accessor.lchmod(self, mode)
+
+def rename(self, target):

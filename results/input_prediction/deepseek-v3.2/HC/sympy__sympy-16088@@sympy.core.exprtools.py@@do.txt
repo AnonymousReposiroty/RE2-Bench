@@ -1,0 +1,101 @@
+Let’s break down the problem.
+
+We’re given `factor_terms` and its internal `do` function. The output is `sin(0.0644444444444444*pi)**2`.  
+This came from the `do` function applied to some input `expr`.
+
+The `do` function processes recursively:
+- If expr is not a `Basic` Atom → pass through unchanged.
+- If expr is Pow/Function/iterable → recurse into args.
+- If expr is Add → calls `gcd_terms` on the primitive part after content extraction.
+- If expr is Mul → calls `as_content_primitive` → splits into `(coeff, primitive)`.
+
+We need to think: what could produce `sin(0.0644444444444444*pi)**2`?
+
+That numeric coefficient `0.0644444444444444` looks like `29/450` (because `29/450 ≈ 0.0644444444444444`).  
+But maybe it’s simpler: maybe it’s `29/(450)` but SymPy rationalized it? Let’s see.
+
+Given `sin(const * pi)**2` with const ≈ 0.0644444... = `29/450`.
+
+But `do` may factor terms, so the input could have been something like `29/450 * sin(pi)**2`? No, `sin(pi)` is zero. Not likely.
+
+Better thought:  
+`factor_terms` extracts common additive terms via `gcd_terms`.  
+
+Maybe input was `(29/450)*pi` inside sin, squared? No, output is `sin(0.064444...*pi)**2` — constant inside sin.
+
+Could be: `sin( (29*pi)/450 )**2`.
+
+That’s already simplified unless `factor_terms` did something like factor a rational coefficient from the argument. But `factor_terms` doesn’t expand trig arguments.
+
+Wait: `factor_terms` can extract common coefficient from `Add` inside `sin`? Let’s think: `sin(a*x + b*x)` → `sin(x*(a+b))` — but `factor_terms` doesn’t expand inside sin unless sin's argument is Add and `do` recurses into args of sin. Yes — `sin` is a Function → in `do`, `if expr.is_Pow or expr.is_Function or is_iterable or ...` → newargs = tuple([do(i) for i in args]) → so `sin( (29*pi)/450 )` would be unchanged because `do` on `(29*pi)/450` could be `Mul(29/450, pi)` unchanged.
+
+So maybe output equals input? Possibly — but the point of `factor_terms` is to factor common additive terms, so maybe input had additive terms inside sin that were combined.
+
+Alternatively: Maybe `factor_terms` called `gcd_terms` on an expression like `29*sin(pi/450)**2 + something` — but no.
+
+Let’s test hypothesis: Suppose input was `(29/450)*sin(pi)**2` → `sin(pi)**2` = `0`, not right.
+
+No, output is `sin(0.064444...*pi)**2`, nonzero constant.
+
+Maybe `factor_terms` extracted multiplicative constant from `Add` inside sin? Let’s check code: `as_content_primitive(radical=radical, clear=clear)` extracts *content* from Mul. For `sin(x*y)`, argument is `x*y` — but `as_content_primitive` is called on `sin(x*y)`? No, only when `expr` is Mul in `do`. Wait: `do` checks `if expr.is_Pow or expr.is_Function or ...` → calls `do` recursively on each arg, but no content extraction there.  
+
+Only when `isinstance(expr, (Sum, Integral))` special case, else for others → `cont, p = expr.as_content_primitive(...)` — `expr` here is the whole expr? Wait, re-read `do`:
+
+```python
+if isinstance(expr, (Sum, Integral)):
+    return _factor_sum_int(...)
+cont, p = expr.as_content_primitive(radical=radical, clear=clear)
+```
+
+That’s **outside** the `if expr.is_Pow or expr.is_Function ...` branch? Let’s trace:  
+At start of `do`:
+- `is_iterable = iterable(expr)`
+- `if not isinstance(expr, Basic) or expr.is_Atom:` — no.
+- `if expr.is_Pow or expr.is_Function or is_iterable or (not hasattr(expr, 'args_cnc')):` — `expr.is_Pow`? No. `expr.is_Function`? Yes if sin is Function. Then go inside that branch → args = expr.args, newargs = do each arg, return expr.func(*newargs). So `sin((29*pi)/450)` just returns `sin(do((29*pi)/450))`. `(29*pi)/450` is Mul → `expr.is_Pow or expr.is_Function?` No, `is_iterable?` No, `not hasattr(expr,'args_cnc')?` Mul has `args_cnc`. So goes to `as_content_primitive`.
+
+So `(29*pi)/450` — as Mul — will call `as_content_primitive`. `29/450` is Rational coeff, `pi` is symbolic. `as_content_primitive` returns `(29/450, pi)`. Then:
+
+```python
+if p.is_Add:
+    # ... gcd_terms
+else:
+    p = p.func(*[do(a) for a in p.args])
+```
+
+Here `p` = `pi` after extraction? Wait `pi` is Atom maybe, `p.args` is empty? So `p` unchanged. Then `rv = _keep_coeff(cont, p, clear=clear, sign=sign)`.
+
+`_keep_coeff(29/450, pi)` → `29/450 * pi`. So unchanged. So final is `sin(29/450 * pi)**2`.  
+
+Thus input could be exactly `sin(29*pi/450)**2`.
+
+But the output shows `0.0644444444444444*pi` not `29*pi/450`. Means SymPy evaluated `29/450` to float? But `factor_terms` shouldn’t do that unless `float` given as input. Maybe original input had a float: `sin(0.06444444444444444*pi)**2`.
+
+But then output matches input exactly, so why call `factor_terms`? Possibly because `expr` was part of larger expression with common factor?  
+
+Given structure asks for `expr` input to `do` (which is `factor_terms` essentially), probably `expr` is `sin(0.0644444444444444*pi)**2`.  
+
+But maybe the function was called with `expr = something + something` that `factor_terms` simplified to `sin(...)**2`. However, output is only `sin(...)**2`, no addition.
+
+Let’s think: `do` on Add → calls `gcd_terms`. Example: `a*sin(...)**2 + b*sin(...)**2` → `(a+b)*sin(...)**2`. But output is not an Add.
+
+Maybe input was `(29/450)*sin(pi)**2`? That’s zero, no.
+
+Maybe input was `sin(pi*0.0644444444444444)**2 + sin(pi*0.0644444444444444)**2` = `2*sin(...)**2`. Output is `sin(...)**2`, not `2*sin(...)**2`.
+
+So probably input is exactly `sin(0.0644444444444444*pi)**2`.
+
+Thus `expr` = `sin(0.0644444444444444*pi)**2`.
+
+Let’s answer.
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "expr": "sin(0.0644444444444444*pi)**2"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

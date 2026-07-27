@@ -1,0 +1,258 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from typing import Callable, Final, Iterable, Iterator, TypeVar, Union
+
+class SpecifierSet(BaseSpecifier):
+
+    def __init__(self, specifiers: str | Iterable[Specifier]='', prereleases: bool | None=None) -> None:
+        if isinstance(specifiers, str):
+            split_specifiers = [s.strip() for s in specifiers.split(',') if s.strip()]
+            self._specs = frozenset(map(Specifier, split_specifiers))
+        else:
+            self._specs = frozenset(specifiers)
+        self._prereleases = prereleases
+
+    @property
+    def prereleases(self) -> bool | None:
+        if self._prereleases is not None:
+            return self._prereleases
+        if not self._specs:
+            return None
+        if any((s.prereleases for s in self._specs)):
+            return True
+        return None
+
+    @prereleases.setter
+    def prereleases(self, value: bool | None) -> None:
+        self._prereleases = value
+
+    def __contains__(self, item: UnparsedVersion) -> bool:
+        return self.contains(item)
+
+    def contains(self, item: UnparsedVersion, prereleases: bool | None=None, installed: bool | None=None) -> bool:
+        version = _coerce_version(item)
+        if version is None:
+            return False
+        if installed and version.is_prerelease:
+            prereleases = True
+        return bool(list(self.filter([version], prereleases=prereleases)))
+
+    def filter(self, iterable: Iterable[UnparsedVersionVar], prereleases: bool | None=None) -> Iterator[UnparsedVersionVar]:
+        if prereleases is None and self.prereleases is not None:
+            prereleases = self.prereleases
+        if self._specs:
+            for spec in self._specs:
+                iterable = spec.filter(iterable, prereleases=True if prereleases is None else prereleases)
+            if prereleases is not None:
+                return iter(iterable)
+        else:
+            if prereleases is True:
+                return iter(iterable)
+            if prereleases is False:
+                return (item for item in iterable if (version := _coerce_version(item)) is not None and (not version.is_prerelease))
+        filtered: list[UnparsedVersionVar] = []
+        found_prereleases: list[UnparsedVersionVar] = []
+        for item in iterable:
+            parsed_version = _coerce_version(item)
+            if parsed_version is None:
+                continue
+            if parsed_version.is_prerelease:
+                found_prereleases.append(item)
+            else:
+                filtered.append(item)
+        return iter(filtered if filtered else found_prereleases)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+packaging.src.packaging.specifiers.contains
+
+def contains(
+    self,
+    item: UnparsedVersion,
+    prereleases: bool | None = None,
+    installed: bool | None = None,
+) -> bool:
+    """Return whether or not the item is contained in this SpecifierSet.
+
+    :param item:
+        The item to check for, which can be a version string or a
+        :class:`Version` instance.
+    :param prereleases:
+        Whether or not to match prereleases with this SpecifierSet. If set to
+        ``None`` (the default), it will follow the recommendation from :pep:`440`
+        and match prereleases, as there are no other versions.
+    :param installed:
+        Whether or not the item is installed. If set to ``True``, it will
+        accept prerelease versions even if the specifier does not allow them.
+
+    >>> SpecifierSet(">=1.0.0,!=1.0.1").contains("1.2.3")
+    True
+    >>> SpecifierSet(">=1.0.0,!=1.0.1").contains(Version("1.2.3"))
+    True
+    >>> SpecifierSet(">=1.0.0,!=1.0.1").contains("1.0.1")
+    False
+    >>> SpecifierSet(">=1.0.0,!=1.0.1").contains("1.3.0a1")
+    True
+    >>> SpecifierSet(">=1.0.0,!=1.0.1", prereleases=False).contains("1.3.0a1")
+    False
+    >>> SpecifierSet(">=1.0.0,!=1.0.1").contains("1.3.0a1", prereleases=True)
+    True
+    """
+    version = _coerce_version(item)
+    if version is None:
+        return False
+
+    if installed and version.is_prerelease:
+        prereleases = True
+
+    return bool(list(self.filter([version], prereleases=prereleases)))
+
+
+[/PYTHON]
+What will be the input of `__contains__`, given the following output:
+[OUTPUT]
+```
+{
+    "output": true
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_specs": XXX,
+        "_prereleases": XXX
+    },
+    "args": {
+        "item": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

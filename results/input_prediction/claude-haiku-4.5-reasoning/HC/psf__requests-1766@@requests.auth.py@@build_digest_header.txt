@@ -1,0 +1,74 @@
+[THOUGHT]
+Let me trace through the `build_digest_header` function backwards from the output to determine the input.
+
+From the output:
+```
+Digest username="user", realm="me@kennethreitz.com", nonce="2cb6ca3bd92f46300c21bc6652450899", uri="/digest-auth/auth/user/pass", response="d4094e09aabba1d50d126a165bd3e460", opaque="3b88561378508443a8b14a91ec359904", algorithm="MD5", qop="auth", nc=00000001, cnonce="53e3a9c0a7352f78"
+```
+
+I can extract the following values that become attributes of the output:
+- username = "user"
+- realm = "me@kennethreitz.com" (from self.chal['realm'])
+- nonce = "2cb6ca3bd92f46300c21bc6652450899" (from self.chal['nonce'])
+- uri = "/digest-auth/auth/user/pass" (the path from url)
+- opaque = "3b88561378508443a8b14a91ec359904" (from self.chal['opaque'])
+- algorithm = "MD5" (from self.chal['algorithm'])
+- qop = "auth" (from self.chal['qop'])
+- nc = 00000001, which comes from `'%08x' % self.nonce_count`
+
+Since nc = 00000001, the nonce_count must be 1 at that point.
+
+Looking at the code:
+```python
+if nonce == self.last_nonce:
+    self.nonce_count += 1
+else:
+    self.nonce_count = 1
+```
+
+For nonce_count to become 1, either:
+1. They're not equal and it's set to 1 (likely on first call with last_nonce='')
+2. They're equal and it was 0 before incrementing
+
+The most logical scenario is the first call where last_nonce is empty string (initial value from __init__), and nonce_count is 0 (initial value). This results in nonce_count being set to 1.
+
+The uri "/digest-auth/auth/user/pass" tells us that the `url` parameter must have this path. A reasonable URL would be like "http://httpbin.org/digest-auth/auth/user/pass".
+
+For the method, the URL pattern "/digest-auth/auth/{user}/{password}" and the output suggest GET is the most common method for such test endpoints.
+
+The password can be inferred from the URL format - it appears to be "pass" (matching user in "/digest-auth/auth/user/pass").
+
+The `num_401_calls` attribute is not set in __init__, and while it's used in handle_401, it's not used in build_digest_header itself. I'll set it to 1 as a default value.
+
+The `pos` attribute initializes to None and isn't used in build_digest_header.
+
+The `stale` parameter in chal is optional in digest auth and doesn't appear to be used in this function, so I'll set it to null.
+</THOUGHT>
+
+[INPUT]
+```
+{
+    "self": {
+        "username": "user",
+        "password": "pass",
+        "last_nonce": "",
+        "nonce_count": 0,
+        "chal": {
+            "realm": "me@kennethreitz.com",
+            "nonce": "2cb6ca3bd92f46300c21bc6652450899",
+            "qop": "auth",
+            "opaque": "3b88561378508443a8b14a91ec359904",
+            "algorithm": "MD5",
+            "stale": null
+        },
+        "pos": null,
+        "num_401_calls": 1
+    },
+    "args": {
+        "method": "GET",
+        "url": "http://httpbin.org/digest-auth/auth/user/pass"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

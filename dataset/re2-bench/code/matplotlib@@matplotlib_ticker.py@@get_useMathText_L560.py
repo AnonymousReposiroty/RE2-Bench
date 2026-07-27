@@ -1,0 +1,157 @@
+import matplotlib as mpl
+from matplotlib import _api, cbook
+from matplotlib import font_manager
+
+class ScalarFormatter(Formatter):
+    """
+    Format tick values as a number.
+
+    Parameters
+    ----------
+    useOffset : bool or float, default: :rc:`axes.formatter.useoffset`
+        Whether to use offset notation. See `.set_useOffset`.
+    useMathText : bool, default: :rc:`axes.formatter.use_mathtext`
+        Whether to use fancy math formatting. See `.set_useMathText`.
+    useLocale : bool, default: :rc:`axes.formatter.use_locale`.
+        Whether to use locale settings for decimal sign and positive sign.
+        See `.set_useLocale`.
+    usetex : bool, default: :rc:`text.usetex`
+        To enable/disable the use of TeX's math mode for rendering the
+        numbers in the formatter.
+
+        .. versionadded:: 3.10
+
+    Notes
+    -----
+    In addition to the parameters above, the formatting of scientific vs.
+    floating point representation can be configured via `.set_scientific`
+    and `.set_powerlimits`).
+
+    **Offset notation and scientific notation**
+
+    Offset notation and scientific notation look quite similar at first sight.
+    Both split some information from the formatted tick values and display it
+    at the end of the axis.
+
+    - The scientific notation splits up the order of magnitude, i.e. a
+      multiplicative scaling factor, e.g. ``1e6``.
+
+    - The offset notation separates an additive constant, e.g. ``+1e6``. The
+      offset notation label is always prefixed with a ``+`` or ``-`` sign
+      and is thus distinguishable from the order of magnitude label.
+
+    The following plot with x limits ``1_000_000`` to ``1_000_010`` illustrates
+    the different formatting. Note the labels at the right edge of the x axis.
+
+    .. plot::
+
+        lim = (1_000_000, 1_000_010)
+
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, gridspec_kw={'hspace': 2})
+        ax1.set(title='offset notation', xlim=lim)
+        ax2.set(title='scientific notation', xlim=lim)
+        ax2.xaxis.get_major_formatter().set_useOffset(False)
+        ax3.set(title='floating-point notation', xlim=lim)
+        ax3.xaxis.get_major_formatter().set_useOffset(False)
+        ax3.xaxis.get_major_formatter().set_scientific(False)
+
+    """
+
+    def __init__(self, useOffset=None, useMathText=None, useLocale=None, *, usetex=None):
+        useOffset = mpl._val_or_rc(useOffset, 'axes.formatter.useoffset')
+        self._offset_threshold = mpl.rcParams['axes.formatter.offset_threshold']
+        self.set_useOffset(useOffset)
+        self.set_usetex(usetex)
+        self.set_useMathText(useMathText)
+        self.orderOfMagnitude = 0
+        self.format = ''
+        self._scientific = True
+        self._powerlimits = mpl.rcParams['axes.formatter.limits']
+        self.set_useLocale(useLocale)
+
+    def set_usetex(self, val):
+        """Set whether to use TeX's math mode for rendering numbers in the formatter."""
+        self._usetex = mpl._val_or_rc(val, 'text.usetex')
+    usetex = property(fget=get_usetex, fset=set_usetex)
+
+    def set_useOffset(self, val):
+        """
+        Set whether to use offset notation.
+
+        When formatting a set numbers whose value is large compared to their
+        range, the formatter can separate an additive constant. This can
+        shorten the formatted numbers so that they are less likely to overlap
+        when drawn on an axis.
+
+        Parameters
+        ----------
+        val : bool or float
+            - If False, do not use offset notation.
+            - If True (=automatic mode), use offset notation if it can make
+              the residual numbers significantly shorter. The exact behavior
+              is controlled by :rc:`axes.formatter.offset_threshold`.
+            - If a number, force an offset of the given value.
+
+        Examples
+        --------
+        With active offset notation, the values
+
+        ``100_000, 100_002, 100_004, 100_006, 100_008``
+
+        will be formatted as ``0, 2, 4, 6, 8`` plus an offset ``+1e5``, which
+        is written to the edge of the axis.
+        """
+        if isinstance(val, bool):
+            self.offset = 0
+            self._useOffset = val
+        else:
+            self._useOffset = False
+            self.offset = val
+    useOffset = property(fget=get_useOffset, fset=set_useOffset)
+
+    def set_useLocale(self, val):
+        """
+        Set whether to use locale settings for decimal sign and positive sign.
+
+        Parameters
+        ----------
+        val : bool or None
+            *None* resets to :rc:`axes.formatter.use_locale`.
+        """
+        self._useLocale = mpl._val_or_rc(val, 'axes.formatter.use_locale')
+    useLocale = property(fget=get_useLocale, fset=set_useLocale)
+
+    def get_useMathText(self):
+        """
+        Return whether to use fancy math formatting.
+
+        See Also
+        --------
+        ScalarFormatter.set_useMathText
+        """
+        return self._useMathText
+
+    def set_useMathText(self, val):
+        """
+        Set whether to use fancy math formatting.
+
+        If active, scientific notation is formatted as :math:`1.2 \\times 10^3`.
+
+        Parameters
+        ----------
+        val : bool or None
+            *None* resets to :rc:`axes.formatter.use_mathtext`.
+        """
+        if val is None:
+            self._useMathText = mpl.rcParams['axes.formatter.use_mathtext']
+            if self._useMathText is False:
+                try:
+                    from matplotlib import font_manager
+                    ufont = font_manager.findfont(font_manager.FontProperties(family=mpl.rcParams['font.family']), fallback_to_default=False)
+                except ValueError:
+                    ufont = None
+                if ufont == str(cbook._get_data_path('fonts/ttf/cmr10.ttf')):
+                    _api.warn_external('cmr10 font should ideally be used with mathtext, set axes.formatter.use_mathtext to True')
+        else:
+            self._useMathText = val
+    useMathText = property(fget=get_useMathText, fset=set_useMathText)

@@ -1,0 +1,1 @@
+from django.core.cache.backends.base import BaseCache

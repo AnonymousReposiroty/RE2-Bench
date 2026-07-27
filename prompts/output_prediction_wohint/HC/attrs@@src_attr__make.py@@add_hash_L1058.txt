@@ -1,0 +1,314 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. You need to predict output variable values, and print output between [OUTPUT] and [/OUTPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[PYTHON]
+import contextlib
+import inspect
+from collections.abc import Callable, Mapping
+from typing import Any, NamedTuple, TypeVar
+from . import _compat, _config, setters
+
+class _ClassBuilder:
+    __slots__ = ('_add_method_dunders', '_attr_names', '_attrs', '_base_attr_map', '_base_names', '_cache_hash', '_cls', '_cls_dict', '_delete_attribs', '_frozen', '_has_custom_setattr', '_has_post_init', '_has_pre_init', '_is_exc', '_on_setattr', '_pre_init_has_args', '_repr_added', '_script_snippets', '_slots', '_weakref_slot', '_wrote_own_setattr')
+
+    def __init__(self, cls: type, these, auto_attribs: bool, props: ClassProps, has_custom_setattr: bool):
+        attrs, base_attrs, base_map = _transform_attrs(cls, these, auto_attribs, props.kw_only, props.collected_fields_by_mro, props.field_transformer)
+        self._cls = cls
+        self._cls_dict = dict(cls.__dict__) if props.is_slotted else {}
+        self._attrs = attrs
+        self._base_names = {a.name for a in base_attrs}
+        self._base_attr_map = base_map
+        self._attr_names = tuple((a.name for a in attrs))
+        self._slots = props.is_slotted
+        self._frozen = props.is_frozen
+        self._weakref_slot = props.has_weakref_slot
+        self._cache_hash = props.hashability is ClassProps.Hashability.HASHABLE_CACHED
+        self._has_pre_init = bool(getattr(cls, '__attrs_pre_init__', False))
+        self._pre_init_has_args = False
+        if self._has_pre_init:
+            pre_init_func = cls.__attrs_pre_init__
+            pre_init_signature = inspect.signature(pre_init_func)
+            self._pre_init_has_args = len(pre_init_signature.parameters) > 1
+        self._has_post_init = bool(getattr(cls, '__attrs_post_init__', False))
+        self._delete_attribs = not bool(these)
+        self._is_exc = props.is_exception
+        self._on_setattr = props.on_setattr_hook
+        self._has_custom_setattr = has_custom_setattr
+        self._wrote_own_setattr = False
+        self._cls_dict['__attrs_attrs__'] = self._attrs
+        self._cls_dict['__attrs_props__'] = props
+        if props.is_frozen:
+            self._cls_dict['__setattr__'] = _frozen_setattrs
+            self._cls_dict['__delattr__'] = _frozen_delattrs
+            self._wrote_own_setattr = True
+        elif self._on_setattr in (_DEFAULT_ON_SETATTR, setters.validate, setters.convert):
+            has_validator = has_converter = False
+            for a in attrs:
+                if a.validator is not None:
+                    has_validator = True
+                if a.converter is not None:
+                    has_converter = True
+                if has_validator and has_converter:
+                    break
+            if self._on_setattr == _DEFAULT_ON_SETATTR and (not (has_validator or has_converter)) or (self._on_setattr == setters.validate and (not has_validator)) or (self._on_setattr == setters.convert and (not has_converter)):
+                self._on_setattr = None
+        if props.added_pickling:
+            self._cls_dict['__getstate__'], self._cls_dict['__setstate__'] = self._make_getstate_setstate()
+        self._script_snippets: list[tuple[str, dict, Callable[[dict, dict], Any]]] = []
+        self._repr_added = False
+        if not hasattr(self._cls, '__module__') or not hasattr(self._cls, '__qualname__'):
+            self._add_method_dunders = self._add_method_dunders_safe
+        else:
+            self._add_method_dunders = self._add_method_dunders_unsafe
+
+    def _make_getstate_setstate(self):
+        state_attr_names = tuple((an for an in self._attr_names if an != '__weakref__'))
+
+        def slots_getstate(self):
+            return {name: getattr(self, name) for name in state_attr_names}
+        hash_caching_enabled = self._cache_hash
+
+        def slots_setstate(self, state):
+            __bound_setattr = _OBJ_SETATTR.__get__(self)
+            if isinstance(state, tuple):
+                for name, value in zip(state_attr_names, state):
+                    __bound_setattr(name, value)
+            else:
+                for name in state_attr_names:
+                    if name in state:
+                        __bound_setattr(name, state[name])
+            if hash_caching_enabled:
+                __bound_setattr(_HASH_CACHE_FIELD, None)
+        return (slots_getstate, slots_setstate)
+
+    def add_hash(self):
+        script, globs = _make_hash_script(self._cls, self._attrs, frozen=self._frozen, cache_hash=self._cache_hash)
+
+        def attach_hash(cls_dict: dict, locs: dict) -> None:
+            cls_dict['__hash__'] = self._add_method_dunders(locs['__hash__'])
+        self._script_snippets.append((script, globs, attach_hash))
+        return self
+
+    def _add_method_dunders_unsafe(self, method: Callable) -> Callable:
+        method.__module__ = self._cls.__module__
+        method.__qualname__ = f'{self._cls.__qualname__}.{method.__name__}'
+        method.__doc__ = f'Method generated by attrs for class {self._cls.__qualname__}.'
+        return method
+
+    def _add_method_dunders_safe(self, method: Callable) -> Callable:
+        with contextlib.suppress(AttributeError):
+            method.__module__ = self._cls.__module__
+        with contextlib.suppress(AttributeError):
+            method.__qualname__ = f'{self._cls.__qualname__}.{method.__name__}'
+        with contextlib.suppress(AttributeError):
+            method.__doc__ = f'Method generated by attrs for class {self._cls.__qualname__}.'
+        return method
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+attrs.src.attr._make._make_hash_script
+
+def _make_hash_script(
+    cls: type, attrs: list[Attribute], frozen: bool, cache_hash: bool
+) -> tuple[str, dict]:
+    attrs = tuple(
+        a for a in attrs if a.hash is True or (a.hash is None and a.eq is True)
+    )
+
+    tab = "        "
+
+    type_hash = hash(_generate_unique_filename(cls, "hash"))
+    # If eq is custom generated, we need to include the functions in globs
+    globs = {}
+
+    hash_def = "def __hash__(self"
+    hash_func = "hash(("
+    closing_braces = "))"
+    if not cache_hash:
+        hash_def += "):"
+    else:
+        hash_def += ", *"
+
+        hash_def += ", _cache_wrapper=__import__('attr._make')._make._CacheHashWrapper):"
+        hash_func = "_cache_wrapper(" + hash_func
+        closing_braces += ")"
+
+    method_lines = [hash_def]
+
+    def append_hash_computation_lines(prefix, indent):
+        """
+        Generate the code for actually computing the hash code.
+        Below this will either be returned directly or used to compute
+        a value which is then cached, depending on the value of cache_hash
+        """
+
+        method_lines.extend(
+            [
+                indent + prefix + hash_func,
+                indent + f"        {type_hash},",
+            ]
+        )
+
+        for a in attrs:
+            if a.eq_key:
+                cmp_name = f"_{a.name}_key"
+                globs[cmp_name] = a.eq_key
+                method_lines.append(
+                    indent + f"        {cmp_name}(self.{a.name}),"
+                )
+            else:
+                method_lines.append(indent + f"        self.{a.name},")
+
+        method_lines.append(indent + "    " + closing_braces)
+
+    if cache_hash:
+        method_lines.append(tab + f"if self.{_HASH_CACHE_FIELD} is None:")
+        if frozen:
+            append_hash_computation_lines(
+                f"object.__setattr__(self, '{_HASH_CACHE_FIELD}', ", tab * 2
+            )
+            method_lines.append(tab * 2 + ")")  # close __setattr__
+        else:
+            append_hash_computation_lines(
+                f"self.{_HASH_CACHE_FIELD} = ", tab * 2
+            )
+        method_lines.append(tab + f"return self.{_HASH_CACHE_FIELD}")
+    else:
+        append_hash_computation_lines("return ", tab)
+
+    script = "\n".join(method_lines)
+    return script, globs
+
+
+[/PYTHON]
+What will be the output of `add_hash`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "auto_attribs": false,
+        "these": null,
+        "has_custom_setattr": false
+    },
+    "args": {},
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]

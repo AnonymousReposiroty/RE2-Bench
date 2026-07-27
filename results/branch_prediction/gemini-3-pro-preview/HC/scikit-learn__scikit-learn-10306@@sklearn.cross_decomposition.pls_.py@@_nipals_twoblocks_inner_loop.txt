@@ -1,0 +1,84 @@
+The execution of `_nipals_twoblocks_inner_loop` determines the weights for PLS canonical mode.
+1.  **Loop Initialization (Iteration 1):**
+    *   Since `Y`'s first column is practically zero (order 1e-16), `y_score` is initialized to near-zero.
+    *   Line 24: This is the first iteration, `X_pinv` is None. Branch **Taken** ['Y'].
+    *   `x_weights` is calculated. Since `y_score` is ~0, `x_weights` is extremely small.
+    *   Line 29: The dot product of `x_weights` is compared to `eps`. Since `x_weights` is ~0 and `eps` is ~2e-16, it is smaller. Branch **Taken** ['Y'].
+    *   `x_weights` is bumped by `eps` and normalized (effectively becoming a vector of ones/eps normalized).
+    *   `x_score` is calculated (random projection).
+    *   Line 34: `Y_pinv` is None. Branch **Taken** ['Y'].
+    *   Line 39: `norm_y_weights` is `True`. Branch **Taken** ['Y'].
+    *   Line 43: Convergence check. `x_weights_diff` compares the initialized 0 with the current `eps`-vector (normalized). Diff is ~1.0. `tol` is 1e-6. Not converged. `Y.shape[1]` is 2. Branch **Not Taken** ['N'].
+    *   Line 45: `ite` is 1, `max_iter` is 500. Branch **Not Taken** ['N'].
+
+2.  **Iteration 2:**
+    *   Line 24: `X_pinv` exists. Branch **Not Taken** ['N'].
+    *   `y_score` now contains information from `Y`'s non-zero columns (propagated via `y_weights`). `x_weights` becomes data-driven (Rank 1 approximation).
+    *   Line 29: `x_weights` is now significant. Branch **Not Taken** ['N'].
+    *   Line 34: `Y_pinv` exists. Branch **Not Taken** ['N'].
+    *   Line 39: `norm_y_weights` is `True`. Branch **Taken** ['Y'].
+    *   Line 43: Convergence check. `x_weights_diff` compares `x_weights` (pure random direction from Iter 1) with `x_weights` (data direction from Iter 2). They are unlikely to match. Branch **Not Taken** ['N'].
+    *   Line 45: Branch **Not Taken** ['N'].
+
+3.  **Iteration 3:**
+    *   Line 24: **Not Taken** ['N'].
+    *   Line 29: **Not Taken** ['N'].
+    *   Line 34: **Not Taken** ['N'].
+    *   Line 39: **Taken** ['Y'].
+    *   Line 43: Convergence check. Since `Y` has a dominant rank-1 structure (one zero col, one signal col), the NIPALS power method converges very quickly (typically in 1 step after correct initialization). The vector in Iter 3 will be almost identical to Iter 2. Diff < tol. Branch **Taken** ['Y'].
+    *   Loop breaks. Line 45 is not reached.
+
+[ANSWER]
+1 import warnings
+2 from abc import ABCMeta, abstractmethod
+3 import numpy as np
+4 from scipy.linalg import pinv2, svd
+5 from scipy.sparse.linalg import svds
+6 from ..base import BaseEstimator, RegressorMixin, TransformerMixin
+7 from ..utils import check_array, check_consistent_length
+8 from ..utils.extmath import svd_flip
+9 from ..utils.validation import check_is_fitted, FLOAT_DTYPES
+10 from ..exceptions import ConvergenceWarning
+11 from ..externals import six
+12 
+13 __all__ = ['PLSCanonical', 'PLSRegression', 'PLSSVD']
+14 
+15 def _nipals_twoblocks_inner_loop(X, Y, mode="A", max_iter=500, tol=1e-06,
+16                                  norm_y_weights=False):
+17     y_score = Y[:, [0]]
+18     x_weights_old = 0
+19     ite = 1
+20     X_pinv = Y_pinv = None
+21     eps = np.finfo(X.dtype).eps
+22     while True:
+23         if mode == "B":
+24             if X_pinv is None: ## [BRANCH]taken=['Y', 'N', 'N'][/BRANCH]
+25                 X_pinv = pinv2(X, check_finite=False)
+26             x_weights = np.dot(X_pinv, y_score)
+27         else:
+28             x_weights = np.dot(X.T, y_score) / np.dot(y_score.T, y_score)
+29         if np.dot(x_weights.T, x_weights) < eps: ## [BRANCH]taken=['Y', 'N', 'N'][/BRANCH]
+30             x_weights += eps
+31         x_weights /= np.sqrt(np.dot(x_weights.T, x_weights)) + eps
+32         x_score = np.dot(X, x_weights)
+33         if mode == "B":
+34             if Y_pinv is None: ## [BRANCH]taken=['Y', 'N', 'N'][/BRANCH]
+35                 Y_pinv = pinv2(Y, check_finite=False)
+36             y_weights = np.dot(Y_pinv, x_score)
+37         else:
+38             y_weights = np.dot(Y.T, x_score) / np.dot(x_score.T, x_score)
+39         if norm_y_weights: ## [BRANCH]taken=['Y', 'Y', 'Y'][/BRANCH]
+40             y_weights /= np.sqrt(np.dot(y_weights.T, y_weights)) + eps
+41         y_score = np.dot(Y, y_weights) / (np.dot(y_weights.T, y_weights) + eps)
+42         x_weights_diff = x_weights - x_weights_old
+43         if np.dot(x_weights_diff.T, x_weights_diff) < tol or Y.shape[1] == 1: ## [BRANCH]taken=['N', 'N', 'Y'][/BRANCH]
+44             break
+45         if ite == max_iter: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+46             warnings.warn('Maximum number of iterations reached',
+47                           ConvergenceWarning)
+48             break
+49         x_weights_old = x_weights
+50         ite += 1
+51     return x_weights, y_weights, ite
+52 
+[/ANSWER]

@@ -1,0 +1,370 @@
+[OUTPUT]
+
+<|assistant|>
+[OUTPUT]
+{
+    "output": False
+}
+[/OUTPUT]
+
+[FILEPATH] src/parsing/dspy_parser.py [/FILEPATH]
+import dspy
+from .base_parser import BaseParser
+
+
+class DspyParser(BaseParser):
+
+    def __init__(self, model, cache_dir):
+        self.model = model
+        self.cache_dir = cache_dir
+
+    def generate_augmented_program_input_output(self, original_program_io, augmented_programs):
+        augmented_program_str = "\n\n".join(f"<output{idx}>: {self.augment_program_io(in_, out)}\n</output{idx}>" 
+                                            for idx, (in_, out) in enumerate(augmented_programs))
+        original_program_str = f"<output{len(augmented_programs)}>: {self.format_program_io(*original_program_io)}\n</output{len(augmented_programs)}>"
+        if len(augmented_programs) > 0:
+            return f"{augmented_program_str}\n\nOriginal Program:\n{original_program_str}"
+        return f"Original Program:\n{original_program_str}"
+
+    def augment_program_io(self, in_, out):
+        return f"<think> Please write the output of the original program when {in_} is the input. </think>" + self.format_program_io(in_, out)
+    
+    def format_program_io(self, in_, out):
+        return f"<input>: {in_}\n<output>: {out}</output>"
+    
+    def train(self, augmented_programs, iterations=5):
+        class Extract(dspy.Predict):
+            target = dspy.OutputField(prefix="Corrected program output: ")
+
+        # The prompt template has system instructions that are not required when using HF models
+        self.trainset = self.generate_dataset(augmented_programs)
+        dspy.settings.configure(lm=self.model, cache_dir=self.cache_dir)
+        self.predictor = Extract().with_inputs('trainset')
+        self.predictor.set_state("Incorrect output: {incorrect_output}\nCorrect output: {correct_output}")
+        self.predictor.set_system("You are a helpful AI assistant who understands and corrects LLM outputs. "
+                                  "LLMs are not perfect and your role is to help them by correcting mistakes. "
+                                  "You will be given inputs, an incorrect output from the LLM, and a correct output by "
+                                  "another oracle. You will then use the provided examples to improve the LLM outputs."
+        )
+        return self.predictor()
+
+    def generate_output(self, program_input):
+        class Predict(dspy.Predict):
+            target = dspy.OutputField()
+
+        self.predictor.set_state("Program output: {incorrect_output}")
+        dspy.settings.configure(lm=self.model, cache_dir=self.cache_dir)
+        predictor = Predict()
+        return predictor(prompt=f"Corrected program output for input: {program_input}:")
+
+[FILEPATH] src/parsing/language_model_parser.py [/FILEPATH]
+import os
+from openai import OpenAI
+import anthropic
+import random
+import json
+import re
+from .base_parser import BaseParser
+
+
+class LanguageModelParser(BaseParser):
+
+    def __init__(self, cache_dir):
+        self.cache_dir = cache_dir
+        self.model = None
+        self.client = None
+
+    def get_model(self):
+        return self.model
+
+    def train(self, program_io, iterations=5):
+        pass
+
+    def load_model(self, model_name, openai_api_key=None, anthropic_api_key=None):
+        self.model = model_name
+        if "gpt" in model_name:
+            self.client = OpenAI(api_key=openai_api_key)
+        elif "claude" in model_name:
+            self.client = anthropic.Client(api_key=anthropic_api_key)
+
+    def generate_augmented_program_input_output(self, original_program_io, augmented_programs):
+        augmented_program_str = "\n\n".join(f"<output{idx}>: {self.augment_program_io(in_, out)}\n</output{idx}>" 
+                                            for idx, (in_, out) in enumerate(augmented_programs))
+        original_program_str = f"<output{len(augmented_programs)}>: {self.format_program_io(*original_program_io)}\n</output{len(augmented_programs)}>"
+        if len(augmented_programs) > 0:
+            return f"{augmented_program_str}\n\nOriginal Program:\n{original_program_str}"
+        return f"Original Program:\n{original_program_str}"
+
+    def augment_program_io(self, in_, out):
+        return f"<think> Please write the output of the original program when {in_} is the input. </think>" + self.format_program_io(in_, out)
+    
+    def format_program_io(self, in_, out):
+        return f"<input>: {in_}\n<output>: {out}</output>"
+
+    def generate_output(self, program_input):
+        cache_key = f"{self.model}_{program_input}"
+        cache_file = os.path.join(self.cache_dir, f"{cache_key}.txt")
+        if os.path.exists(cache_file):
+            with open(cache_file, "r") as f:
+                return f.read()
+        else:
+            prompt = self.generate_augmented_program_input_output(program_input, [])
+            generated_output = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a helpful AI assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0
+            ).choices[0].message.content
+            with open(cache_file, "w") as f:
+                f.write(generated_output)
+            return generated_output
+
+    def parse(self, program_input, program_output):
+        cache_key = f"{self.model}_{program_input}_{program_output}"
+        cache_file = os.path.join(self.cache_dir, f"{cache_key}.txt")
+        if os.path.exists(cache_file):
+            with open(cache_file, "r") as f:
+                return f.read()
+        else:
+            raw_input = [self.augment_program_io(program_input, program_output)]
+            raw_input_str = "\n\n".join(f"<output{idx}>: {in_}\n</output{idx}>" 
+                                            for idx, in_ in enumerate(raw_input))
+            generated_output = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a helpful AI assistant."
+                    },
+                    {
+                        "role": "user",
+                        "content": raw_input_str
+                    }
+                ],
+                temperature=0
+            ).choices[0].message.content
+            with open(cache_file, "w") as f:
+                f.write(generated_output)
+            return generated_output
+
+
+    def generate_dataset(self, augmented_programs, n=50, percentage_missing=0.0):
+        template = "You are given a JSON object and its JSON schema. Output a JSON object that meets the schema (between [JSON] and [/JSON]) that is valid and meets the JSON schema. You must follow the examples and maintain the structure given by the original JSON object. Output a JSON object that includes filler values for any missing fields. The JSON object schema is between [SCHEMA] and [/SCHEMA]. The JSON object with missing fields is between [JSON] and [/JSON]. Your output should maintain the structure defined by the original JSON object."
+        results = []
+        n_schema = len(augmented_programs)
+        for i in range(n):
+            schema_idx = random.randint(0, n_schema-1)
+            json_schema, correct_output = augmented_programs[schema_idx]
+            json_output, json_mask, json_missing = self.corrupt_json(correct_output, percentage_missing)
+            results.append((json_schema, correct_output, json_output, json_mask, json_missing))
+        return results
+    
+    def corrupt_json(self, json_str, percentage_missing):
+        json_obj = json.loads(json_str)
+        missing_indices = []
+        for i, k in enumerate(json_obj.keys()):
+            if random.random() < percentage_missing:
+                del json_obj[k]
+                missing_indices.append(i)
+        return json.dumps(json_obj), missing_indices, [k for i, k in enumerate(json_obj.keys()) if i in missing_indices]
+    
+    def convert_json_to_str(self, json_str):
+        return str(json.loads(json_str))
+
+    def convert_str_to_json(self, str_obj):
+        return json.dumps(str_obj)
+
+[FILEPATH] src/test_dspy_parser.py [/FILEPATH]
+import os
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import argparse
+from dspy import dspy
+from dspy.teleprompt import BootstrapFewShotWithRandomSearch
+import dspy
+from dspy import TypedPredictor, Arg, SignatureField
+from .parsing.dspy_parser import DspyParser
+from dotenv import load_dotenv
+from parsing.base_parser import BaseParser
+
+def main(args):
+    tokenizer = AutoTokenizer.from_pretrained(args.llm_name, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(args.llm_name, trust_remote_code=True, load_in_8bit=True, device_map="auto")
+    dspy.settings.configure(lm=tokenizer)
+    dspy_language_model = DspyParser(model, cache_dir=args.cache_dir)
+    dataset = dspy_language_model.generate_dataset(args.input_dir, args.output_dir, 10)
+    # get total # of classes
+    n_classes = len(os.listdir(args.input_dir))
+    dataset = [x for x in dataset if len(x) >= 3] # only pick classes with > 3 examples
+    # pick a class
+    # class_ = random.choice([x for x in os.listdir(args.input_dir) if os.path.exists(os.path.join(args.output_dir, x))])
+    class_ = "Stones"
+    class_ = "Water"
+    print(f"Selected class: {class_}")
+    # get all the examples for that class
+    examples = [x for x in dataset if x[0]["class"] == class_]
+    print(f"Number of examples: {len(examples)}")
+    # get a random test example
+    # test_example = random.choice(examples)
+    examples = examples[:5]
+    print(f"Number of examples after slicing: {len(examples)}")
+    print(examples)
+    # test_example = examples[4]
+    test_example = examples[1]
+    n_examples = len(examples) - 1
+    n_examples = 5
+    print(f"n_examples: {n_examples}")
+    # n_examples = 1
+    examples = examples[:n_examples]
+    # n_examples = 2
+    # if n_examples > 1:
+    #     examples = [test_example] + random.choices(examples, k=n_examples-1)
+    # else:
+    #     examples = [test_example]
+    print(f"Number of examples after slicing: {len(examples)}")
+    class_examples = [{'img': x[0]['image'], 'label': x[0]['class']} for x in examples]
+    print(f"Number of class examples: {len(class_examples)}")
+    print(f"Number of labels: {len([x['label'] for x in class_examples])}")
+    # class_ = "sample"
+    test_image = {'img': test_example[0]['image'], 'label': test_example[0]['class']}
+    print(f"Number of classes: {n_classes}")
+    print(f"Number of examples: {len(examples)}")
+    print(f"Selected class: {class_}")
+    print(f"Number of examples for class: {len(class_examples)}")
+    print(f"Number of labels: {len([x['label'] for x in class_examples])}")
+    print(f"Number of labels: {[x['label'] for x in class_examples]}")
+    print(f"Test image: {test_image}")
+    predict = TypedPredictor(dspy_language_model.p_infer)
+    predict.set_inputs(test_image=test_image, class_examples=class_examples, num_classes=n_classes)
+    # print(f"Predictor: {predict}")
+    print(f"Output: {predict()}")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input_dir', type=str, help='Path to input directory')
+    parser.add_argument('--output_dir', type=str, help='Path to output directory')
+    parser.add_argument('--cache_dir', type=str, help='Path to cache directory')
+    parser.add_argument('--llm_name', type=str, help='Name of LLM')
+    args = parser.parse_args()
+    load_dotenv()
+    main(args)
+
+[FILEPATH] src/test_rephrase_swe_bench_s1.py [/FILEPATH]
+from utils import find_best_cnf_triple, find_best_cnf_triples, get_matching_functions_from_dataset
+import json
+import os
+import random
+import argparse
+from openai import OpenAI
+import openai
+from dotenv import load_dotenv
+
+
+def get_llm_rephrased_functions(client, method_desc, n=10):
+    print("hello")
+    matching_functions = []
+    for i in range(n):
+        output = client.chat.completions.create(
+            model="gpt-4-turbo-preview",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that can rephrase and reformat text."
+                },
+                {
+                    "role": "user",
+                    "content": f"""Reformat and rephrase the following text in a way that is consistent with an LLM's training data
+                [EXAMPLE]
+                function is executed if the current found solution is not empty and the length of the current found solution 
+                is less than the specified threshold. Return value is a boolean
+                [/EXAMPLE]
+                Text: {method_desc}"""
+                }
+            ],
+            temperature=0.8
+        )
+        print(output.choices[0].message.content)
+        matching_functions.append(output.choices[0].message.content)
+    return matching_functions
+
+def create_program_io_json(method_desc, method_name, in_, out, cnf_triple):
+    program_io_dict = {}
+    program_io_dict["function_desc"] = method_desc
+    program_io_dict["function_name"] = method_name
+    program_io_dict["input"] = in_
+    program_io_dict["output"] = out
+    program_io_dict["cnf_triple"] = cnf_triple
+    return json.dumps(program_io_dict)
+
+
+def main(args):
+    # load openai client
+    load_dotenv()
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+    client = OpenAI(api_key=openai.api_key)
+    # load swe-bench s1 dataset
+    test_dataset = json.load(open.load(f'{args.data_path}/test.jsonl'))
+    # parse the dataset as a list of dict where each dict has the method_desc, method_name, input, output
+    test_dataset = [{ "method_desc": x['method_desc'], 
+                        "method_name": x['method_name'], 
+                        "input": x['instruction_input'], 
+                        "output": x['instruction_output']} for x in test_dataset]
+    for test_case in test_dataset:
+        cnf_triple = find_best_cnf_triple(test_case['method_desc'])
+        llm_rephrased_functions = get_llm_rephrased_functions(client, test_case['method_desc'])
+        test_case['llm_rephrased_functions'] = llm_rephrased_functions
+    print(f"Created {len(test_dataset)} test cases.")
+    train_dataset = json.load(open.load(f'{args.data_path}/train.jsonl'))
+    train_dataset = [{ "method_desc": x['method_desc'], 
+                        "method_name": x['method_name'], 
+                        "input": x['instruction_input'], 
+                        "output": x['instruction_output']} for x in train_dataset]
+    for train_case in train_dataset:
+        cnf_triple = find_best_cnf_triple(train_case['method_desc'])
+        train_case['cnf_triple'] = cnf_triple
+    test_indices = random.sample(range(len(train_dataset)), 10)
+    dev_dataset = [train_dataset[i] for i in test_indices]
+    train_dataset = [train_dataset[i] for i in range(len(train_dataset)) if i not in test_indices]
+    train_dataset += test_dataset
+    print(f"Created {len(train_dataset)} train cases.")
+    print(f"Created {len(dev_dataset)} dev cases.")
+    # combine the datasets and save them
+    # os.makedirs(os.path.join(args.data_path, "py150_cnf"), exist_ok=True)
+    os.makedirs(os.path.join(args.data_path, "llm_rephrased"), exist_ok=True)
+    # json.dump([create_program_io_json(x['method_desc'], x['method_name'], x['input'], x['output'], x['cnf_triple']) for x in train_dataset], open(os.path.join(args.data_path, "py150_cnf", "train.json"), "w"))
+    # json.dump([create_program_io_json(x['method_desc'], x['method_name'], x['input'], x['output'], x['cnf_triple']) for x in dev_dataset], open(os.path.join(args.data_path, "py150_cnf", "dev.json"), "w"))
+    # json.dump([create_program_io_json(x['method_desc'], x['method_name'], x['input'], x['output'], x['cnf_triple']) for x in test_dataset], open(os.path.join(args.data_path, "py150_cnf", "test.json"), "w"))
+    json.dump([create_program_io_json(x['method_desc'], x['method_name'], x['input'], x['output'], x['llm_rephrased_functions']) for x in train_dataset], open(os.path.join(args.data_path, "llm_rephrased", "train.json"), "w"))
+    json.dump([create_program_io_json(x['method_desc'], x['method_name'], x['input'], x['output'], x['llm_rephrased_functions']) for x in dev_dataset], open(os.path.join(args.data_path, "llm_rephrased", "dev.json"), "w"))
+    json.dump([create_program_io_json(x['method_desc'], x['method_name'], x['input'], x['output'], x['llm_rephrased_functions']) for x in test_dataset], open(os.path.join(args.data_path, "llm_rephrased", "test.json"), "w"))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", type=str, default="/home/ankit/Documents/amigo_swe/data/swe_bench/SWE-bench/data")
+    args = parser.parse_args()
+    main(args)
+
+[FILEPATH] src/utils.py [/FILEPATH]
+from string import digits
+from collections import defaultdict
+import json
+import re
+import spacy
+from spacy.matcher import PhraseMatcher
+from typing import Any, Dict, List, Tuple
+from cnf_triples import cnf_triple_dict, stop_words, merged_triplets
+import os
+
+
+def load_dataset(dataset_path: str, hf_name: str) -> Tuple[List[str], Dict[str, List[Any]]]:
+    with open(dataset_path, "r") as f:
+        original_data = json.load

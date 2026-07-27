@@ -1,0 +1,3071 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import copy
+import inspect
+import warnings
+from functools import partialmethod
+from itertools import chain
+import django
+from django.apps import apps
+from django.conf import settings
+from django.core import checks
+from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, FieldError, MultipleObjectsReturned, ObjectDoesNotExist, ValidationError
+from django.db import DEFAULT_DB_ALIAS, DJANGO_VERSION_PICKLE_KEY, DatabaseError, connection, connections, router, transaction
+from django.db.models import NOT_PROVIDED, ExpressionWrapper, IntegerField, Max, Value
+from django.db.models.constants import LOOKUP_SEP
+from django.db.models.constraints import CheckConstraint, UniqueConstraint
+from django.db.models.deletion import CASCADE, Collector
+from django.db.models.fields.related import ForeignObjectRel, OneToOneField, lazy_related_operation, resolve_relation
+from django.db.models.functions import Coalesce
+from django.db.models.manager import Manager
+from django.db.models.options import Options
+from django.db.models.query import F, Q
+from django.db.models.signals import class_prepared, post_init, post_save, pre_init, pre_save
+from django.db.models.utils import make_model_tuple
+from django.utils.encoding import force_str
+from django.utils.hashable import make_hashable
+from django.utils.text import capfirst, get_text_list
+from django.utils.translation import gettext_lazy as _
+from django.db import models
+DEFERRED = Deferred()
+model_unpickle.__safe_for_unpickle__ = True
+
+class Model:
+    pk = property(_get_pk_val, _set_pk_val)
+    save.alters_data = True
+    save_base.alters_data = True
+    delete.alters_data = True
+
+    def __init__(self, *args, **kwargs):
+        cls = self.__class__
+        opts = self._meta
+        _setattr = setattr
+        _DEFERRED = DEFERRED
+        if opts.abstract:
+            raise TypeError('Abstract models cannot be instantiated.')
+        pre_init.send(sender=cls, args=args, kwargs=kwargs)
+        self._state = ModelState()
+        if len(args) > len(opts.concrete_fields):
+            raise IndexError('Number of args exceeds number of fields')
+        if not kwargs:
+            fields_iter = iter(opts.concrete_fields)
+            for val, field in zip(args, fields_iter):
+                if val is _DEFERRED:
+                    continue
+                _setattr(self, field.attname, val)
+        else:
+            fields_iter = iter(opts.fields)
+            for val, field in zip(args, fields_iter):
+                if val is _DEFERRED:
+                    continue
+                _setattr(self, field.attname, val)
+                if kwargs.pop(field.name, NOT_PROVIDED) is not NOT_PROVIDED:
+                    raise TypeError(f"{cls.__qualname__}() got both positional and keyword arguments for field '{field.name}'.")
+        for field in fields_iter:
+            is_related_object = False
+            if field.attname not in kwargs and field.column is None:
+                continue
+            if kwargs:
+                if isinstance(field.remote_field, ForeignObjectRel):
+                    try:
+                        rel_obj = kwargs.pop(field.name)
+                        is_related_object = True
+                    except KeyError:
+                        try:
+                            val = kwargs.pop(field.attname)
+                        except KeyError:
+                            val = field.get_default()
+                else:
+                    try:
+                        val = kwargs.pop(field.attname)
+                    except KeyError:
+                        val = field.get_default()
+            else:
+                val = field.get_default()
+            if is_related_object:
+                if rel_obj is not _DEFERRED:
+                    _setattr(self, field.name, rel_obj)
+            elif val is not _DEFERRED:
+                _setattr(self, field.attname, val)
+        if kwargs:
+            property_names = opts._property_names
+            for prop in tuple(kwargs):
+                try:
+                    if prop in property_names or opts.get_field(prop):
+                        if kwargs[prop] is not _DEFERRED:
+                            _setattr(self, prop, kwargs[prop])
+                        del kwargs[prop]
+                except (AttributeError, FieldDoesNotExist):
+                    pass
+            for kwarg in kwargs:
+                raise TypeError("%s() got an unexpected keyword argument '%s'" % (cls.__name__, kwarg))
+        super().__init__()
+        post_init.send(sender=cls, instance=self)
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        if len(values) != len(cls._meta.concrete_fields):
+            values_iter = iter(values)
+            values = [next(values_iter) if f.attname in field_names else DEFERRED for f in cls._meta.concrete_fields]
+        new = cls(*values)
+        new._state.adding = False
+        new._state.db = db
+        return new
+
+    def __hash__(self):
+        if self.pk is None:
+            raise TypeError('Model instances without primary key value are unhashable')
+        return hash(self.pk)
+
+    def _get_pk_val(self, meta=None):
+        meta = meta or self._meta
+        return getattr(self, meta.pk.attname)
+
+    def delete(self, using=None, keep_parents=False):
+        if self.pk is None:
+            raise ValueError("%s object can't be deleted because its %s attribute is set to None." % (self._meta.object_name, self._meta.pk.attname))
+        using = using or router.db_for_write(self.__class__, instance=self)
+        collector = Collector(using=using, origin=self)
+        collector.collect([self], keep_parents=keep_parents)
+        return collector.delete()
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.django.db.utils.ConnectionRouter._route_db
+
+def _route_db(self, model, **hints):
+    chosen_db = None
+    for router in self.routers:
+        try:
+            method = getattr(router, action)
+        except AttributeError:
+            pass
+        else:
+            chosen_db = method(model, **hints)
+            if chosen_db:
+                return chosen_db
+    instance = hints.get('instance')
+    if instance is not None and instance._state.db:
+        return instance._state.db
+    return DEFAULT_DB_ALIAS
+
+.django.db.models.deletion.Collector.__init__
+
+def __init__(self, using, origin=None):
+    self.using = using
+    self.origin = origin
+    self.data = defaultdict(set)
+    self.field_updates = defaultdict(partial(defaultdict, set))
+    self.restricted_objects = defaultdict(partial(defaultdict, set))
+    self.fast_deletes = []
+    self.dependencies = defaultdict(set)
+
+.django.db.models.deletion.Collector.collect
+
+def collect(self, objs, source=None, nullable=False, collect_related=True, source_attr=None, reverse_dependency=False, keep_parents=False, fail_on_restricted=True):
+    if self.can_fast_delete(objs):
+        self.fast_deletes.append(objs)
+        return
+    new_objs = self.add(objs, source, nullable, reverse_dependency=reverse_dependency)
+    if not new_objs:
+        return
+    model = new_objs[0].__class__
+    if not keep_parents:
+        concrete_model = model._meta.concrete_model
+        for ptr in concrete_model._meta.parents.values():
+            if ptr:
+                parent_objs = [getattr(obj, ptr.name) for obj in new_objs]
+                self.collect(parent_objs, source=model, source_attr=ptr.remote_field.related_name, collect_related=False, reverse_dependency=True, fail_on_restricted=False)
+    if not collect_related:
+        return
+    if keep_parents:
+        parents = set(model._meta.get_parent_list())
+    model_fast_deletes = defaultdict(list)
+    protected_objects = defaultdict(list)
+    for related in get_candidate_relations_to_delete(model._meta):
+        if keep_parents and related.model in parents:
+            continue
+        field = related.field
+        if field.remote_field.on_delete == DO_NOTHING:
+            continue
+        related_model = related.related_model
+        if self.can_fast_delete(related_model, from_field=field):
+            model_fast_deletes[related_model].append(field)
+            continue
+        batches = self.get_del_batches(new_objs, [field])
+        for batch in batches:
+            sub_objs = self.related_objects(related_model, [field], batch)
+            if not (sub_objs.query.select_related or self._has_signal_listeners(related_model)):
+                referenced_fields = set(chain.from_iterable(((rf.attname for rf in rel.field.foreign_related_fields) for rel in get_candidate_relations_to_delete(related_model._meta))))
+                sub_objs = sub_objs.only(*tuple(referenced_fields))
+            if sub_objs:
+                try:
+                    field.remote_field.on_delete(self, field, sub_objs, self.using)
+                except ProtectedError as error:
+                    key = "'%s.%s'" % (field.model.__name__, field.name)
+                    protected_objects[key] += error.protected_objects
+    if protected_objects:
+        raise ProtectedError('Cannot delete some instances of model %r because they are referenced through protected foreign keys: %s.' % (model.__name__, ', '.join(protected_objects)), set(chain.from_iterable(protected_objects.values())))
+    for related_model, related_fields in model_fast_deletes.items():
+        batches = self.get_del_batches(new_objs, related_fields)
+        for batch in batches:
+            sub_objs = self.related_objects(related_model, related_fields, batch)
+            self.fast_deletes.append(sub_objs)
+    for field in model._meta.private_fields:
+        if hasattr(field, 'bulk_related_objects'):
+            sub_objs = field.bulk_related_objects(new_objs, self.using)
+            self.collect(sub_objs, source=model, nullable=True, fail_on_restricted=False)
+    if fail_on_restricted:
+        for related_model, instances in self.data.items():
+            self.clear_restricted_objects_from_set(related_model, instances)
+        for qs in self.fast_deletes:
+            self.clear_restricted_objects_from_queryset(qs.model, qs)
+        if self.restricted_objects.values():
+            restricted_objects = defaultdict(list)
+            for related_model, fields in self.restricted_objects.items():
+                for field, objs in fields.items():
+                    if objs:
+                        key = "'%s.%s'" % (related_model.__name__, field.name)
+                        restricted_objects[key] += objs
+            if restricted_objects:
+                raise RestrictedError('Cannot delete some instances of model %r because they are referenced through restricted foreign keys: %s.' % (model.__name__, ', '.join(restricted_objects)), set(chain.from_iterable(restricted_objects.values())))
+
+.django.db.models.deletion.Collector.can_fast_delete
+
+def can_fast_delete(self, objs, from_field=None):
+    if from_field and from_field.remote_field.on_delete is not CASCADE:
+        return False
+    if hasattr(objs, '_meta'):
+        model = objs._meta.model
+    elif hasattr(objs, 'model') and hasattr(objs, '_raw_delete'):
+        model = objs.model
+    else:
+        return False
+    if self._has_signal_listeners(model):
+        return False
+    opts = model._meta
+    return all((link == from_field for link in opts.concrete_model._meta.parents.values())) and all((related.field.remote_field.on_delete is DO_NOTHING for related in get_candidate_relations_to_delete(opts))) and (not any((hasattr(field, 'bulk_related_objects') for field in opts.private_fields)))
+
+.django.db.models.deletion.Collector.add
+
+def add(self, objs, source=None, nullable=False, reverse_dependency=False):
+    if not objs:
+        return []
+    new_objs = []
+    model = objs[0].__class__
+    instances = self.data[model]
+    for obj in objs:
+        if obj not in instances:
+            new_objs.append(obj)
+    instances.update(new_objs)
+    if source is not None and (not nullable):
+        self.add_dependency(source, model, reverse_dependency=reverse_dependency)
+    return new_objs
+
+.django.db.models.deletion.get_candidate_relations_to_delete
+
+def get_candidate_relations_to_delete(opts):
+    return (f for f in opts.get_fields(include_hidden=True) if f.auto_created and (not f.concrete) and (f.one_to_one or f.one_to_many))
+
+.django.db.models.options.Options.get_fields
+
+def get_fields(self, include_parents=True, include_hidden=False):
+    if include_parents is False:
+        include_parents = PROXY_PARENTS
+    return self._get_fields(include_parents=include_parents, include_hidden=include_hidden)
+
+.django.db.models.options.Options._get_fields
+
+def _get_fields(self, forward=True, reverse=True, include_parents=True, include_hidden=False, seen_models=None):
+    if include_parents not in (True, False, PROXY_PARENTS):
+        raise TypeError('Invalid argument for include_parents: %s' % (include_parents,))
+    topmost_call = seen_models is None
+    if topmost_call:
+        seen_models = set()
+    seen_models.add(self.model)
+    cache_key = (forward, reverse, include_parents, include_hidden, topmost_call)
+    try:
+        return self._get_fields_cache[cache_key]
+    except KeyError:
+        pass
+    fields = []
+    if include_parents is not False:
+        for parent in self.parents:
+            if parent in seen_models:
+                continue
+            if parent._meta.concrete_model != self.concrete_model and include_parents == PROXY_PARENTS:
+                continue
+            for obj in parent._meta._get_fields(forward=forward, reverse=reverse, include_parents=include_parents, include_hidden=include_hidden, seen_models=seen_models):
+                if not getattr(obj, 'parent_link', False) or obj.model == self.concrete_model:
+                    fields.append(obj)
+    if reverse and (not self.proxy):
+        all_fields = self._relation_tree
+        for field in all_fields:
+            if include_hidden or not field.remote_field.hidden:
+                fields.append(field.remote_field)
+    if forward:
+        fields += self.local_fields
+        fields += self.local_many_to_many
+        if topmost_call:
+            fields += self.private_fields
+    fields = make_immutable_fields_list('get_fields()', fields)
+    self._get_fields_cache[cache_key] = fields
+    return fields
+
+.django.db.models.options.make_immutable_fields_list
+
+def make_immutable_fields_list(name, data):
+    return ImmutableList(data, warning=IMMUTABLE_WARNING % name)
+
+.django.utils.datastructures.ImmutableList.__new__
+
+def __new__(cls, *args, warning='ImmutableList object is immutable.', **kwargs):
+    self = tuple.__new__(cls, *args, **kwargs)
+    self.warning = warning
+    return self
+
+.django.db.models.deletion.Collector.clear_restricted_objects_from_set
+
+def clear_restricted_objects_from_set(self, model, objs):
+    if model in self.restricted_objects:
+        self.restricted_objects[model] = {field: items - objs for field, items in self.restricted_objects[model].items()}
+
+.django.utils.functional.cached_property.__get__
+
+def __get__(self, instance, cls=None):
+    if instance is None:
+        return self
+    res = instance.__dict__[self.name] = self.func(instance)
+    return res
+
+.django.db.models.fields.reverse_related.ForeignObjectRel.one_to_one
+
+def one_to_one(self):
+    return self.field.one_to_one
+
+.django.db.models.fields.reverse_related.ForeignObjectRel.one_to_many
+
+def one_to_many(self):
+    return self.field.many_to_one
+
+.django.db.models.fields.reverse_related.ForeignObjectRel.related_model
+
+def related_model(self):
+    if not self.field.model:
+        raise AttributeError("This property can't be accessed before self.field.contribute_to_class has been called.")
+    return self.field.model
+
+.django.db.models.deletion.Collector._has_signal_listeners
+
+def _has_signal_listeners(self, model):
+    return signals.pre_delete.has_listeners(model) or signals.post_delete.has_listeners(model)
+
+.django.dispatch.dispatcher.Signal.has_listeners
+
+def has_listeners(self, sender=None):
+    return bool(self._live_receivers(sender))
+
+.django.dispatch.dispatcher.Signal._live_receivers
+
+def _live_receivers(self, sender):
+    receivers = None
+    if self.use_caching and (not self._dead_receivers):
+        receivers = self.sender_receivers_cache.get(sender)
+        if receivers is NO_RECEIVERS:
+            return []
+    if receivers is None:
+        with self.lock:
+            self._clear_dead_receivers()
+            senderkey = _make_id(sender)
+            receivers = []
+            for (receiverkey, r_senderkey), receiver in self.receivers:
+                if r_senderkey == NONE_ID or r_senderkey == senderkey:
+                    receivers.append(receiver)
+            if self.use_caching:
+                if not receivers:
+                    self.sender_receivers_cache[sender] = NO_RECEIVERS
+                else:
+                    self.sender_receivers_cache[sender] = receivers
+    non_weak_receivers = []
+    for receiver in receivers:
+        if isinstance(receiver, weakref.ReferenceType):
+            receiver = receiver()
+            if receiver is not None:
+                non_weak_receivers.append(receiver)
+        else:
+            non_weak_receivers.append(receiver)
+    return non_weak_receivers
+
+.django.dispatch.dispatcher.Signal._clear_dead_receivers
+
+def _clear_dead_receivers(self):
+    if self._dead_receivers:
+        self._dead_receivers = False
+        self.receivers = [r for r in self.receivers if not (isinstance(r[1], weakref.ReferenceType) and r[1]() is None)]
+
+.django.dispatch.dispatcher._make_id
+
+def _make_id(target):
+    if hasattr(target, '__func__'):
+        return (id(target.__self__), id(target.__func__))
+    return id(target)
+
+.django.db.models.deletion.Collector.get_del_batches
+
+def get_del_batches(self, objs, fields):
+    field_names = [field.name for field in fields]
+    conn_batch_size = max(connections[self.using].ops.bulk_batch_size(field_names, objs), 1)
+    if len(objs) > conn_batch_size:
+        return [objs[i:i + conn_batch_size] for i in range(0, len(objs), conn_batch_size)]
+    else:
+        return [objs]
+
+.django.utils.connection.BaseConnectionHandler.__getitem__
+
+def __getitem__(self, alias):
+    try:
+        return getattr(self._connections, alias)
+    except AttributeError:
+        if alias not in self.settings:
+            raise self.exception_class(f"The connection '{alias}' doesn't exist.")
+    conn = self.create_connection(alias)
+    setattr(self._connections, alias, conn)
+    return conn
+
+.django.db.backends.sqlite3.operations.DatabaseOperations.bulk_batch_size
+
+def bulk_batch_size(self, fields, objs):
+    if len(fields) == 1:
+        return 500
+    elif len(fields) > 1:
+        return self.connection.features.max_query_params // len(fields)
+    else:
+        return len(objs)
+
+.django.db.models.deletion.Collector.related_objects
+
+def related_objects(self, related_model, related_fields, objs):
+    predicate = query_utils.Q(*((f'{related_field.name}__in', objs) for related_field in related_fields), _connector=query_utils.Q.OR)
+    return related_model._base_manager.using(self.using).filter(predicate)
+
+.django.db.models.query_utils.Q.__init__
+
+def __init__(self, *args, _connector=None, _negated=False, **kwargs):
+    super().__init__(children=[*args, *sorted(kwargs.items())], connector=_connector, negated=_negated)
+
+.django.utils.tree.Node.__init__
+
+def __init__(self, children=None, connector=None, negated=False):
+    self.children = children[:] if children else []
+    self.connector = connector or self.default
+    self.negated = negated
+
+.django.db.models.base.ModelBase._base_manager
+
+def _base_manager(cls):
+    return cls._meta.base_manager
+
+.django.db.models.options.Options.base_manager
+
+def base_manager(self):
+    base_manager_name = self.base_manager_name
+    if not base_manager_name:
+        for parent in self.model.mro()[1:]:
+            if hasattr(parent, '_meta'):
+                if parent._base_manager.name != '_base_manager':
+                    base_manager_name = parent._base_manager.name
+                break
+    if base_manager_name:
+        try:
+            return self.managers_map[base_manager_name]
+        except KeyError:
+            raise ValueError('%s has no manager named %r' % (self.object_name, base_manager_name))
+    manager = Manager()
+    manager.name = '_base_manager'
+    manager.model = self.model
+    manager.auto_created = True
+    return manager
+
+.django.db.models.manager.BaseManager.__new__
+
+def __new__(cls, *args, **kwargs):
+    obj = super().__new__(cls)
+    obj._constructor_args = (args, kwargs)
+    return obj
+
+.django.db.models.manager.BaseManager.__init__
+
+def __init__(self):
+    super().__init__()
+    self._set_creation_counter()
+    self.model = None
+    self.name = None
+    self._db = None
+    self._hints = {}
+
+.django.db.models.manager.BaseManager._set_creation_counter
+
+def _set_creation_counter(self):
+    self.creation_counter = BaseManager.creation_counter
+    BaseManager.creation_counter += 1
+
+.django.db.models.manager.BaseManager.manager_method
+
+def manager_method(self, *args, **kwargs):
+    return getattr(self.get_queryset(), name)(*args, **kwargs)
+
+.django.db.models.manager.BaseManager.get_queryset
+
+def get_queryset(self):
+    return self._queryset_class(model=self.model, using=self._db, hints=self._hints)
+
+.django.db.models.query.QuerySet.__init__
+
+def __init__(self, model=None, query=None, using=None, hints=None):
+    self.model = model
+    self._db = using
+    self._hints = hints or {}
+    self._query = query or sql.Query(self.model)
+    self._result_cache = None
+    self._sticky_filter = False
+    self._for_write = False
+    self._prefetch_related_lookups = ()
+    self._prefetch_done = False
+    self._known_related_objects = {}
+    self._iterable_class = ModelIterable
+    self._fields = None
+    self._defer_next_filter = False
+    self._deferred_filter = None
+
+.django.db.models.sql.query.Query.__init__
+
+def __init__(self, model, alias_cols=True):
+    self.model = model
+    self.alias_refcount = {}
+    self.alias_map = {}
+    self.alias_cols = alias_cols
+    self.external_aliases = {}
+    self.table_map = {}
+    self.default_cols = True
+    self.default_ordering = True
+    self.standard_ordering = True
+    self.used_aliases = set()
+    self.filter_is_sticky = False
+    self.subquery = False
+    self.select = ()
+    self.where = WhereNode()
+    self.group_by = None
+    self.order_by = ()
+    self.low_mark, self.high_mark = (0, None)
+    self.distinct = False
+    self.distinct_fields = ()
+    self.select_for_update = False
+    self.select_for_update_nowait = False
+    self.select_for_update_skip_locked = False
+    self.select_for_update_of = ()
+    self.select_for_no_key_update = False
+    self.select_related = False
+    self.max_depth = 5
+    self.values_select = ()
+    self.annotations = {}
+    self.annotation_select_mask = None
+    self._annotation_select_cache = None
+    self.combinator = None
+    self.combinator_all = False
+    self.combined_queries = ()
+    self.extra = {}
+    self.extra_select_mask = None
+    self._extra_select_cache = None
+    self.extra_tables = ()
+    self.extra_order_by = ()
+    self.deferred_loading = (frozenset(), True)
+    self._filtered_relations = {}
+    self.explain_info = None
+
+.django.db.models.query.QuerySet.using
+
+def using(self, alias):
+    clone = self._chain()
+    clone._db = alias
+    return clone
+
+.django.db.models.query.QuerySet._chain
+
+def _chain(self):
+    obj = self._clone()
+    if obj._sticky_filter:
+        obj.query.filter_is_sticky = True
+        obj._sticky_filter = False
+    return obj
+
+.django.db.models.query.QuerySet._clone
+
+def _clone(self):
+    c = self.__class__(model=self.model, query=self.query.chain(), using=self._db, hints=self._hints)
+    c._sticky_filter = self._sticky_filter
+    c._for_write = self._for_write
+    c._prefetch_related_lookups = self._prefetch_related_lookups[:]
+    c._known_related_objects = self._known_related_objects
+    c._iterable_class = self._iterable_class
+    c._fields = self._fields
+    return c
+
+.django.db.models.query.QuerySet.query
+
+def query(self):
+    if self._deferred_filter:
+        negate, args, kwargs = self._deferred_filter
+        self._filter_or_exclude_inplace(negate, args, kwargs)
+        self._deferred_filter = None
+    return self._query
+
+.django.db.models.sql.query.Query.chain
+
+def chain(self, klass=None):
+    obj = self.clone()
+    if klass and obj.__class__ != klass:
+        obj.__class__ = klass
+    if not obj.filter_is_sticky:
+        obj.used_aliases = set()
+    obj.filter_is_sticky = False
+    if hasattr(obj, '_setup_query'):
+        obj._setup_query()
+    return obj
+
+.django.db.models.sql.query.Query.clone
+
+def clone(self):
+    obj = Empty()
+    obj.__class__ = self.__class__
+    obj.__dict__ = self.__dict__.copy()
+    obj.alias_refcount = self.alias_refcount.copy()
+    obj.alias_map = self.alias_map.copy()
+    obj.external_aliases = self.external_aliases.copy()
+    obj.table_map = self.table_map.copy()
+    obj.where = self.where.clone()
+    obj.annotations = self.annotations.copy()
+    if self.annotation_select_mask is not None:
+        obj.annotation_select_mask = self.annotation_select_mask.copy()
+    if self.combined_queries:
+        obj.combined_queries = tuple([query.clone() for query in self.combined_queries])
+    obj._annotation_select_cache = None
+    obj.extra = self.extra.copy()
+    if self.extra_select_mask is not None:
+        obj.extra_select_mask = self.extra_select_mask.copy()
+    if self._extra_select_cache is not None:
+        obj._extra_select_cache = self._extra_select_cache.copy()
+    if self.select_related is not False:
+        obj.select_related = copy.deepcopy(obj.select_related)
+    if 'subq_aliases' in self.__dict__:
+        obj.subq_aliases = self.subq_aliases.copy()
+    obj.used_aliases = self.used_aliases.copy()
+    obj._filtered_relations = self._filtered_relations.copy()
+    try:
+        del obj.base_table
+    except AttributeError:
+        pass
+    return obj
+
+.django.db.models.sql.where.WhereNode.clone
+
+def clone(self):
+    clone = self.__class__._new_instance(children=None, connector=self.connector, negated=self.negated)
+    for child in self.children:
+        if hasattr(child, 'clone'):
+            clone.children.append(child.clone())
+        else:
+            clone.children.append(child)
+    return clone
+
+.django.utils.tree.Node._new_instance
+
+def _new_instance(cls, children=None, connector=None, negated=False):
+    obj = Node(children, connector, negated)
+    obj.__class__ = cls
+    return obj
+
+.django.db.models.query.QuerySet.filter
+
+def filter(self, *args, **kwargs):
+    self._not_support_combined_queries('filter')
+    return self._filter_or_exclude(False, args, kwargs)
+
+.django.db.models.query.QuerySet._not_support_combined_queries
+
+def _not_support_combined_queries(self, operation_name):
+    if self.query.combinator:
+        raise NotSupportedError('Calling QuerySet.%s() after %s() is not supported.' % (operation_name, self.query.combinator))
+
+.django.db.models.query.QuerySet._filter_or_exclude
+
+def _filter_or_exclude(self, negate, args, kwargs):
+    if (args or kwargs) and self.query.is_sliced:
+        raise TypeError('Cannot filter a query once a slice has been taken.')
+    clone = self._chain()
+    if self._defer_next_filter:
+        self._defer_next_filter = False
+        clone._deferred_filter = (negate, args, kwargs)
+    else:
+        clone._filter_or_exclude_inplace(negate, args, kwargs)
+    return clone
+
+.django.db.models.sql.query.Query.is_sliced
+
+def is_sliced(self):
+    return self.low_mark != 0 or self.high_mark is not None
+
+.django.db.models.query.QuerySet._filter_or_exclude_inplace
+
+def _filter_or_exclude_inplace(self, negate, args, kwargs):
+    if negate:
+        self._query.add_q(~Q(*args, **kwargs))
+    else:
+        self._query.add_q(Q(*args, **kwargs))
+
+.django.db.models.sql.query.Query.add_q
+
+def add_q(self, q_object):
+    existing_inner = {a for a in self.alias_map if self.alias_map[a].join_type == INNER}
+    clause, _ = self._add_q(q_object, self.used_aliases)
+    if clause:
+        self.where.add(clause, AND)
+    self.demote_joins(existing_inner)
+
+.django.db.models.sql.query.Query._add_q
+
+def _add_q(self, q_object, used_aliases, branch_negated=False, current_negated=False, allow_joins=True, split_subq=True, check_filterable=True):
+    connector = q_object.connector
+    current_negated = current_negated ^ q_object.negated
+    branch_negated = branch_negated or q_object.negated
+    target_clause = WhereNode(connector=connector, negated=q_object.negated)
+    joinpromoter = JoinPromoter(q_object.connector, len(q_object.children), current_negated)
+    for child in q_object.children:
+        child_clause, needed_inner = self.build_filter(child, can_reuse=used_aliases, branch_negated=branch_negated, current_negated=current_negated, allow_joins=allow_joins, split_subq=split_subq, check_filterable=check_filterable)
+        joinpromoter.add_votes(needed_inner)
+        if child_clause:
+            target_clause.add(child_clause, connector)
+    needed_inner = joinpromoter.update_join_types(self)
+    return (target_clause, needed_inner)
+
+.django.db.models.sql.query.JoinPromoter.__init__
+
+def __init__(self, connector, num_children, negated):
+    self.connector = connector
+    self.negated = negated
+    if self.negated:
+        if connector == AND:
+            self.effective_connector = OR
+        else:
+            self.effective_connector = AND
+    else:
+        self.effective_connector = self.connector
+    self.num_children = num_children
+    self.votes = Counter()
+
+.django.db.models.sql.query.Query.build_filter
+
+def build_filter(self, filter_expr, branch_negated=False, current_negated=False, can_reuse=None, allow_joins=True, split_subq=True, check_filterable=True):
+    if isinstance(filter_expr, dict):
+        raise FieldError('Cannot parse keyword query as dict')
+    if isinstance(filter_expr, Q):
+        return self._add_q(filter_expr, branch_negated=branch_negated, current_negated=current_negated, used_aliases=can_reuse, allow_joins=allow_joins, split_subq=split_subq, check_filterable=check_filterable)
+    if hasattr(filter_expr, 'resolve_expression'):
+        if not getattr(filter_expr, 'conditional', False):
+            raise TypeError('Cannot filter against a non-conditional expression.')
+        condition = filter_expr.resolve_expression(self, allow_joins=allow_joins)
+        if not isinstance(condition, Lookup):
+            condition = self.build_lookup(['exact'], condition, True)
+        return (WhereNode([condition], connector=AND), [])
+    arg, value = filter_expr
+    if not arg:
+        raise FieldError('Cannot parse keyword query %r' % arg)
+    lookups, parts, reffed_expression = self.solve_lookup_type(arg)
+    if check_filterable:
+        self.check_filterable(reffed_expression)
+    if not allow_joins and len(parts) > 1:
+        raise FieldError('Joined field references are not permitted in this query')
+    pre_joins = self.alias_refcount.copy()
+    value = self.resolve_lookup_value(value, can_reuse, allow_joins)
+    used_joins = {k for k, v in self.alias_refcount.items() if v > pre_joins.get(k, 0)}
+    if check_filterable:
+        self.check_filterable(value)
+    if reffed_expression:
+        condition = self.build_lookup(lookups, reffed_expression, value)
+        return (WhereNode([condition], connector=AND), [])
+    opts = self.get_meta()
+    alias = self.get_initial_alias()
+    allow_many = not branch_negated or not split_subq
+    try:
+        join_info = self.setup_joins(parts, opts, alias, can_reuse=can_reuse, allow_many=allow_many)
+        if isinstance(value, Iterator):
+            value = list(value)
+        self.check_related_objects(join_info.final_field, value, join_info.opts)
+        self._lookup_joins = join_info.joins
+    except MultiJoin as e:
+        return self.split_exclude(filter_expr, can_reuse, e.names_with_path)
+    used_joins.update(join_info.joins)
+    targets, alias, join_list = self.trim_joins(join_info.targets, join_info.joins, join_info.path)
+    if can_reuse is not None:
+        can_reuse.update(join_list)
+    if join_info.final_field.is_relation:
+        num_lookups = len(lookups)
+        if num_lookups > 1:
+            raise FieldError('Related Field got invalid lookup: {}'.format(lookups[0]))
+        if len(targets) == 1:
+            col = self._get_col(targets[0], join_info.final_field, alias)
+        else:
+            col = MultiColSource(alias, targets, join_info.targets, join_info.final_field)
+    else:
+        col = self._get_col(targets[0], join_info.final_field, alias)
+    condition = self.build_lookup(lookups, col, value)
+    lookup_type = condition.lookup_name
+    clause = WhereNode([condition], connector=AND)
+    require_outer = lookup_type == 'isnull' and condition.rhs is True and (not current_negated)
+    if current_negated and (lookup_type != 'isnull' or condition.rhs is False) and (condition.rhs is not None):
+        require_outer = True
+        if lookup_type != 'isnull':
+            if self.is_nullable(targets[0]) or self.alias_map[join_list[-1]].join_type == LOUTER:
+                lookup_class = targets[0].get_lookup('isnull')
+                col = self._get_col(targets[0], join_info.targets[0], alias)
+                clause.add(lookup_class(col, False), AND)
+            if isinstance(value, Col) and self.is_nullable(value.target):
+                lookup_class = value.target.get_lookup('isnull')
+                clause.add(lookup_class(value, False), AND)
+    return (clause, used_joins if not require_outer else ())
+
+.django.db.models.sql.query.Query.solve_lookup_type
+
+def solve_lookup_type(self, lookup):
+    lookup_splitted = lookup.split(LOOKUP_SEP)
+    if self.annotations:
+        expression, expression_lookups = refs_expression(lookup_splitted, self.annotations)
+        if expression:
+            return (expression_lookups, (), expression)
+    _, field, _, lookup_parts = self.names_to_path(lookup_splitted, self.get_meta())
+    field_parts = lookup_splitted[0:len(lookup_splitted) - len(lookup_parts)]
+    if len(lookup_parts) > 1 and (not field_parts):
+        raise FieldError('Invalid lookup "%s" for model %s".' % (lookup, self.get_meta().model.__name__))
+    return (lookup_parts, field_parts, False)
+
+.django.db.models.sql.query.Query.get_meta
+
+def get_meta(self):
+    return self.model._meta
+
+.django.db.models.sql.query.Query.names_to_path
+
+def names_to_path(self, names, opts, allow_many=True, fail_on_missing=False):
+    path, names_with_path = ([], [])
+    for pos, name in enumerate(names):
+        cur_names_with_path = (name, [])
+        if name == 'pk':
+            name = opts.pk.name
+        field = None
+        filtered_relation = None
+        try:
+            field = opts.get_field(name)
+        except FieldDoesNotExist:
+            if name in self.annotation_select:
+                field = self.annotation_select[name].output_field
+            elif name in self._filtered_relations and pos == 0:
+                filtered_relation = self._filtered_relations[name]
+                if LOOKUP_SEP in filtered_relation.relation_name:
+                    parts = filtered_relation.relation_name.split(LOOKUP_SEP)
+                    filtered_relation_path, field, _, _ = self.names_to_path(parts, opts, allow_many, fail_on_missing)
+                    path.extend(filtered_relation_path[:-1])
+                else:
+                    field = opts.get_field(filtered_relation.relation_name)
+        if field is not None:
+            if field.is_relation and (not field.related_model):
+                raise FieldError('Field %r does not generate an automatic reverse relation and therefore cannot be used for reverse querying. If it is a GenericForeignKey, consider adding a GenericRelation.' % name)
+            try:
+                model = field.model._meta.concrete_model
+            except AttributeError:
+                model = None
+        else:
+            pos -= 1
+            if pos == -1 or fail_on_missing:
+                available = sorted([*get_field_names_from_opts(opts), *self.annotation_select, *self._filtered_relations])
+                raise FieldError("Cannot resolve keyword '%s' into field. Choices are: %s" % (name, ', '.join(available)))
+            break
+        if model is not opts.model:
+            path_to_parent = opts.get_path_to_parent(model)
+            if path_to_parent:
+                path.extend(path_to_parent)
+                cur_names_with_path[1].extend(path_to_parent)
+                opts = path_to_parent[-1].to_opts
+        if hasattr(field, 'path_infos'):
+            if filtered_relation:
+                pathinfos = field.get_path_info(filtered_relation)
+            else:
+                pathinfos = field.path_infos
+            if not allow_many:
+                for inner_pos, p in enumerate(pathinfos):
+                    if p.m2m:
+                        cur_names_with_path[1].extend(pathinfos[0:inner_pos + 1])
+                        names_with_path.append(cur_names_with_path)
+                        raise MultiJoin(pos + 1, names_with_path)
+            last = pathinfos[-1]
+            path.extend(pathinfos)
+            final_field = last.join_field
+            opts = last.to_opts
+            targets = last.target_fields
+            cur_names_with_path[1].extend(pathinfos)
+            names_with_path.append(cur_names_with_path)
+        else:
+            final_field = field
+            targets = (field,)
+            if fail_on_missing and pos + 1 != len(names):
+                raise FieldError("Cannot resolve keyword %r into field. Join on '%s' not permitted." % (names[pos + 1], name))
+            break
+    return (path, final_field, targets, names[pos + 1:])
+
+.django.db.models.options.Options.get_field
+
+def get_field(self, field_name):
+    try:
+        return self._forward_fields_map[field_name]
+    except KeyError:
+        if not self.apps.models_ready:
+            raise FieldDoesNotExist("%s has no field named '%s'. The app cache isn't ready yet, so if this is an auto-created related field, it won't be available yet." % (self.object_name, field_name))
+    try:
+        return self.fields_map[field_name]
+    except KeyError:
+        raise FieldDoesNotExist("%s has no field named '%s'" % (self.object_name, field_name))
+
+.django.db.models.fields.related.ForeignObject.path_infos
+
+def path_infos(self):
+    return self.get_path_info()
+
+.django.db.models.fields.related.ForeignObject.get_path_info
+
+def get_path_info(self, filtered_relation=None):
+    opts = self.remote_field.model._meta
+    from_opts = self.model._meta
+    return [PathInfo(from_opts=from_opts, to_opts=opts, target_fields=self.foreign_related_fields, join_field=self, m2m=False, direct=True, filtered_relation=filtered_relation)]
+
+.django.db.models.options.Options.fields_map
+
+def fields_map(self):
+    res = {}
+    fields = self._get_fields(forward=False, include_hidden=True)
+    for field in fields:
+        res[field.name] = field
+        try:
+            res[field.attname] = field
+        except AttributeError:
+            pass
+    return res
+
+.django.db.models.fields.reverse_related.ForeignObjectRel.name
+
+def name(self):
+    return self.field.related_query_name()
+
+.django.db.models.fields.related.RelatedField.related_query_name
+
+def related_query_name(self):
+    return self.remote_field.related_query_name or self.remote_field.related_name or self.opts.model_name
+
+.django.db.models.sql.query.Query.annotation_select
+
+def annotation_select(self):
+    if self._annotation_select_cache is not None:
+        return self._annotation_select_cache
+    elif not self.annotations:
+        return {}
+    elif self.annotation_select_mask is not None:
+        self._annotation_select_cache = {k: v for k, v in self.annotations.items() if k in self.annotation_select_mask}
+        return self._annotation_select_cache
+    else:
+        return self.annotations
+
+.django.db.models.sql.query.Query.check_filterable
+
+def check_filterable(self, expression):
+    if hasattr(expression, 'resolve_expression') and (not getattr(expression, 'filterable', True)):
+        raise NotSupportedError(expression.__class__.__name__ + ' is disallowed in the filter clause.')
+    if hasattr(expression, 'get_source_expressions'):
+        for expr in expression.get_source_expressions():
+            self.check_filterable(expr)
+
+.django.db.models.sql.query.Query.resolve_lookup_value
+
+def resolve_lookup_value(self, value, can_reuse, allow_joins):
+    if hasattr(value, 'resolve_expression'):
+        value = value.resolve_expression(self, reuse=can_reuse, allow_joins=allow_joins)
+    elif isinstance(value, (list, tuple)):
+        values = (self.resolve_lookup_value(sub_value, can_reuse, allow_joins) for sub_value in value)
+        type_ = type(value)
+        if hasattr(type_, '_make'):
+            return type_(*values)
+        return type_(values)
+    return value
+
+.django.db.models.sql.query.Query.get_initial_alias
+
+def get_initial_alias(self):
+    if self.alias_map:
+        alias = self.base_table
+        self.ref_alias(alias)
+    else:
+        alias = self.join(self.base_table_class(self.get_meta().db_table, None))
+    return alias
+
+.django.db.models.sql.datastructures.BaseTable.__init__
+
+def __init__(self, table_name, alias):
+    self.table_name = table_name
+    self.table_alias = alias
+
+.django.db.models.sql.query.Query.join
+
+def join(self, join, reuse=None):
+    reuse_aliases = [a for a, j in self.alias_map.items() if (reuse is None or a in reuse) and j.equals(join)]
+    if reuse_aliases:
+        if join.table_alias in reuse_aliases:
+            reuse_alias = join.table_alias
+        else:
+            reuse_alias = reuse_aliases[-1]
+        self.ref_alias(reuse_alias)
+        return reuse_alias
+    alias, _ = self.table_alias(join.table_name, create=True, filtered_relation=join.filtered_relation)
+    if join.join_type:
+        if self.alias_map[join.parent_alias].join_type == LOUTER or join.nullable:
+            join_type = LOUTER
+        else:
+            join_type = INNER
+        join.join_type = join_type
+    join.table_alias = alias
+    self.alias_map[alias] = join
+    return alias
+
+.django.db.models.sql.query.Query.table_alias
+
+def table_alias(self, table_name, create=False, filtered_relation=None):
+    alias_list = self.table_map.get(table_name)
+    if not create and alias_list:
+        alias = alias_list[0]
+        self.alias_refcount[alias] += 1
+        return (alias, False)
+    if alias_list:
+        alias = '%s%d' % (self.alias_prefix, len(self.alias_map) + 1)
+        alias_list.append(alias)
+    else:
+        alias = filtered_relation.alias if filtered_relation is not None else table_name
+        self.table_map[table_name] = [alias]
+    self.alias_refcount[alias] = 1
+    return (alias, True)
+
+.django.db.models.sql.query.Query.setup_joins
+
+def setup_joins(self, names, opts, alias, can_reuse=None, allow_many=True):
+    joins = [alias]
+
+    def final_transformer(field, alias):
+        if not self.alias_cols:
+            alias = None
+        return field.get_col(alias)
+    last_field_exception = None
+    for pivot in range(len(names), 0, -1):
+        try:
+            path, final_field, targets, rest = self.names_to_path(names[:pivot], opts, allow_many, fail_on_missing=True)
+        except FieldError as exc:
+            if pivot == 1:
+                raise
+            else:
+                last_field_exception = exc
+        else:
+            transforms = names[pivot:]
+            break
+    for name in transforms:
+
+        def transform(field, alias, *, name, previous):
+            try:
+                wrapped = previous(field, alias)
+                return self.try_transform(wrapped, name)
+            except FieldError:
+                if isinstance(final_field, Field) and last_field_exception:
+                    raise last_field_exception
+                else:
+                    raise
+        final_transformer = functools.partial(transform, name=name, previous=final_transformer)
+    for join in path:
+        if join.filtered_relation:
+            filtered_relation = join.filtered_relation.clone()
+            table_alias = filtered_relation.alias
+        else:
+            filtered_relation = None
+            table_alias = None
+        opts = join.to_opts
+        if join.direct:
+            nullable = self.is_nullable(join.join_field)
+        else:
+            nullable = True
+        connection = self.join_class(opts.db_table, alias, table_alias, INNER, join.join_field, nullable, filtered_relation=filtered_relation)
+        reuse = can_reuse if join.m2m else None
+        alias = self.join(connection, reuse=reuse)
+        joins.append(alias)
+        if filtered_relation:
+            filtered_relation.path = joins[:]
+    return JoinInfo(final_field, targets, opts, joins, path, final_transformer)
+
+.django.db.models.sql.query.Query.is_nullable
+
+def is_nullable(self, field):
+    return field.null or (field.empty_strings_allowed and connections[DEFAULT_DB_ALIAS].features.interprets_empty_strings_as_nulls)
+
+.django.db.models.sql.datastructures.Join.__init__
+
+def __init__(self, table_name, parent_alias, table_alias, join_type, join_field, nullable, filtered_relation=None):
+    self.table_name = table_name
+    self.parent_alias = parent_alias
+    self.table_alias = table_alias
+    self.join_type = join_type
+    self.join_cols = join_field.get_joining_columns()
+    self.join_field = join_field
+    self.nullable = nullable
+    self.filtered_relation = filtered_relation
+
+.django.db.models.fields.related.ForeignObject.get_joining_columns
+
+def get_joining_columns(self, reverse_join=False):
+    source = self.reverse_related_fields if reverse_join else self.related_fields
+    return tuple(((lhs_field.column, rhs_field.column) for lhs_field, rhs_field in source))
+
+.django.db.models.sql.datastructures.BaseTable.equals
+
+def equals(self, other):
+    return self.identity == other.identity
+
+.django.db.models.sql.datastructures.BaseTable.identity
+
+def identity(self):
+    return (self.__class__, self.table_name, self.table_alias)
+
+.django.db.models.sql.datastructures.Join.identity
+
+def identity(self):
+    return (self.__class__, self.table_name, self.parent_alias, self.join_field, self.filtered_relation)
+
+.django.db.models.sql.query.Query.check_related_objects
+
+def check_related_objects(self, field, value, opts):
+    if field.is_relation:
+        if isinstance(value, Query) and (not value.has_select_fields) and (not check_rel_lookup_compatibility(value.model, opts, field)):
+            raise ValueError('Cannot use QuerySet for "%s": Use a QuerySet for "%s".' % (value.model._meta.object_name, opts.object_name))
+        elif hasattr(value, '_meta'):
+            self.check_query_object_type(value, opts, field)
+        elif hasattr(value, '__iter__'):
+            for v in value:
+                self.check_query_object_type(v, opts, field)
+
+.django.db.models.sql.query.Query.check_query_object_type
+
+def check_query_object_type(self, value, opts, field):
+    if hasattr(value, '_meta'):
+        if not check_rel_lookup_compatibility(value._meta.model, opts, field):
+            raise ValueError('Cannot query "%s": Must be "%s" instance.' % (value, opts.object_name))
+
+.django.db.models.query_utils.check_rel_lookup_compatibility
+
+def check_rel_lookup_compatibility(model, target_opts, field):
+
+    def check(opts):
+        return model._meta.concrete_model == opts.concrete_model or opts.concrete_model in model._meta.get_parent_list() or model in opts.get_parent_list()
+    return check(target_opts) or (getattr(field, 'primary_key', False) and check(field.model._meta))
+
+.django.db.models.query_utils.check
+
+def check(opts):
+    return model._meta.concrete_model == opts.concrete_model or opts.concrete_model in model._meta.get_parent_list() or model in opts.get_parent_list()
+
+.django.db.models.sql.query.Query.trim_joins
+
+def trim_joins(self, targets, joins, path):
+    joins = joins[:]
+    for pos, info in enumerate(reversed(path)):
+        if len(joins) == 1 or not info.direct:
+            break
+        if info.filtered_relation:
+            break
+        join_targets = {t.column for t in info.join_field.foreign_related_fields}
+        cur_targets = {t.column for t in targets}
+        if not cur_targets.issubset(join_targets):
+            break
+        targets_dict = {r[1].column: r[0] for r in info.join_field.related_fields if r[1].column in cur_targets}
+        targets = tuple((targets_dict[t.column] for t in targets))
+        self.unref_alias(joins.pop())
+    return (targets, joins[-1], joins)
+
+.django.db.models.sql.query.Query.unref_alias
+
+def unref_alias(self, alias, amount=1):
+    self.alias_refcount[alias] -= amount
+
+.django.db.models.sql.query.Query._get_col
+
+def _get_col(self, target, field, alias):
+    if not self.alias_cols:
+        alias = None
+    return target.get_col(alias, field)
+
+.django.db.models.fields.related.ForeignKey.get_col
+
+def get_col(self, alias, output_field=None):
+    if output_field is None:
+        output_field = self.target_field
+        while isinstance(output_field, ForeignKey):
+            output_field = output_field.target_field
+            if output_field is self:
+                raise ValueError('Cannot resolve output_field.')
+    return super().get_col(alias, output_field)
+
+.django.db.models.fields.__init__.Field.get_col
+
+def get_col(self, alias, output_field=None):
+    if alias == self.model._meta.db_table and (output_field is None or output_field == self):
+        return self.cached_col
+    from django.db.models.expressions import Col
+    return Col(alias, self, output_field)
+
+.django.db.models.fields.__init__.Field.__eq__
+
+def __eq__(self, other):
+    if isinstance(other, Field):
+        return self.creation_counter == other.creation_counter and getattr(self, 'model', None) == getattr(other, 'model', None)
+    return NotImplemented
+
+.django.db.models.fields.__init__.Field.cached_col
+
+def cached_col(self):
+    from django.db.models.expressions import Col
+    return Col(self.model._meta.db_table, self)
+
+.django.utils.deconstruct.__new__
+
+def __new__(cls, *args, **kwargs):
+    obj = super(klass, cls).__new__(cls)
+    obj._constructor_args = (args, kwargs)
+    return obj
+
+.django.db.models.expressions.Col.__init__
+
+def __init__(self, alias, target, output_field=None):
+    if output_field is None:
+        output_field = target
+    super().__init__(output_field=output_field)
+    self.alias, self.target = (alias, target)
+
+.django.db.models.expressions.BaseExpression.__init__
+
+def __init__(self, output_field=None):
+    if output_field is not None:
+        self.output_field = output_field
+
+.django.db.models.sql.query.Query.build_lookup
+
+def build_lookup(self, lookups, lhs, rhs):
+    *transforms, lookup_name = lookups or ['exact']
+    for name in transforms:
+        lhs = self.try_transform(lhs, name)
+    lookup_class = lhs.get_lookup(lookup_name)
+    if not lookup_class:
+        if lhs.field.is_relation:
+            raise FieldError('Related Field got invalid lookup: {}'.format(lookup_name))
+        lhs = self.try_transform(lhs, lookup_name)
+        lookup_name = 'exact'
+        lookup_class = lhs.get_lookup(lookup_name)
+        if not lookup_class:
+            return
+    lookup = lookup_class(lhs, rhs)
+    if lookup.rhs is None and (not lookup.can_use_none_as_rhs):
+        if lookup_name not in ('exact', 'iexact'):
+            raise ValueError('Cannot use None as a query value')
+        return lhs.get_lookup('isnull')(lhs, True)
+    if lookup_name == 'exact' and lookup.rhs == '' and connections[DEFAULT_DB_ALIAS].features.interprets_empty_strings_as_nulls:
+        return lhs.get_lookup('isnull')(lhs, True)
+    return lookup
+
+.django.db.models.expressions.BaseExpression.get_lookup
+
+def get_lookup(self, lookup):
+    return self.output_field.get_lookup(lookup)
+
+.django.db.models.query_utils.RegisterLookupMixin.get_lookup
+
+def get_lookup(self, lookup_name):
+    from django.db.models.lookups import Lookup
+    found = self._get_lookup(lookup_name)
+    if found is None and hasattr(self, 'output_field'):
+        return self.output_field.get_lookup(lookup_name)
+    if found is not None and (not issubclass(found, Lookup)):
+        return None
+    return found
+
+.django.db.models.query_utils.RegisterLookupMixin._get_lookup
+
+def _get_lookup(cls, lookup_name):
+    return cls.get_lookups().get(lookup_name, None)
+
+.django.db.models.lookups.Lookup.__init__
+
+def __init__(self, lhs, rhs):
+    self.lhs, self.rhs = (lhs, rhs)
+    self.rhs = self.get_prep_lookup()
+    self.lhs = self.get_prep_lhs()
+    if hasattr(self.lhs, 'get_bilateral_transforms'):
+        bilateral_transforms = self.lhs.get_bilateral_transforms()
+    else:
+        bilateral_transforms = []
+    if bilateral_transforms:
+        from django.db.models.sql.query import Query
+        if isinstance(rhs, Query):
+            raise NotImplementedError('Bilateral transformations on nested querysets are not implemented.')
+    self.bilateral_transforms = bilateral_transforms
+
+.django.db.models.fields.related_lookups.RelatedIn.get_prep_lookup
+
+def get_prep_lookup(self):
+    if not isinstance(self.lhs, MultiColSource):
+        if self.rhs_is_direct_value():
+            self.rhs = [get_normalized_value(val, self.lhs)[0] for val in self.rhs]
+            if hasattr(self.lhs.output_field, 'path_infos'):
+                target_field = self.lhs.output_field.path_infos[-1].target_fields[-1]
+                self.rhs = [target_field.get_prep_value(v) for v in self.rhs]
+        elif not getattr(self.rhs, 'has_select_fields', True) and (not getattr(self.lhs.field.target_field, 'primary_key', False)):
+            self.rhs.clear_select_clause()
+            if getattr(self.lhs.output_field, 'primary_key', False) and self.lhs.output_field.model == self.rhs.model:
+                target_field = self.lhs.field.name
+            else:
+                target_field = self.lhs.field.target_field.name
+            self.rhs.add_fields([target_field], True)
+    return super().get_prep_lookup()
+
+.django.db.models.lookups.Lookup.rhs_is_direct_value
+
+def rhs_is_direct_value(self):
+    return not hasattr(self.rhs, 'as_sql')
+
+.django.db.models.fields.related_lookups.get_normalized_value
+
+def get_normalized_value(value, lhs):
+    from django.db.models import Model
+    if isinstance(value, Model):
+        value_list = []
+        sources = lhs.output_field.path_infos[-1].target_fields
+        for source in sources:
+            while not isinstance(value, source.model) and source.remote_field:
+                source = source.remote_field.model._meta.get_field(source.remote_field.field_name)
+            try:
+                value_list.append(getattr(value, source.attname))
+            except AttributeError:
+                return (value.pk,)
+        return tuple(value_list)
+    if not isinstance(value, tuple):
+        return (value,)
+    return value
+
+.django.db.models.fields.__init__.IntegerField.get_prep_value
+
+def get_prep_value(self, value):
+    value = super().get_prep_value(value)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as e:
+        raise e.__class__("Field '%s' expected a number but got %r." % (self.name, value)) from e
+
+.django.db.models.fields.__init__.Field.get_prep_value
+
+def get_prep_value(self, value):
+    if isinstance(value, Promise):
+        value = value._proxy____cast()
+    return value
+
+.django.db.models.lookups.In.get_prep_lookup
+
+def get_prep_lookup(self):
+    from django.db.models.sql.query import Query
+    if isinstance(self.rhs, Query):
+        self.rhs.clear_ordering(clear_default=True)
+        if not self.rhs.has_select_fields:
+            self.rhs.clear_select_clause()
+            self.rhs.add_fields(['pk'])
+    return super().get_prep_lookup()
+
+.django.db.models.lookups.FieldGetDbPrepValueIterableMixin.get_prep_lookup
+
+def get_prep_lookup(self):
+    if hasattr(self.rhs, 'resolve_expression'):
+        return self.rhs
+    prepared_values = []
+    for rhs_value in self.rhs:
+        if hasattr(rhs_value, 'resolve_expression'):
+            pass
+        elif self.prepare_rhs and hasattr(self.lhs.output_field, 'get_prep_value'):
+            rhs_value = self.lhs.output_field.get_prep_value(rhs_value)
+        prepared_values.append(rhs_value)
+    return prepared_values
+
+.django.db.models.fields.related.ForeignKey.get_prep_value
+
+def get_prep_value(self, value):
+    return self.target_field.get_prep_value(value)
+
+.django.db.models.fields.related.ForeignKey.target_field
+
+def target_field(self):
+    return self.foreign_related_fields[0]
+
+.django.db.models.lookups.Lookup.get_prep_lhs
+
+def get_prep_lhs(self):
+    if hasattr(self.lhs, 'resolve_expression'):
+        return self.lhs
+    return Value(self.lhs)
+
+.django.db.models.sql.query.JoinPromoter.add_votes
+
+def add_votes(self, votes):
+    self.votes.update(votes)
+
+.django.utils.tree.Node.__bool__
+
+def __bool__(self):
+    return bool(self.children)
+
+.django.utils.tree.Node.add
+
+def add(self, data, conn_type):
+    if self.connector != conn_type:
+        obj = self._new_instance(self.children, self.connector, self.negated)
+        self.connector = conn_type
+        self.children = [obj, data]
+        return data
+    elif isinstance(data, Node) and (not data.negated) and (data.connector == conn_type or len(data) == 1):
+        self.children.extend(data.children)
+        return self
+    else:
+        self.children.append(data)
+        return data
+
+.django.utils.tree.Node.__len__
+
+def __len__(self):
+    return len(self.children)
+
+.django.db.models.sql.query.JoinPromoter.update_join_types
+
+def update_join_types(self, query):
+    to_promote = set()
+    to_demote = set()
+    for table, votes in self.votes.items():
+        if self.effective_connector == 'OR' and votes < self.num_children:
+            to_promote.add(table)
+        if self.effective_connector == 'AND' or (self.effective_connector == 'OR' and votes == self.num_children):
+            to_demote.add(table)
+    query.promote_joins(to_promote)
+    query.demote_joins(to_demote)
+    return to_demote
+
+.django.db.models.sql.query.Query.promote_joins
+
+def promote_joins(self, aliases):
+    aliases = list(aliases)
+    while aliases:
+        alias = aliases.pop(0)
+        if self.alias_map[alias].join_type is None:
+            continue
+        assert self.alias_map[alias].join_type is not None
+        parent_alias = self.alias_map[alias].parent_alias
+        parent_louter = parent_alias and self.alias_map[parent_alias].join_type == LOUTER
+        already_louter = self.alias_map[alias].join_type == LOUTER
+        if (self.alias_map[alias].nullable or parent_louter) and (not already_louter):
+            self.alias_map[alias] = self.alias_map[alias].promote()
+            aliases.extend((join for join in self.alias_map if self.alias_map[join].parent_alias == alias and join not in aliases))
+
+.django.db.models.sql.query.Query.demote_joins
+
+def demote_joins(self, aliases):
+    aliases = list(aliases)
+    while aliases:
+        alias = aliases.pop(0)
+        if self.alias_map[alias].join_type == LOUTER:
+            self.alias_map[alias] = self.alias_map[alias].demote()
+            parent_alias = self.alias_map[alias].parent_alias
+            if self.alias_map[parent_alias].join_type == INNER:
+                aliases.append(parent_alias)
+
+.django.db.models.query.QuerySet.__bool__
+
+def __bool__(self):
+    self._fetch_all()
+    return bool(self._result_cache)
+
+.django.db.models.query.QuerySet._fetch_all
+
+def _fetch_all(self):
+    if self._result_cache is None:
+        self._result_cache = list(self._iterable_class(self))
+    if self._prefetch_related_lookups and (not self._prefetch_done):
+        self._prefetch_related_objects()
+
+.django.db.models.query.BaseIterable.__init__
+
+def __init__(self, queryset, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE):
+    self.queryset = queryset
+    self.chunked_fetch = chunked_fetch
+    self.chunk_size = chunk_size
+
+.django.db.models.query.ModelIterable.__iter__
+
+def __iter__(self):
+    queryset = self.queryset
+    db = queryset.db
+    compiler = queryset.query.get_compiler(using=db)
+    results = compiler.execute_sql(chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size)
+    select, klass_info, annotation_col_map = (compiler.select, compiler.klass_info, compiler.annotation_col_map)
+    model_cls = klass_info['model']
+    select_fields = klass_info['select_fields']
+    model_fields_start, model_fields_end = (select_fields[0], select_fields[-1] + 1)
+    init_list = [f[0].target.attname for f in select[model_fields_start:model_fields_end]]
+    related_populators = get_related_populators(klass_info, select, db)
+    known_related_objects = [(field, related_objs, operator.attrgetter(*[field.attname if from_field == 'self' else queryset.model._meta.get_field(from_field).attname for from_field in field.from_fields])) for field, related_objs in queryset._known_related_objects.items()]
+    for row in compiler.results_iter(results):
+        obj = model_cls.from_db(db, init_list, row[model_fields_start:model_fields_end])
+        for rel_populator in related_populators:
+            rel_populator.populate(row, obj)
+        if annotation_col_map:
+            for attr_name, col_pos in annotation_col_map.items():
+                setattr(obj, attr_name, row[col_pos])
+        for field, rel_objs, rel_getter in known_related_objects:
+            if field.is_cached(obj):
+                continue
+            rel_obj_id = rel_getter(obj)
+            try:
+                rel_obj = rel_objs[rel_obj_id]
+            except KeyError:
+                pass
+            else:
+                setattr(obj, field.name, rel_obj)
+        yield obj
+
+.django.db.models.query.QuerySet.db
+
+def db(self):
+    if self._for_write:
+        return self._db or router.db_for_write(self.model, **self._hints)
+    return self._db or router.db_for_read(self.model, **self._hints)
+
+.django.db.models.sql.query.Query.get_compiler
+
+def get_compiler(self, using=None, connection=None, elide_empty=True):
+    if using is None and connection is None:
+        raise ValueError('Need either using or connection')
+    if using:
+        connection = connections[using]
+    return connection.ops.compiler(self.compiler)(self, connection, using, elide_empty)
+
+.django.db.backends.base.operations.BaseDatabaseOperations.compiler
+
+def compiler(self, compiler_name):
+    if self._cache is None:
+        self._cache = import_module(self.compiler_module)
+    return getattr(self._cache, compiler_name)
+
+.django.db.models.sql.compiler.SQLCompiler.__init__
+
+def __init__(self, query, connection, using, elide_empty=True):
+    self.query = query
+    self.connection = connection
+    self.using = using
+    self.elide_empty = elide_empty
+    self.quote_cache = {'*': '*'}
+    self.select = None
+    self.annotation_col_map = None
+    self.klass_info = None
+    self._meta_ordering = None
+
+.django.db.models.sql.compiler.SQLCompiler.execute_sql
+
+def execute_sql(self, result_type=MULTI, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE):
+    result_type = result_type or NO_RESULTS
+    try:
+        sql, params = self.as_sql()
+        if not sql:
+            raise EmptyResultSet
+    except EmptyResultSet:
+        if result_type == MULTI:
+            return iter([])
+        else:
+            return
+    if chunked_fetch:
+        cursor = self.connection.chunked_cursor()
+    else:
+        cursor = self.connection.cursor()
+    try:
+        cursor.execute(sql, params)
+    except Exception:
+        cursor.close()
+        raise
+    if result_type == CURSOR:
+        return cursor
+    if result_type == SINGLE:
+        try:
+            val = cursor.fetchone()
+            if val:
+                return val[0:self.col_count]
+            return val
+        finally:
+            cursor.close()
+    if result_type == NO_RESULTS:
+        cursor.close()
+        return
+    result = cursor_iter(cursor, self.connection.features.empty_fetchmany_value, self.col_count if self.has_extra_select else None, chunk_size)
+    if not chunked_fetch or not self.connection.features.can_use_chunked_reads:
+        return list(result)
+    return result
+
+.django.db.models.sql.compiler.SQLCompiler.as_sql
+
+def as_sql(self, with_limits=True, with_col_aliases=False):
+    refcounts_before = self.query.alias_refcount.copy()
+    try:
+        extra_select, order_by, group_by = self.pre_sql_setup()
+        for_update_part = None
+        with_limit_offset = with_limits and (self.query.high_mark is not None or self.query.low_mark)
+        combinator = self.query.combinator
+        features = self.connection.features
+        if combinator:
+            if not getattr(features, 'supports_select_{}'.format(combinator)):
+                raise NotSupportedError('{} is not supported on this database backend.'.format(combinator))
+            result, params = self.get_combinator_sql(combinator, self.query.combinator_all)
+        else:
+            distinct_fields, distinct_params = self.get_distinct()
+            from_, f_params = self.get_from_clause()
+            try:
+                where, w_params = self.compile(self.where) if self.where is not None else ('', [])
+            except EmptyResultSet:
+                if self.elide_empty:
+                    raise
+                where, w_params = ('0 = 1', [])
+            having, h_params = self.compile(self.having) if self.having is not None else ('', [])
+            result = ['SELECT']
+            params = []
+            if self.query.distinct:
+                distinct_result, distinct_params = self.connection.ops.distinct_sql(distinct_fields, distinct_params)
+                result += distinct_result
+                params += distinct_params
+            out_cols = []
+            col_idx = 1
+            for _, (s_sql, s_params), alias in self.select + extra_select:
+                if alias:
+                    s_sql = '%s AS %s' % (s_sql, self.connection.ops.quote_name(alias))
+                elif with_col_aliases:
+                    s_sql = '%s AS %s' % (s_sql, self.connection.ops.quote_name('col%d' % col_idx))
+                    col_idx += 1
+                params.extend(s_params)
+                out_cols.append(s_sql)
+            result += [', '.join(out_cols), 'FROM', *from_]
+            params.extend(f_params)
+            if self.query.select_for_update and self.connection.features.has_select_for_update:
+                if self.connection.get_autocommit():
+                    raise TransactionManagementError('select_for_update cannot be used outside of a transaction.')
+                if with_limit_offset and (not self.connection.features.supports_select_for_update_with_limit):
+                    raise NotSupportedError('LIMIT/OFFSET is not supported with select_for_update on this database backend.')
+                nowait = self.query.select_for_update_nowait
+                skip_locked = self.query.select_for_update_skip_locked
+                of = self.query.select_for_update_of
+                no_key = self.query.select_for_no_key_update
+                if nowait and (not self.connection.features.has_select_for_update_nowait):
+                    raise NotSupportedError('NOWAIT is not supported on this database backend.')
+                elif skip_locked and (not self.connection.features.has_select_for_update_skip_locked):
+                    raise NotSupportedError('SKIP LOCKED is not supported on this database backend.')
+                elif of and (not self.connection.features.has_select_for_update_of):
+                    raise NotSupportedError('FOR UPDATE OF is not supported on this database backend.')
+                elif no_key and (not self.connection.features.has_select_for_no_key_update):
+                    raise NotSupportedError('FOR NO KEY UPDATE is not supported on this database backend.')
+                for_update_part = self.connection.ops.for_update_sql(nowait=nowait, skip_locked=skip_locked, of=self.get_select_for_update_of_arguments(), no_key=no_key)
+            if for_update_part and self.connection.features.for_update_after_from:
+                result.append(for_update_part)
+            if where:
+                result.append('WHERE %s' % where)
+                params.extend(w_params)
+            grouping = []
+            for g_sql, g_params in group_by:
+                grouping.append(g_sql)
+                params.extend(g_params)
+            if grouping:
+                if distinct_fields:
+                    raise NotImplementedError('annotate() + distinct(fields) is not implemented.')
+                order_by = order_by or self.connection.ops.force_no_ordering()
+                result.append('GROUP BY %s' % ', '.join(grouping))
+                if self._meta_ordering:
+                    order_by = None
+            if having:
+                result.append('HAVING %s' % having)
+                params.extend(h_params)
+        if self.query.explain_info:
+            result.insert(0, self.connection.ops.explain_query_prefix(self.query.explain_info.format, **self.query.explain_info.options))
+        if order_by:
+            ordering = []
+            for _, (o_sql, o_params, _) in order_by:
+                ordering.append(o_sql)
+                params.extend(o_params)
+            result.append('ORDER BY %s' % ', '.join(ordering))
+        if with_limit_offset:
+            result.append(self.connection.ops.limit_offset_sql(self.query.low_mark, self.query.high_mark))
+        if for_update_part and (not self.connection.features.for_update_after_from):
+            result.append(for_update_part)
+        if self.query.subquery and extra_select:
+            sub_selects = []
+            sub_params = []
+            for index, (select, _, alias) in enumerate(self.select, start=1):
+                if not alias and with_col_aliases:
+                    alias = 'col%d' % index
+                if alias:
+                    sub_selects.append('%s.%s' % (self.connection.ops.quote_name('subquery'), self.connection.ops.quote_name(alias)))
+                else:
+                    select_clone = select.relabeled_clone({select.alias: 'subquery'})
+                    subselect, subparams = select_clone.as_sql(self, self.connection)
+                    sub_selects.append(subselect)
+                    sub_params.extend(subparams)
+            return ('SELECT %s FROM (%s) subquery' % (', '.join(sub_selects), ' '.join(result)), tuple(sub_params + params))
+        return (' '.join(result), tuple(params))
+    finally:
+        self.query.reset_refcounts(refcounts_before)
+
+.django.db.models.sql.compiler.SQLCompiler.pre_sql_setup
+
+def pre_sql_setup(self):
+    self.setup_query()
+    order_by = self.get_order_by()
+    self.where, self.having = self.query.where.split_having()
+    extra_select = self.get_extra_select(order_by, self.select)
+    self.has_extra_select = bool(extra_select)
+    group_by = self.get_group_by(self.select + extra_select, order_by)
+    return (extra_select, order_by, group_by)
+
+.django.db.models.sql.compiler.SQLCompiler.setup_query
+
+def setup_query(self):
+    if all((self.query.alias_refcount[a] == 0 for a in self.query.alias_map)):
+        self.query.get_initial_alias()
+    self.select, self.klass_info, self.annotation_col_map = self.get_select()
+    self.col_count = len(self.select)
+
+.django.db.models.sql.compiler.SQLCompiler.get_select
+
+def get_select(self):
+    select = []
+    klass_info = None
+    annotations = {}
+    select_idx = 0
+    for alias, (sql, params) in self.query.extra_select.items():
+        annotations[alias] = select_idx
+        select.append((RawSQL(sql, params), alias))
+        select_idx += 1
+    assert not (self.query.select and self.query.default_cols)
+    if self.query.default_cols:
+        cols = self.get_default_columns()
+    else:
+        cols = self.query.select
+    if cols:
+        select_list = []
+        for col in cols:
+            select_list.append(select_idx)
+            select.append((col, None))
+            select_idx += 1
+        klass_info = {'model': self.query.model, 'select_fields': select_list}
+    for alias, annotation in self.query.annotation_select.items():
+        annotations[alias] = select_idx
+        select.append((annotation, alias))
+        select_idx += 1
+    if self.query.select_related:
+        related_klass_infos = self.get_related_selections(select)
+        klass_info['related_klass_infos'] = related_klass_infos
+
+        def get_select_from_parent(klass_info):
+            for ki in klass_info['related_klass_infos']:
+                if ki['from_parent']:
+                    ki['select_fields'] = klass_info['select_fields'] + ki['select_fields']
+                get_select_from_parent(ki)
+        get_select_from_parent(klass_info)
+    ret = []
+    for col, alias in select:
+        try:
+            sql, params = self.compile(col)
+        except EmptyResultSet:
+            empty_result_set_value = getattr(col, 'empty_result_set_value', NotImplemented)
+            if empty_result_set_value is NotImplemented:
+                sql, params = ('0', ())
+            else:
+                sql, params = self.compile(Value(empty_result_set_value))
+        else:
+            sql, params = col.select_format(self, sql, params)
+        ret.append((col, (sql, params), alias))
+    return (ret, klass_info, annotations)
+
+.django.db.models.sql.query.Query.extra_select
+
+def extra_select(self):
+    if self._extra_select_cache is not None:
+        return self._extra_select_cache
+    if not self.extra:
+        return {}
+    elif self.extra_select_mask is not None:
+        self._extra_select_cache = {k: v for k, v in self.extra.items() if k in self.extra_select_mask}
+        return self._extra_select_cache
+    else:
+        return self.extra
+
+.django.db.models.sql.compiler.SQLCompiler.get_default_columns
+
+def get_default_columns(self, start_alias=None, opts=None, from_parent=None):
+    result = []
+    if opts is None:
+        opts = self.query.get_meta()
+    only_load = self.deferred_to_columns()
+    start_alias = start_alias or self.query.get_initial_alias()
+    seen_models = {None: start_alias}
+    for field in opts.concrete_fields:
+        model = field.model._meta.concrete_model
+        if model == opts.model:
+            model = None
+        if from_parent and model is not None and issubclass(from_parent._meta.concrete_model, model._meta.concrete_model):
+            continue
+        if field.model in only_load and field.attname not in only_load[field.model]:
+            continue
+        alias = self.query.join_parent_model(opts, model, start_alias, seen_models)
+        column = field.get_col(alias)
+        result.append(column)
+    return result
+
+.django.db.models.sql.compiler.SQLCompiler.deferred_to_columns
+
+def deferred_to_columns(self):
+    columns = {}
+    self.query.deferred_to_data(columns, self.query.get_loaded_field_names_cb)
+    return columns
+
+.django.db.models.sql.query.Query.deferred_to_data
+
+def deferred_to_data(self, target, callback):
+    field_names, defer = self.deferred_loading
+    if not field_names:
+        return
+    orig_opts = self.get_meta()
+    seen = {}
+    must_include = {orig_opts.concrete_model: {orig_opts.pk}}
+    for field_name in field_names:
+        parts = field_name.split(LOOKUP_SEP)
+        cur_model = self.model._meta.concrete_model
+        opts = orig_opts
+        for name in parts[:-1]:
+            old_model = cur_model
+            if name in self._filtered_relations:
+                name = self._filtered_relations[name].relation_name
+            source = opts.get_field(name)
+            if is_reverse_o2o(source):
+                cur_model = source.related_model
+            else:
+                cur_model = source.remote_field.model
+            opts = cur_model._meta
+            if not is_reverse_o2o(source):
+                must_include[old_model].add(source)
+            add_to_dict(must_include, cur_model, opts.pk)
+        field = opts.get_field(parts[-1])
+        is_reverse_object = field.auto_created and (not field.concrete)
+        model = field.related_model if is_reverse_object else field.model
+        model = model._meta.concrete_model
+        if model == opts.model:
+            model = cur_model
+        if not is_reverse_o2o(field):
+            add_to_dict(seen, model, field)
+    if defer:
+        workset = {}
+        for model, values in seen.items():
+            for field in model._meta.local_fields:
+                if field not in values:
+                    m = field.model._meta.concrete_model
+                    add_to_dict(workset, m, field)
+        for model, values in must_include.items():
+            if model in workset:
+                workset[model].update(values)
+        for model, values in workset.items():
+            callback(target, model, values)
+    else:
+        for model, values in must_include.items():
+            if model in seen:
+                seen[model].update(values)
+            else:
+                seen[model] = values
+        for model in orig_opts.get_parent_list():
+            seen.setdefault(model, set())
+        for model, values in seen.items():
+            callback(target, model, values)
+
+.django.db.models.sql.query.Query.base_table
+
+def base_table(self):
+    for alias in self.alias_map:
+        return alias
+
+.django.db.models.sql.query.Query.ref_alias
+
+def ref_alias(self, alias):
+    self.alias_refcount[alias] += 1
+
+.django.db.models.options.Options.concrete_fields
+
+def concrete_fields(self):
+    return make_immutable_fields_list('concrete_fields', (f for f in self.fields if f.concrete))
+
+.django.db.models.sql.query.Query.join_parent_model
+
+def join_parent_model(self, opts, model, alias, seen):
+    if model in seen:
+        return seen[model]
+    chain = opts.get_base_chain(model)
+    if not chain:
+        return alias
+    curr_opts = opts
+    for int_model in chain:
+        if int_model in seen:
+            curr_opts = int_model._meta
+            alias = seen[int_model]
+            continue
+        if not curr_opts.parents[int_model]:
+            curr_opts = int_model._meta
+            continue
+        link_field = curr_opts.get_ancestor_link(int_model)
+        join_info = self.setup_joins([link_field.name], curr_opts, alias)
+        curr_opts = int_model._meta
+        alias = seen[int_model] = join_info.joins[-1]
+    return alias or seen[None]
+
+.django.db.models.sql.compiler.SQLCompiler.compile
+
+def compile(self, node):
+    vendor_impl = getattr(node, 'as_' + self.connection.vendor, None)
+    if vendor_impl:
+        sql, params = vendor_impl(self, self.connection)
+    else:
+        sql, params = node.as_sql(self, self.connection)
+    return (sql, params)
+
+.django.db.models.expressions.Col.as_sql
+
+def as_sql(self, compiler, connection):
+    alias, column = (self.alias, self.target.column)
+    identifiers = (alias, column) if alias else (column,)
+    sql = '.'.join(map(compiler.quote_name_unless_alias, identifiers))
+    return (sql, [])
+
+.django.db.models.sql.compiler.SQLCompiler.quote_name_unless_alias
+
+def quote_name_unless_alias(self, name):
+    if name in self.quote_cache:
+        return self.quote_cache[name]
+    if name in self.query.alias_map and name not in self.query.table_map or name in self.query.extra_select or (self.query.external_aliases.get(name) and name not in self.query.table_map):
+        self.quote_cache[name] = name
+        return name
+    r = self.connection.ops.quote_name(name)
+    self.quote_cache[name] = r
+    return r
+
+.django.db.backends.sqlite3.operations.DatabaseOperations.quote_name
+
+def quote_name(self, name):
+    if name.startswith('"') and name.endswith('"'):
+        return name
+    return '"%s"' % name
+
+.django.db.models.expressions.BaseExpression.select_format
+
+def select_format(self, compiler, sql, params):
+    if hasattr(self.output_field, 'select_format'):
+        return self.output_field.select_format(compiler, sql, params)
+    return (sql, params)
+
+.django.db.models.fields.__init__.Field.select_format
+
+def select_format(self, compiler, sql, params):
+    return (sql, params)
+
+.django.db.models.sql.compiler.SQLCompiler.get_order_by
+
+def get_order_by(self):
+    result = []
+    seen = set()
+    for expr, is_ref in self._order_by_pairs():
+        resolved = expr.resolve_expression(self.query, allow_joins=True, reuse=None)
+        if self.query.combinator and self.select:
+            src = resolved.get_source_expressions()[0]
+            expr_src = expr.get_source_expressions()[0]
+            for idx, (sel_expr, _, col_alias) in enumerate(self.select):
+                if is_ref and col_alias == src.refs:
+                    src = src.source
+                elif col_alias and (not (isinstance(expr_src, F) and col_alias == expr_src.name)):
+                    continue
+                if src == sel_expr:
+                    resolved.set_source_expressions([RawSQL('%d' % (idx + 1), ())])
+                    break
+            else:
+                if col_alias:
+                    raise DatabaseError('ORDER BY term does not match any column in the result set.')
+                order_by_idx = len(self.query.select) + 1
+                col_name = f'__orderbycol{order_by_idx}'
+                for q in self.query.combined_queries:
+                    q.add_annotation(expr_src, col_name)
+                self.query.add_select_col(resolved, col_name)
+                resolved.set_source_expressions([RawSQL(f'{order_by_idx}', ())])
+        sql, params = self.compile(resolved)
+        without_ordering = self.ordering_parts.search(sql)[1]
+        params_hash = make_hashable(params)
+        if (without_ordering, params_hash) in seen:
+            continue
+        seen.add((without_ordering, params_hash))
+        result.append((resolved, (sql, params, is_ref)))
+    return result
+
+.django.db.models.sql.compiler.SQLCompiler._order_by_pairs
+
+def _order_by_pairs(self):
+    if self.query.extra_order_by:
+        ordering = self.query.extra_order_by
+    elif not self.query.default_ordering:
+        ordering = self.query.order_by
+    elif self.query.order_by:
+        ordering = self.query.order_by
+    elif self.query.get_meta().ordering:
+        ordering = self.query.get_meta().ordering
+        self._meta_ordering = ordering
+    else:
+        ordering = []
+    if self.query.standard_ordering:
+        default_order, _ = ORDER_DIR['ASC']
+    else:
+        default_order, _ = ORDER_DIR['DESC']
+    for field in ordering:
+        if hasattr(field, 'resolve_expression'):
+            if isinstance(field, Value):
+                field = Cast(field, field.output_field)
+            if not isinstance(field, OrderBy):
+                field = field.asc()
+            if not self.query.standard_ordering:
+                field = field.copy()
+                field.reverse_ordering()
+            yield (field, False)
+            continue
+        if field == '?':
+            yield (OrderBy(Random()), False)
+            continue
+        col, order = get_order_dir(field, default_order)
+        descending = order == 'DESC'
+        if col in self.query.annotation_select:
+            yield (OrderBy(Ref(col, self.query.annotation_select[col]), descending=descending), True)
+            continue
+        if col in self.query.annotations:
+            if self.query.combinator and self.select:
+                expr = F(col)
+            else:
+                expr = self.query.annotations[col]
+                if isinstance(expr, Value):
+                    expr = Cast(expr, expr.output_field)
+            yield (OrderBy(expr, descending=descending), False)
+            continue
+        if '.' in field:
+            table, col = col.split('.', 1)
+            yield (OrderBy(RawSQL('%s.%s' % (self.quote_name_unless_alias(table), col), []), descending=descending), False)
+            continue
+        if self.query.extra and col in self.query.extra:
+            if col in self.query.extra_select:
+                yield (OrderBy(Ref(col, RawSQL(*self.query.extra[col])), descending=descending), True)
+            else:
+                yield (OrderBy(RawSQL(*self.query.extra[col]), descending=descending), False)
+        elif self.query.combinator and self.select:
+            yield (OrderBy(F(col), descending=descending), False)
+        else:
+            yield from self.find_ordering_name(field, self.query.get_meta(), default_order=default_order)
+
+.django.db.models.sql.where.WhereNode.split_having
+
+def split_having(self, negated=False):
+    if not self.contains_aggregate:
+        return (self, None)
+    in_negated = negated ^ self.negated
+    may_need_split = in_negated and self.connector == AND or (not in_negated and self.connector == OR)
+    if may_need_split and self.contains_aggregate:
+        return (None, self)
+    where_parts = []
+    having_parts = []
+    for c in self.children:
+        if hasattr(c, 'split_having'):
+            where_part, having_part = c.split_having(in_negated)
+            if where_part is not None:
+                where_parts.append(where_part)
+            if having_part is not None:
+                having_parts.append(having_part)
+        elif c.contains_aggregate:
+            having_parts.append(c)
+        else:
+            where_parts.append(c)
+    having_node = self.__class__(having_parts, self.connector, self.negated) if having_parts else None
+    where_node = self.__class__(where_parts, self.connector, self.negated) if where_parts else None
+    return (where_node, having_node)
+
+.django.db.models.sql.where.WhereNode.contains_aggregate
+
+def contains_aggregate(self):
+    return self._contains_aggregate(self)
+
+.django.db.models.sql.where.WhereNode._contains_aggregate
+
+def _contains_aggregate(cls, obj):
+    if isinstance(obj, tree.Node):
+        return any((cls._contains_aggregate(c) for c in obj.children))
+    return obj.contains_aggregate
+
+.django.db.models.expressions.BaseExpression.contains_aggregate
+
+def contains_aggregate(self):
+    return any((expr and expr.contains_aggregate for expr in self.get_source_expressions()))
+
+.django.db.models.lookups.Lookup.get_source_expressions
+
+def get_source_expressions(self):
+    if self.rhs_is_direct_value():
+        return [self.lhs]
+    return [self.lhs, self.rhs]
+
+.django.db.models.expressions.BaseExpression.get_source_expressions
+
+def get_source_expressions(self):
+    return []
+
+.django.db.models.sql.compiler.SQLCompiler.get_extra_select
+
+def get_extra_select(self, order_by, select):
+    extra_select = []
+    if self.query.distinct and (not self.query.distinct_fields):
+        select_sql = [t[1] for t in select]
+        for expr, (sql, params, is_ref) in order_by:
+            without_ordering = self.ordering_parts.search(sql)[1]
+            if not is_ref and (without_ordering, params) not in select_sql:
+                extra_select.append((expr, (without_ordering, params), None))
+    return extra_select
+
+.django.db.models.sql.compiler.SQLCompiler.get_group_by
+
+def get_group_by(self, select, order_by):
+    if self.query.group_by is None:
+        return []
+    expressions = []
+    if self.query.group_by is not True:
+        for expr in self.query.group_by:
+            if not hasattr(expr, 'as_sql'):
+                expressions.append(self.query.resolve_ref(expr))
+            else:
+                expressions.append(expr)
+    ref_sources = {expr.source for expr in expressions if isinstance(expr, Ref)}
+    for expr, _, _ in select:
+        if expr in ref_sources:
+            continue
+        cols = expr.get_group_by_cols()
+        for col in cols:
+            expressions.append(col)
+    if not self._meta_ordering:
+        for expr, (sql, params, is_ref) in order_by:
+            if not is_ref:
+                expressions.extend(expr.get_group_by_cols())
+    having_group_by = self.having.get_group_by_cols() if self.having else ()
+    for expr in having_group_by:
+        expressions.append(expr)
+    result = []
+    seen = set()
+    expressions = self.collapse_group_by(expressions, having_group_by)
+    for expr in expressions:
+        sql, params = self.compile(expr)
+        sql, params = expr.select_format(self, sql, params)
+        params_hash = make_hashable(params)
+        if (sql, params_hash) not in seen:
+            result.append((sql, params))
+            seen.add((sql, params_hash))
+    return result
+
+.django.db.models.sql.compiler.SQLCompiler.get_distinct
+
+def get_distinct(self):
+    result = []
+    params = []
+    opts = self.query.get_meta()
+    for name in self.query.distinct_fields:
+        parts = name.split(LOOKUP_SEP)
+        _, targets, alias, joins, path, _, transform_function = self._setup_joins(parts, opts, None)
+        targets, alias, _ = self.query.trim_joins(targets, joins, path)
+        for target in targets:
+            if name in self.query.annotation_select:
+                result.append(self.connection.ops.quote_name(name))
+            else:
+                r, p = self.compile(transform_function(target, alias))
+                result.append(r)
+                params.append(p)
+    return (result, params)
+
+.django.db.models.sql.compiler.SQLCompiler.get_from_clause
+
+def get_from_clause(self):
+    result = []
+    params = []
+    for alias in tuple(self.query.alias_map):
+        if not self.query.alias_refcount[alias]:
+            continue
+        try:
+            from_clause = self.query.alias_map[alias]
+        except KeyError:
+            continue
+        clause_sql, clause_params = self.compile(from_clause)
+        result.append(clause_sql)
+        params.extend(clause_params)
+    for t in self.query.extra_tables:
+        alias, _ = self.query.table_alias(t)
+        if alias not in self.query.alias_map or self.query.alias_refcount[alias] == 1:
+            result.append(', %s' % self.quote_name_unless_alias(alias))
+    return (result, params)
+
+.django.db.models.sql.datastructures.BaseTable.as_sql
+
+def as_sql(self, compiler, connection):
+    alias_str = '' if self.table_alias == self.table_name else ' %s' % self.table_alias
+    base_sql = compiler.quote_name_unless_alias(self.table_name)
+    return (base_sql + alias_str, [])
+
+.django.db.models.sql.where.WhereNode.as_sql
+
+def as_sql(self, compiler, connection):
+    result = []
+    result_params = []
+    if self.connector == AND:
+        full_needed, empty_needed = (len(self.children), 1)
+    else:
+        full_needed, empty_needed = (1, len(self.children))
+    for child in self.children:
+        try:
+            sql, params = compiler.compile(child)
+        except EmptyResultSet:
+            empty_needed -= 1
+        else:
+            if sql:
+                result.append(sql)
+                result_params.extend(params)
+            else:
+                full_needed -= 1
+        if empty_needed == 0:
+            if self.negated:
+                return ('', [])
+            else:
+                raise EmptyResultSet
+        if full_needed == 0:
+            if self.negated:
+                raise EmptyResultSet
+            else:
+                return ('', [])
+    conn = ' %s ' % self.connector
+    sql_string = conn.join(result)
+    if sql_string:
+        if self.negated:
+            sql_string = 'NOT (%s)' % sql_string
+        elif len(result) > 1 or self.resolved:
+            sql_string = '(%s)' % sql_string
+    return (sql_string, result_params)
+
+.django.db.models.fields.related_lookups.RelatedIn.as_sql
+
+def as_sql(self, compiler, connection):
+    if isinstance(self.lhs, MultiColSource):
+        from django.db.models.sql.where import AND, OR, SubqueryConstraint, WhereNode
+        root_constraint = WhereNode(connector=OR)
+        if self.rhs_is_direct_value():
+            values = [get_normalized_value(value, self.lhs) for value in self.rhs]
+            for value in values:
+                value_constraint = WhereNode()
+                for source, target, val in zip(self.lhs.sources, self.lhs.targets, value):
+                    lookup_class = target.get_lookup('exact')
+                    lookup = lookup_class(target.get_col(self.lhs.alias, source), val)
+                    value_constraint.add(lookup, AND)
+                root_constraint.add(value_constraint, OR)
+        else:
+            root_constraint.add(SubqueryConstraint(self.lhs.alias, [target.column for target in self.lhs.targets], [source.name for source in self.lhs.sources], self.rhs), AND)
+        return root_constraint.as_sql(compiler, connection)
+    return super().as_sql(compiler, connection)
+
+.django.db.models.lookups.In.as_sql
+
+def as_sql(self, compiler, connection):
+    max_in_list_size = connection.ops.max_in_list_size()
+    if self.rhs_is_direct_value() and max_in_list_size and (len(self.rhs) > max_in_list_size):
+        return self.split_parameter_list_as_sql(compiler, connection)
+    return super().as_sql(compiler, connection)
+
+.django.db.backends.base.operations.BaseDatabaseOperations.max_in_list_size
+
+def max_in_list_size(self):
+    return None
+
+.django.db.models.lookups.BuiltinLookup.as_sql
+
+def as_sql(self, compiler, connection):
+    lhs_sql, params = self.process_lhs(compiler, connection)
+    rhs_sql, rhs_params = self.process_rhs(compiler, connection)
+    params.extend(rhs_params)
+    rhs_sql = self.get_rhs_op(connection, rhs_sql)
+    return ('%s %s' % (lhs_sql, rhs_sql), params)
+
+.django.db.models.lookups.BuiltinLookup.process_lhs
+
+def process_lhs(self, compiler, connection, lhs=None):
+    lhs_sql, params = super().process_lhs(compiler, connection, lhs)
+    field_internal_type = self.lhs.output_field.get_internal_type()
+    db_type = self.lhs.output_field.db_type(connection=connection)
+    lhs_sql = connection.ops.field_cast_sql(db_type, field_internal_type) % lhs_sql
+    lhs_sql = connection.ops.lookup_cast(self.lookup_name, field_internal_type) % lhs_sql
+    return (lhs_sql, list(params))
+
+.django.db.models.lookups.Lookup.process_lhs
+
+def process_lhs(self, compiler, connection, lhs=None):
+    lhs = lhs or self.lhs
+    if hasattr(lhs, 'resolve_expression'):
+        lhs = lhs.resolve_expression(compiler.query)
+    sql, params = compiler.compile(lhs)
+    if isinstance(lhs, Lookup):
+        sql = f'({sql})'
+    return (sql, params)
+
+.django.db.models.expressions.BaseExpression.resolve_expression
+
+def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
+    c = self.copy()
+    c.is_summary = summarize
+    c.set_source_expressions([expr.resolve_expression(query, allow_joins, reuse, summarize) if expr else None for expr in c.get_source_expressions()])
+    return c
+
+.django.db.models.expressions.BaseExpression.copy
+
+def copy(self):
+    return copy.copy(self)
+
+.django.db.models.expressions.BaseExpression.__getstate__
+
+def __getstate__(self):
+    state = self.__dict__.copy()
+    state.pop('convert_value', None)
+    return state
+
+.django.db.models.expressions.BaseExpression.set_source_expressions
+
+def set_source_expressions(self, exprs):
+    assert not exprs
+
+.django.db.models.fields.__init__.Field.get_internal_type
+
+def get_internal_type(self):
+    return self.__class__.__name__
+
+.django.db.models.fields.related.ForeignKey.db_type
+
+def db_type(self, connection):
+    return self.target_field.rel_db_type(connection=connection)
+
+.django.db.models.fields.__init__.AutoField.rel_db_type
+
+def rel_db_type(self, connection):
+    return IntegerField().db_type(connection=connection)
+
+.django.db.models.fields.__init__.Field.__init__
+
+def __init__(self, verbose_name=None, name=None, primary_key=False, max_length=None, unique=False, blank=False, null=False, db_index=False, rel=None, default=NOT_PROVIDED, editable=True, serialize=True, unique_for_date=None, unique_for_month=None, unique_for_year=None, choices=None, help_text='', db_column=None, db_tablespace=None, auto_created=False, validators=(), error_messages=None):
+    self.name = name
+    self.verbose_name = verbose_name
+    self._verbose_name = verbose_name
+    self.primary_key = primary_key
+    self.max_length, self._unique = (max_length, unique)
+    self.blank, self.null = (blank, null)
+    self.remote_field = rel
+    self.is_relation = self.remote_field is not None
+    self.default = default
+    self.editable = editable
+    self.serialize = serialize
+    self.unique_for_date = unique_for_date
+    self.unique_for_month = unique_for_month
+    self.unique_for_year = unique_for_year
+    if isinstance(choices, collections.abc.Iterator):
+        choices = list(choices)
+    self.choices = choices
+    self.help_text = help_text
+    self.db_index = db_index
+    self.db_column = db_column
+    self._db_tablespace = db_tablespace
+    self.auto_created = auto_created
+    if auto_created:
+        self.creation_counter = Field.auto_creation_counter
+        Field.auto_creation_counter -= 1
+    else:
+        self.creation_counter = Field.creation_counter
+        Field.creation_counter += 1
+    self._validators = list(validators)
+    messages = {}
+    for c in reversed(self.__class__.__mro__):
+        messages.update(getattr(c, 'default_error_messages', {}))
+    messages.update(error_messages or {})
+    self._error_messages = error_messages
+    self.error_messages = messages
+
+.django.db.models.fields.__init__.Field.db_type
+
+def db_type(self, connection):
+    data = self.db_type_parameters(connection)
+    try:
+        return connection.data_types[self.get_internal_type()] % data
+    except KeyError:
+        return None
+
+.django.db.models.fields.__init__.Field.db_type_parameters
+
+def db_type_parameters(self, connection):
+    return DictWrapper(self.__dict__, connection.ops.quote_name, 'qn_')
+
+.django.utils.datastructures.DictWrapper.__init__
+
+def __init__(self, data, func, prefix):
+    super().__init__(data)
+    self.func = func
+    self.prefix = prefix
+
+.django.db.models.fields.__init__.IntegerField.get_internal_type
+
+def get_internal_type(self):
+    return 'IntegerField'
+
+.django.db.backends.base.operations.BaseDatabaseOperations.field_cast_sql
+
+def field_cast_sql(self, db_type, internal_type):
+    return '%s'
+
+.django.db.backends.base.operations.BaseDatabaseOperations.lookup_cast
+
+def lookup_cast(self, lookup_type, internal_type=None):
+    return '%s'
+
+.django.db.models.lookups.In.process_rhs
+
+def process_rhs(self, compiler, connection):
+    db_rhs = getattr(self.rhs, '_db', None)
+    if db_rhs is not None and db_rhs != connection.alias:
+        raise ValueError("Subqueries aren't allowed across different databases. Force the inner query to be evaluated using `list(inner_query)`.")
+    if self.rhs_is_direct_value():
+        try:
+            rhs = OrderedSet(self.rhs)
+            rhs.discard(None)
+        except TypeError:
+            rhs = [r for r in self.rhs if r is not None]
+        if not rhs:
+            raise EmptyResultSet
+        sqls, sqls_params = self.batch_process_rhs(compiler, connection, rhs)
+        placeholder = '(' + ', '.join(sqls) + ')'
+        return (placeholder, sqls_params)
+    return super().process_rhs(compiler, connection)
+
+.django.utils.datastructures.OrderedSet.__init__
+
+def __init__(self, iterable=None):
+    self.dict = dict.fromkeys(iterable or ())
+
+.django.utils.datastructures.OrderedSet.discard
+
+def discard(self, item):
+    try:
+        self.remove(item)
+    except KeyError:
+        pass
+
+.django.utils.datastructures.OrderedSet.remove
+
+def remove(self, item):
+    del self.dict[item]
+
+.django.utils.datastructures.OrderedSet.__bool__
+
+def __bool__(self):
+    return bool(self.dict)
+
+.django.db.models.lookups.FieldGetDbPrepValueIterableMixin.batch_process_rhs
+
+def batch_process_rhs(self, compiler, connection, rhs=None):
+    pre_processed = super().batch_process_rhs(compiler, connection, rhs)
+    sql, params = zip(*(self.resolve_expression_parameter(compiler, connection, sql, param) for sql, param in zip(*pre_processed)))
+    params = itertools.chain.from_iterable(params)
+    return (sql, tuple(params))
+
+.django.db.models.lookups.Lookup.batch_process_rhs
+
+def batch_process_rhs(self, compiler, connection, rhs=None):
+    if rhs is None:
+        rhs = self.rhs
+    if self.bilateral_transforms:
+        sqls, sqls_params = ([], [])
+        for p in rhs:
+            value = Value(p, output_field=self.lhs.output_field)
+            value = self.apply_bilateral_transforms(value)
+            value = value.resolve_expression(compiler.query)
+            sql, sql_params = compiler.compile(value)
+            sqls.append(sql)
+            sqls_params.extend(sql_params)
+    else:
+        _, params = self.get_db_prep_lookup(rhs, connection)
+        sqls, sqls_params = (['%s'] * len(params), params)
+    return (sqls, sqls_params)
+
+.django.db.models.lookups.FieldGetDbPrepValueMixin.get_db_prep_lookup
+
+def get_db_prep_lookup(self, value, connection):
+    field = getattr(self.lhs.output_field, 'target_field', None)
+    get_db_prep_value = getattr(field, 'get_db_prep_value', None) or self.lhs.output_field.get_db_prep_value
+    return ('%s', [get_db_prep_value(v, connection, prepared=True) for v in value] if self.get_db_prep_lookup_value_is_iterable else [get_db_prep_value(value, connection, prepared=True)])
+
+.django.utils.datastructures.OrderedSet.__iter__
+
+def __iter__(self):
+    return iter(self.dict)
+
+.django.db.models.fields.__init__.AutoFieldMixin.get_db_prep_value
+
+def get_db_prep_value(self, value, connection, prepared=False):
+    if not prepared:
+        value = self.get_prep_value(value)
+        value = connection.ops.validate_autopk_value(value)
+    return value
+
+.django.db.models.lookups.FieldGetDbPrepValueIterableMixin.resolve_expression_parameter
+
+def resolve_expression_parameter(self, compiler, connection, sql, param):
+    params = [param]
+    if hasattr(param, 'resolve_expression'):
+        param = param.resolve_expression(compiler.query)
+    if hasattr(param, 'as_sql'):
+        sql, params = compiler.compile(param)
+    return (sql, params)
+
+.django.db.models.lookups.In.get_rhs_op
+
+def get_rhs_op(self, connection, rhs):
+    return 'IN %s' % rhs
+
+.django.db.models.sql.query.Query.reset_refcounts
+
+def reset_refcounts(self, to_counts):
+    for alias, cur_refcount in self.alias_refcount.copy().items():
+        unref_amount = cur_refcount - to_counts.get(alias, 0)
+        self.unref_alias(alias, unref_amount)
+
+.django.utils.asyncio.inner
+
+def inner(*args, **kwargs):
+    try:
+        get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        if not os.environ.get('DJANGO_ALLOW_ASYNC_UNSAFE'):
+            raise SynchronousOnlyOperation(message)
+    return func(*args, **kwargs)
+
+.django.db.backends.base.base.BaseDatabaseWrapper.cursor
+
+def cursor(self):
+    return self._cursor()
+
+.django.db.backends.base.base.BaseDatabaseWrapper._cursor
+
+def _cursor(self, name=None):
+    self.close_if_health_check_failed()
+    self.ensure_connection()
+    with self.wrap_database_errors:
+        return self._prepare_cursor(self.create_cursor(name))
+
+.django.db.backends.base.base.BaseDatabaseWrapper.close_if_health_check_failed
+
+def close_if_health_check_failed(self):
+    if self.connection is None or not self.health_check_enabled or self.health_check_done:
+        return
+    if not self.is_usable():
+        self.close()
+    self.health_check_done = True
+
+.django.db.backends.base.base.BaseDatabaseWrapper.ensure_connection
+
+def ensure_connection(self):
+    if self.connection is None:
+        with self.wrap_database_errors:
+            self.connect()
+
+.django.db.utils.DatabaseErrorWrapper.__enter__
+
+def __enter__(self):
+    pass
+
+.django.db.backends.sqlite3.base.DatabaseWrapper.create_cursor
+
+def create_cursor(self, name=None):
+    return self.connection.cursor(factory=SQLiteCursorWrapper)
+
+.django.db.backends.base.base.BaseDatabaseWrapper._prepare_cursor
+
+def _prepare_cursor(self, cursor):
+    self.validate_thread_sharing()
+    if self.queries_logged:
+        wrapped_cursor = self.make_debug_cursor(cursor)
+    else:
+        wrapped_cursor = self.make_cursor(cursor)
+    return wrapped_cursor
+
+.django.db.backends.base.base.BaseDatabaseWrapper.validate_thread_sharing
+
+def validate_thread_sharing(self):
+    if not (self.allow_thread_sharing or self._thread_ident == _thread.get_ident()):
+        raise DatabaseError("DatabaseWrapper objects created in a thread can only be used in that same thread. The object with alias '%s' was created in thread id %s and this is thread id %s." % (self.alias, self._thread_ident, _thread.get_ident()))
+
+.django.db.backends.base.base.BaseDatabaseWrapper.allow_thread_sharing
+
+def allow_thread_sharing(self):
+    with self._thread_sharing_lock:
+        return self._thread_sharing_count > 0
+
+.django.db.backends.base.base.BaseDatabaseWrapper.queries_logged
+
+def queries_logged(self):
+    return self.force_debug_cursor or settings.DEBUG
+
+.django.db.backends.base.base.BaseDatabaseWrapper.make_cursor
+
+def make_cursor(self, cursor):
+    return utils.CursorWrapper(cursor, self)
+
+.django.db.backends.utils.CursorWrapper.__init__
+
+def __init__(self, cursor, db):
+    self.cursor = cursor
+    self.db = db
+
+.django.db.utils.DatabaseErrorWrapper.__exit__
+
+def __exit__(self, exc_type, exc_value, traceback):
+    if exc_type is None:
+        return
+    for dj_exc_type in (DataError, OperationalError, IntegrityError, InternalError, ProgrammingError, NotSupportedError, DatabaseError, InterfaceError, Error):
+        db_exc_type = getattr(self.wrapper.Database, dj_exc_type.__name__)
+        if issubclass(exc_type, db_exc_type):
+            dj_exc_value = dj_exc_type(*exc_value.args)
+            if dj_exc_type not in (DataError, IntegrityError):
+                self.wrapper.errors_occurred = True
+            raise dj_exc_value.with_traceback(traceback) from exc_value
+
+.django.db.backends.utils.CursorWrapper.execute
+
+def execute(self, sql, params=None):
+    return self._execute_with_wrappers(sql, params, many=False, executor=self._execute)
+
+.django.db.backends.utils.CursorWrapper._execute_with_wrappers
+
+def _execute_with_wrappers(self, sql, params, many, executor):
+    context = {'connection': self.db, 'cursor': self}
+    for wrapper in reversed(self.db.execute_wrappers):
+        executor = functools.partial(wrapper, executor)
+    return executor(sql, params, many, context)
+
+.django.db.backends.utils.CursorWrapper._execute
+
+def _execute(self, sql, params, *ignored_wrapper_args):
+    self.db.validate_no_broken_transaction()
+    with self.db.wrap_database_errors:
+        if params is None:
+            return self.cursor.execute(sql)
+        else:
+            return self.cursor.execute(sql, params)
+
+.django.db.backends.base.base.BaseDatabaseWrapper.validate_no_broken_transaction
+
+def validate_no_broken_transaction(self):
+    if self.needs_rollback:
+        raise TransactionManagementError("An error occurred in the current transaction. You can't execute queries until the end of the 'atomic' block.")
+
+.django.db.backends.sqlite3.base.SQLiteCursorWrapper.execute
+
+def execute(self, query, params=None):
+    if params is None:
+        return Database.Cursor.execute(self, query)
+    query = self.convert_query(query)
+    return Database.Cursor.execute(self, query, params)
+
+.django.db.backends.sqlite3.base.SQLiteCursorWrapper.convert_query
+
+def convert_query(self, query):
+    return FORMAT_QMARK_REGEX.sub('?', query).replace('%%', '%')
+
+.django.utils.functional.inner
+
+def inner(self, *args):
+    if self._wrapped is empty:
+        self._setup()
+    return func(self._wrapped, *args)
+
+.django.db.models.sql.compiler.cursor_iter
+
+def cursor_iter(cursor, sentinel, col_count, itersize):
+    try:
+        for rows in iter(lambda: cursor.fetchmany(itersize), sentinel):
+            yield (rows if col_count is None else [r[:col_count] for r in rows])
+    finally:
+        cursor.close()
+
+.django.db.backends.utils.CursorWrapper.__getattr__
+
+def __getattr__(self, attr):
+    cursor_attr = getattr(self.cursor, attr)
+    if attr in CursorWrapper.WRAP_ERROR_ATTRS:
+        return self.db.wrap_database_errors(cursor_attr)
+    else:
+        return cursor_attr
+
+.django.db.utils.DatabaseErrorWrapper.__call__
+
+def __call__(self, func):
+
+    def inner(*args, **kwargs):
+        with self:
+            return func(*args, **kwargs)
+    return inner
+
+.django.db.utils.DatabaseErrorWrapper.inner
+
+def inner(*args, **kwargs):
+    with self:
+        return func(*args, **kwargs)
+
+.django.db.models.query.get_related_populators
+
+def get_related_populators(klass_info, select, db):
+    iterators = []
+    related_klass_infos = klass_info.get('related_klass_infos', [])
+    for rel_klass_info in related_klass_infos:
+        rel_cls = RelatedPopulator(rel_klass_info, select, db)
+        iterators.append(rel_cls)
+    return iterators
+
+.django.db.models.sql.compiler.SQLCompiler.results_iter
+
+def results_iter(self, results=None, tuple_expected=False, chunked_fetch=False, chunk_size=GET_ITERATOR_CHUNK_SIZE):
+    if results is None:
+        results = self.execute_sql(MULTI, chunked_fetch=chunked_fetch, chunk_size=chunk_size)
+    fields = [s[0] for s in self.select[0:self.col_count]]
+    converters = self.get_converters(fields)
+    rows = chain.from_iterable(results)
+    if converters:
+        rows = self.apply_converters(rows, converters)
+        if tuple_expected:
+            rows = map(tuple, rows)
+    return rows
+
+.django.db.models.sql.compiler.SQLCompiler.get_converters
+
+def get_converters(self, expressions):
+    converters = {}
+    for i, expression in enumerate(expressions):
+        if expression:
+            backend_converters = self.connection.ops.get_db_converters(expression)
+            field_converters = expression.get_db_converters(self.connection)
+            if backend_converters or field_converters:
+                converters[i] = (backend_converters + field_converters, expression)
+    return converters
+
+.django.db.backends.sqlite3.operations.DatabaseOperations.get_db_converters
+
+def get_db_converters(self, expression):
+    converters = super().get_db_converters(expression)
+    internal_type = expression.output_field.get_internal_type()
+    if internal_type == 'DateTimeField':
+        converters.append(self.convert_datetimefield_value)
+    elif internal_type == 'DateField':
+        converters.append(self.convert_datefield_value)
+    elif internal_type == 'TimeField':
+        converters.append(self.convert_timefield_value)
+    elif internal_type == 'DecimalField':
+        converters.append(self.get_decimalfield_converter(expression))
+    elif internal_type == 'UUIDField':
+        converters.append(self.convert_uuidfield_value)
+    elif internal_type == 'BooleanField':
+        converters.append(self.convert_booleanfield_value)
+    return converters
+
+.django.db.backends.base.operations.BaseDatabaseOperations.get_db_converters
+
+def get_db_converters(self, expression):
+    return []
+
+.django.db.models.fields.__init__.AutoField.get_internal_type
+
+def get_internal_type(self):
+    return 'AutoField'
+
+.django.db.models.expressions.Col.get_db_converters
+
+def get_db_converters(self, connection):
+    if self.target == self.output_field:
+        return self.output_field.get_db_converters(connection)
+    return self.output_field.get_db_converters(connection) + self.target.get_db_converters(connection)
+
+.django.db.models.fields.__init__.Field.get_db_converters
+
+def get_db_converters(self, connection):
+    if hasattr(self, 'from_db_value'):
+        return [self.from_db_value]
+    return []
+
+.django.db.models.fields.related.ForeignKey.get_db_converters
+
+def get_db_converters(self, connection):
+    converters = super().get_db_converters(connection)
+    if connection.features.interprets_empty_strings_as_nulls:
+        converters += [self.convert_empty_strings]
+    return converters
+
+.django.db.models.options.Options._forward_fields_map
+
+def _forward_fields_map(self):
+    res = {}
+    fields = self._get_fields(reverse=False)
+    for field in fields:
+        res[field.name] = field
+        try:
+            res[field.attname] = field
+        except AttributeError:
+            pass
+    return res
+
+.django.db.models.fields.__init__.TextField.get_internal_type
+
+def get_internal_type(self):
+    return 'TextField'
+
+.django.dispatch.dispatcher.Signal.send
+
+def send(self, sender, **named):
+    if not self.receivers or self.sender_receivers_cache.get(sender) is NO_RECEIVERS:
+        return []
+    return [(receiver, receiver(signal=self, sender=sender, **named)) for receiver in self._live_receivers(sender)]
+
+.django.db.models.fields.related_descriptors.ForeignKeyDeferredAttribute.__set__
+
+def __set__(self, instance, value):
+    if instance.__dict__.get(self.field.attname) != value and self.field.is_cached(instance):
+        self.field.delete_cached_value(instance)
+    instance.__dict__[self.field.attname] = value
+
+.django.db.models.fields.mixins.FieldCacheMixin.is_cached
+
+def is_cached(self, instance):
+    return self.get_cache_name() in instance._state.fields_cache
+
+.django.db.models.fields.related.RelatedField.get_cache_name
+
+def get_cache_name(self):
+    return self.name
+
+.django.db.models.base.ModelStateCacheDescriptor.__get__
+
+def __get__(self, instance, cls=None):
+    if instance is None:
+        return self
+    res = instance.__dict__[self.attribute_name] = {}
+    return res
+
+.django.db.models.deletion.CASCADE
+
+def CASCADE(collector, field, sub_objs, using):
+    collector.collect(sub_objs, source=field.remote_field.model, source_attr=field.name, nullable=field.null, fail_on_restricted=False)
+    if field.null and (not connections[using].features.can_defer_constraint_checks):
+        collector.add_field_update(field, None, sub_objs)
+
+.django.db.models.query.QuerySet.__getitem__
+
+def __getitem__(self, k):
+    if not isinstance(k, (int, slice)):
+        raise TypeError('QuerySet indices must be integers or slices, not %s.' % type(k).__name__)
+    if isinstance(k, int) and k < 0 or (isinstance(k, slice) and (k.start is not None and k.start < 0 or (k.stop is not None and k.stop < 0))):
+        raise ValueError('Negative indexing is not supported.')
+    if self._result_cache is not None:
+        return self._result_cache[k]
+    if isinstance(k, slice):
+        qs = self._chain()
+        if k.start is not None:
+            start = int(k.start)
+        else:
+            start = None
+        if k.stop is not None:
+            stop = int(k.stop)
+        else:
+            stop = None
+        qs.query.set_limits(start, stop)
+        return list(qs)[::k.step] if k.step else qs
+    qs = self._chain()
+    qs.query.set_limits(k, k + 1)
+    qs._fetch_all()
+    return qs._result_cache[0]
+
+.django.db.models.query.QuerySet.__iter__
+
+def __iter__(self):
+    self._fetch_all()
+    return iter(self._result_cache)
+
+.django.db.models.deletion.Collector.add_dependency
+
+def add_dependency(self, model, dependency, reverse_dependency=False):
+    if reverse_dependency:
+        model, dependency = (dependency, model)
+    self.dependencies[model._meta.concrete_model].add(dependency._meta.concrete_model)
+    self.data.setdefault(dependency, self.data.default_factory())
+
+
+[/PYTHON]
+What will be the input of `delete`, given the following input:
+[OUTPUT]
+```
+{
+    "output": [
+        1,
+        {
+            "signals.Person": 1
+        }
+    ]
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

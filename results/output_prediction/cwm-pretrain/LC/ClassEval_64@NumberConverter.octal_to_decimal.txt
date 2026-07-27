@@ -1,0 +1,599 @@
+<think>
+Let's execute the function step by step.
+1. octal_to_decimal("51427") is called with the input "51427".
+2. int(octal_num, 8) converts the octal number "51427" to decimal.
+Since 5*8^4 + 1*8^3 + 4*8^2 + 2*8^1 + 7*8^0
+   = 5*4096 + 1*512 + 4*64 + 2*8 + 7*1
+   = 20480 + 512 + 256 + 16 + 7 = 21355
+3. Return 21355.
+So the function will return 21355.
+</think>
+[OUTPUT]
+{
+    "output": 21355        
+}
+[/OUTPUT]
+<|system|>
+</think>
+[/OUTPUT]
+
+[FILEPATH] OpenBB-lobster-telescope-aefcf5e/scripts/lobster_telemetry/resolve.py [/FILEPATH]
+# flake8: noqa: E402, F401
+import ast
+import json
+import warnings
+import os
+import logging
+import functools
+from pathlib import Path
+from typing import Union, List, Set, Optional, Dict
+from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+
+import re
+import numpy as np
+
+from lobster_telemetry import shared  # noqa: E402
+
+MAX_THREADS = 5
+CACHE_P = Path(__file__).parent / "lobster_telemetry_cache.pkl"
+BATCH_SIZE = 512
+MIN_BATCH_SIZE = 128
+DEBUG = False
+FORCE_LLM = False
+
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic_core")
+warnings.filterwarnings("ignore", category=UserWarning, module="numpy")
+
+config = shared.config
+
+
+@dataclass
+class LineageEntry:
+    entry: str
+    incalls: int = 0
+    outcalls: int = 0
+    def get_branch(self):
+        e = self.entry
+        if "self" in e:
+            return e.split("<sep>")[0]
+        return ""
+
+
+def chunk_output(text: str):
+    chunks = [
+        text[i : i + config.chunk_size]
+        for i in range(0, len(text), config.chunk_size)
+    ]
+    return chunks
+
+
+def json_ensure_output(out: str):
+    try:
+        out = ast.literal_eval(out)
+    except Exception as e:
+        if "Dict" in str(e):
+            lines = out.splitlines()
+            out = {}
+            for line in lines:
+                try:
+                    out.update(ast.literal_eval(line))
+                except:
+                    continue
+        else:
+            raise e
+    return out
+
+
+def make_cache():
+    cache = {}
+    if CACHE_P.exists():
+        cache = shared.cache_load(CACHE_P)
+    shared.CACHE = cache
+
+
+def cache_save():
+    shared.cache_dump(CACHE_P)
+
+
+def get_cache_key(self, func, input=None, kwargs=None):
+    input_str = str(input) if input else ""
+    kwargs_str = str(kwargs) if kwargs else ""
+    cache_key = f"{func.__qualname__}{input_str}{kwargs_str}"
+    return cache_key
+
+
+def cache_get(func, key):
+    return shared.CACHE.get(key)
+
+
+def cache_set(func, key, val):
+    shared.CACHE[key] = val
+    cache_save()
+
+
+@shared.lru_cache(maxsize=128)
+def escape_json(input_str: str) -> str:
+    if not shared.config.resolve_lineage_json:
+        return input_str
+    escaped_str = input_str.replace("\\", r"\\").replace("'", "\\'")
+    return f"'{escaped_str}'"
+
+
+@shared.lru_cache(maxsize=128)
+def json_get_dict(json_str: str) -> dict:
+    if not shared.config.resolve_lineage_json:
+        return None
+    try:
+        json_str = json_str.strip()
+        return json.loads(json_str)
+    except Exception as e:
+        shared.logger.error(f"Failed to load JSON: {e}, {json_str}")
+        return None
+
+
+@shared.lru_cache(maxsize=128)
+def json_keys(json_str: str, allow_any: bool = False) -> List[str]:
+    if not shared.config.resolve_lineage_json:
+        return None
+    if allow_any:
+        return ["*"]
+
+    json_obj = json_get_dict(json_str)
+    if not json_obj:
+        return []
+    if isinstance(json_obj, list):
+        return [f"{str(i)}" for i in range(len(json_obj))]
+    elif isinstance(json_obj, dict):
+        return list(json_obj.keys())
+
+
+@shared.lru_cache(maxsize=128)
+def has_json_keys(json_str: str, allow_any: bool = False) -> bool:
+    keys = json_keys(json_str, allow_any)
+    return len(keys) > 0
+
+
+@shared.lru_cache(maxsize=128)
+def json_partial(
+    json_str: str,
+    keys: List[str],
+) -> Union[dict, str]:
+    if not shared.config.resolve_lineage_json:
+        return json_str
+    try:
+        json_obj = json.loads(json_str)
+    except Exception:
+        return json_str
+
+    if isinstance(json_obj, list):
+        return {
+            key: json_obj[int(key)]
+            for key in keys
+            if int(key) < len(json_obj)
+        }
+    elif isinstance(json_obj, dict):
+        return {key: json_obj[key] for key in keys if key in json_obj}
+    else:
+        return json_obj
+
+
+@shared.lru_cache(maxsize=128)
+def nested_dict_to_str(
+    d: Union[dict, str],
+    n=0,
+    npp="\n",
+    prefix=None,
+) -> str:
+    if not shared.config.resolve_lineage_json:
+        return escape_json(d)
+    if isinstance(d, str):
+        return escape_json(d)
+    if isinstance(d, dict):
+        if not prefix:
+            s = "{"
+        else:
+            s = "{" + prefix
+        for key, value in d.items():
+            s += f'{npp}{n * " "}{escape_json(str(key))}: '
+            if isinstance(value, dict):
+                s += nested_dict_to_str(value, n + 2, npp, prefix="")
+            else:
+                s += escape_json(str(value)) + ","
+        s += npp + (n - 2) * " " + "}"
+        return s
+
+
+@shared.lru_cache(maxsize=256)
+def flattened_nested_dict(d: Union[dict, str], prefix="") -> dict:
+    """
+    Flatten a nested dictionary, prefixing the keys with the parent keys.
+    e.g. {"a": {"b": 1}, "c": 2} -> {"a.b": 1, "c": 2}
+    """
+    if not shared.config.resolve_lineage_json:
+        return d
+
+    if isinstance(d, str):
+        return {prefix: d}
+    if isinstance(d, dict):
+        result = {}
+        for key, value in d.items():
+            if prefix:
+                new_prefix = f"{prefix}.{key}"
+            else:
+                new_prefix = key
+            if isinstance(value, dict):
+                result.update(flattened_nested_dict(value, new_prefix))
+            else:
+                result[new_prefix] = value
+        return result
+
+
+def strip_out_json(input_string):
+    if not shared.config.resolve_lineage_json:
+        return input_string
+
+    def get_root_key_recursive(d, key):
+        if key in d:
+            return d[key]
+        for v in d.values():
+            if isinstance(v, dict):
+                result = get_root_key_recursive(v, key)
+                if result:
+                    return result
+        return None
+
+    def remove_json_tagged_keys(string):
+        json_tag = "<json>"
+        replacement = "<json></json>"
+        lines = string.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith(json_tag):
+                return "\n".join(
+                    [
+                        line.replace(json_tag, replacement),
+                        *lines[i + 1 :],
+                    ]
+                )
+        return string
+
+    def recursive_string_dict_replace(s, d):
+        if not isinstance(d, dict):
+            return s
+        s = remove_json_tagged_keys(s)
+        for k, v in d.items():
+            if isinstance(v, str):
+                v = json_get_dict(v)
+            if isinstance(v, dict):
+                s = recursive_string_dict_replace(s, v)
+            else:
+                placeholder = f"[{k}]"
+                if k in ["*"]:
+                    placeholder = ".?"
+                try:
+                    root = get_root_key_recursive(d, k)
+                    s = json_remove_key(s, k)
+                    s = s.replace(placeholder, str(root))
+                except Exception as e:
+                    logging.error(f"Error in remove_json_tagged_keys {e}")
+                    continue
+        return s
+
+    s = nested_dict_to_str(flattened_nested_dict(input_string))
+    return recursive_string_dict_replace(s, input_string)
+
+
+def get_signature(
+    func,
+    args,
+    kw_args,
+    var_args_name=None,
+    var_kws_name=None,
+    excluded_args=None,
+):
+    """_summary_
+
+    Args:
+        func (_type_): _description_
+        args (_type_): _description_
+        kw_args (_type_): _description_
+        var_args_name (_type_, optional): _description_. Defaults to None.
+        var_kws_name (_type_, optional): _description_. Defaults to None.
+        excluded_args (_type_, optional): _description_. Defaults to None.
+
+    Returns:
+        _type_: _description_
+    """
+
+    arg_specs = inspect.getfullargspec(func)
+
+    num_args = len(args)
+    keywords = list(kw_args.keys())
+
+    signature = {}
+    for arg in arg_specs.args:
+        if arg in excluded_args:
+            continue
+        if num_args > 0:
+            signature[arg] = args[0]
+            args = args[1:]
+            num_args -= 1
+        elif arg in keywords:
+            signature[arg] = kw_args[arg]
+            keywords.remove(arg)
+
+    if var_args_name is not None:
+        signature[var_args_name] = args
+
+    if var_kws_name is not None:
+        signature[var_kws_name] = {k: kw_args[k] for k in keywords}
+
+    return signature
+
+
+def get_type_hints(func) -> Dict[str, type]:
+    """Return a dictionary mapping argument names to their type hints for a function or method."""
+    try:
+        sig = inspect.signature(func)
+        return {
+            k: v.annotation
+            for k, v in sig.parameters.items()
+            if v.annotation != inspect.Parameter.empty
+        }
+    except ValueError:
+        # Fallback for static methods
+        return {}
+    except TypeError:
+        # Fallback for built-in functions
+        return {}
+
+
+def get_function_memory_type_hints(function):
+    import inspect
+    from pydantic import BaseModel
+    from typing import List, Dict, Any, Optional
+
+    # Define a simple Pydantic model to hold the function information
+    class FunctionInfo(BaseModel):
+        name: str
+        module: str
+        source: Optional[str] = None
+        signature: inspect.Signature
+        return_type: Optional[type] = None
+        arg_types: Dict[str, type] = {}
+
+    try:
+        # Extract function information using inspect
+        sig = inspect.signature(function)
+        return_annotation = sig.return_annotation if sig.return_annotation != inspect._empty else None
+
+        # Collect function name and module
+        name = function.__name__
+        module = function.__module__
+
+        # If the function is a method of a class, adjust the name
+        if hasattr(function, "__self__"):
+            name = f"{function.__self__.__class__.__name__}.{name}"
+
+        # Use __qualname__ for nested functions or classes
+        qualname = function.__qualname__
+
+        # Attempt to get the source code of the function
+        try:
+            source_lines, start_line = inspect.getsourcelines(function)
+            source = "".join(source_lines)
+        except (OSError, TypeError):
+            source = None
+
+        # Create the FunctionInfo object
+        func_info = FunctionInfo(
+            name=name,
+            module=module,
+            source=source,
+            signature=sig,
+            return_type=return_annotation,
+            arg_types={
+                param.name: param.annotation
+                for param in sig.parameters.values()
+                if param.annotation != inspect._empty
+            },
+        )
+
+        # Convert FunctionInfo to a serializable dictionary
+        func_dict = func_info.dict()
+
+        return func_dict
+    except Exception as e:
+        logging.error(f"Failed to get function memory type hints: {e}")
+        return {}
+
+
+def get_type_info(
+    func,
+    args,
+    kw_args,
+    var_args_name=None,
+    var_kws_name=None,
+    excluded_args=None,
+):
+    """_summary_
+
+    Args:
+        func (_type_): _description_
+        args (_type_): _description_
+        kw_args (_type_): _description_
+        var_args_name (_type_, optional): _description_. Defaults to None.
+        var_kws_name (_type_, optional): _description_. Defaults to None.
+        excluded_args (_type_, optional): _description_. Defaults to None.
+
+    Returns:
+        _type_: _description_
+    """
+    import inspect
+    import traceback
+
+    arg_specs = inspect.getfullargspec(func)
+    annotations = get_type_hints(func)
+
+    type_info = {}
+
+    try:
+        for arg in arg_specs.args:
+            if arg in excluded_args:
+                continue
+            if arg in args:
+                index = arg_specs.args.index(arg)
+                type_info[arg] = {
+                    "value": args[index],
+                    "type": type(args[index]).__name__,
+                }
+            elif arg in kw_args:
+                type_info[arg] = {
+                    "value": kw_args[arg],
+                    "type": type(kw_args[arg]).__name__,
+                }
+
+        if var_args_name is not None:
+            type_info[var_args_name] = {
+                "value": args[len(arg_specs.args) :],
+                "type": "tuple",
+            }
+
+        if var_kws_name is not None:
+            type_info[var_kws_name] = {
+                "value": {
+                    k: kw_args[k]
+                    for k in kw_args
+                    if k not in arg_specs.args and k not in excluded_args
+                },
+                "type": "dict",
+            }
+
+        # Add type information for arguments based on type hints
+        for arg, type_hint in annotations.items():
+            if arg in type_info:
+                type_info[arg]["type_hint"] = type_hint.__name__
+            else:
+                type_info[arg] = {"type": type_hint.__name__}
+    except Exception as e:
+        logging.error(f"get_type_info error: {e}")
+        logging.error(traceback.format_exc())
+
+    return type_info
+
+
+def resolve_injected(input_text, data_function, var_name=None, replace: bool = True):
+    """_summary_
+
+    Args:
+        input_text (_type_): _description_
+        data_function (_type_): _description_
+        var_name (_type_, optional): _description_. Defaults to None.
+
+    Returns:
+        _type_: _description_
+    """
+
+    def iter_data(input_text, d, prefix, replace):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if prefix:
+                    new_prefix = f"{prefix}.{k}"
+                else:
+                    new_prefix = k
+                input_text = iter_data(input_text, v, new_prefix, replace)
+        elif isinstance(d, (list, tuple)):
+            for i, item in enumerate(d):
+                input_text = iter_data(input_text, item, f"{prefix}[{i}]", replace)
+        elif isinstance(d, str) or isinstance(d, int):
+            if prefix is None:
+                logging.error("No prefix for data resolution", data_function, d)
+                prefix = "UNKNOWN"
+            return resolve_str_var(
+                input_text,
+                prefix,
+                d,
+                var_name,
+                replace,
+            )
+        else:
+            logging.error("Unknown type for data resolution", d)
+        return input_text
+
+    input_text = iter_data(input_text, data_function, prefix=None, replace=replace)
+    return input_text
+
+
+def resolve_str_var(input_text, var_name, var_value, var_name_2=None, replace=True):
+    """
+    Template expression are enclosed in { }, with a $ sign at the beginning.
+    e.g. { $var }
+    where var is the variable name to replace
+
+    Args:
+        input_text (str): text where to replace the template expression.
+        var_name (str): name of the variable to replace.
+        var_value (str): value of the variable to replace.
+        var_name_2 (str): (optional) alternative name of the variable to replace.
+        replace (bool): (optional) whether to replace the variable or not.
+    """
+
+    start_tag = r"\{(.*:)?"
+    if var_name_2 is not None:
+        var_name = f"{var_name}|{var_name_2}"
+    tag = r"(\$\s*" + var_name + r")(\s*\??)"
+    end_tag = r"\s*(\|.*?|:.*?|,\s*.*?)?}"
+
+    pattern = start_tag + tag + end_tag
+    repls = []
+
+    if re.search(pattern, input_text, flags=re.DOTALL):
+        input_text = input_text.replace(
+            f"{{\${var_name}}}",
+            f"{{\${var_name}???}}",
+        )
+        input_text = input_text.replace(
+            f"{{\${var_value}}}",
+            f"{{\${var_value}???}}",
+        )
+        if replace:
+            repls = []
+            pattern = start_tag + tag + end_tag
+            for match in re.finditer(pattern, input_text, flags=re.DOTALL):
+                expr = match.group(0)
+                start_tag = match.group(1)
+                tag = match.group(2)
+                extra_tag = match.group(3)
+                if len(match.groups()) >= 5 and match.group(5):
+                    arg1 = match.group(5)
+                    arg2 = (
+                        f"{{{var_value} {arg1}}}"
+                        if start_tag is not None
+                        else f"{{{arg1} {var_value}}}"
+                    )
+                    repls.append((expr, arg2))
+                else:
+                    repls.append((expr, var_value))
+                    if start_tag is not None:
+                        repls.append((start_tag, ""))
+                    if extra_tag is not None:
+                        repls.append((extra_tag, ""))
+            for old, new in repls:
+                input_text = input_text.replace(old, new)
+            pattern = start_tag + tag + end_tag
+            for match in re.finditer(pattern, input_text, flags=re.DOTALL):
+                expr = match.group(0)
+                start_tag = match.group(1)
+                tag = match.group(2)
+                extra_tag = match.group(3)
+                if len(match.groups()) >= 5 and match.group(5):
+                    arg1 = match.group(5)
+                    arg2 = f"{{{{{arg1} {var_value}}}}}"
+                    input_text = input_text.replace(expr, arg2)
+            else:
+                input_text = input_text.replace(match.group(0), var_value)
+        return input_text
+    return input_text
+
+
+def resolve_str_func(

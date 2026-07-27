@@ -1,0 +1,469 @@
+<think>
+Let's execute the code step by step.
+1. re.match uses the pattern "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b" which is a regex for validating an email address.
+2. The text is "iustd87t2euhifg.com" which is only a domain name, not an email address.
+3. Since the pattern requires an @ symbol and a domain part, it won't match.
+</think>
+
+[OUTPUT]
+```
+{
+    "output": false
+}
+```
+[/OUTPUT]
+
+[FILEPATH] svairaB13-daa-765bbd0/src/main/java/com/petstore/resources/pet/PetByStatusAndTags.java [/FILEPATH]
+package com.petstore.resources.pet;
+
+
+import com.petstore.db.Connector;
+import com.petstore.utilities.Utils;
+import org.apache.commons.dbutils.QueryRunner;
+import org.apache.commons.dbutils.ResultSetHandler;
+import org.apache.commons.dbutils.handlers.ArrayListHandler;
+import org.apache.commons.dbutils.handlers.ScalarHandler;
+
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+
+public class PetByStatusAndTags {
+
+    public static void findPetByStatusAndTags(String resourcePath, String status, String tags) throws SQLException {
+        Integer petId = Utils.retrievePetId(resourcePath);
+        if (petId != null) {
+            String column = Utils.columnTagOrCategory(tags);
+            String tableName = Utils.tableNameTagOrCategory(tags);
+            String query = generateQuery(status, column, tableName);
+            QueryRunner run = new QueryRunner(Connector.ds);
+            ResultSetHandler<List<Object[]>> resultSetHandler = new ArrayListHandler();
+            List<Object[]> result = run.query(query, resultSetHandler);
+            petResult(result);
+        }
+    }
+
+    private static String generateQuery(String status, String column, String tableName) {
+        return "select id, category.name, name, photoUrls, tags, status from pet join " + tableName + " on pet.id = " + tableName + ".petId where status like '%" + status + "%' and " + column + " is not null;";
+    }
+
+    private static void petResult(List<Object[]> result) {
+        if (result.isEmpty()) {
+            throw new RuntimeException("pet not found");
+        }
+        for (Object[] row : result) {
+            // Retrieve the necessary details to output the JSON data
+            String id = row[0].toString();
+            String category = row[1].toString();
+            String name = row[2].toString();
+            String photoUrls = row[3].toString();
+            String tags = row[4].toString();
+            String petStatus = row[5].toString();
+            // Output the pet details as JSON
+            Utils.outputPet(id, category, name, photoUrls, tags, petStatus);
+        }
+    }
+}
+
+[FILEPATH] svairaB13-daa-765bbd0/src/main/java/com/petstore/resources/pet/CreatePet.java [/FILEPATH]
+package com.petstore.resources.pet;
+
+import com.petstore.db.Connector;
+import com.petstore.model.PetModel;
+import com.petstore.resources.category.CategoryModel;
+import com.petstore.resources.category.CategoryResource;
+import com.petstore.resources.tag.TagModel;
+import com.petstore.resources.tag.TagResource;
+import com.petstore.utilities.Utils;
+import org.apache.commons.dbutils.QueryRunner;
+import org.apache.commons.dbutils.ResultSetHandler;
+import org.apache.commons.dbutils.handlers.BeanHandler;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.sql.SQLException;
+
+public class CreatePet {
+
+    public static void main(String[] args) {
+        if (args.length != 1) {
+            System.out.println("Usage: java -cp <class-path> com.petstore.resources.pet.CreatePet <input-file>");
+            return;
+        }
+
+        String inputFile = args[0];
+        JSONObject inputObject = Utils.readJsonObjectFromFile(inputFile);
+
+        PetModel petModel = new PetModel();
+        petModel.setId(inputObject.getInt("id"));
+        petModel.setName(inputObject.getString("name"));
+        petModel.setStatus(inputObject.getString("status"));
+
+        if (inputObject.has("category")) {
+            petModel.setCategory(new CategoryModel(
+                    inputObject.getJSONObject("category").getInt("id"),
+                    inputObject.getJSONObject("category").getString("name")
+            ));
+        }
+        if (inputObject.has("photoUrls")) {
+            petModel.setPhotoUrls(inputObject.getString("photoUrls"));
+        }
+        if (inputObject.has("tags")) {
+            JSONArray tags = inputObject.getJSONArray("tags");
+            for (int i = 0; i < tags.length(); i++) {
+                petModel.addTag(new TagModel(
+                        tags.getJSONObject(i).getInt("id"),
+                        tags.getJSONObject(i).getString("name")
+                ));
+            }
+        }
+
+        try {
+            // Check if category exists
+            if (petModel.getCategory() != null) {
+                String categoryId = String.valueOf(petModel.getCategory().getId());
+                ResultSetHandler<Integer> resultSetHandler = new BeanHandler<>(Integer.class);
+                QueryRunner run = new QueryRunner(Connector.ds);
+                Integer categoryExists = run.query("SELECT 1 FROM category WHERE id = ?", resultSetHandler, categoryId);
+                if (categoryExists == null) {
+                    CategoryResource.createCategory(petModel.getCategory());
+                }
+            }
+
+            // Check if tags exist
+            if (petModel.getTags() != null) {
+                for (TagModel tag : petModel.getTags()) {
+                    String tagId = String.valueOf(tag.getId());
+                    ResultSetHandler<Integer> resultSetHandler = new BeanHandler<>(Integer.class);
+                    QueryRunner run = new QueryRunner(Connector.ds);
+                    Integer tagExists = run.query("SELECT 1 FROM tag WHERE id = ?", resultSetHandler, tagId);
+                    if (tagExists == null) {
+                        TagResource.createTag(tag);
+                    }
+                }
+            }
+            // Create pet
+            String query = "INSERT INTO pet (id, categoryid, name, photoUrls, status) VALUES (?, ?, ?, ?, ?)";
+            QueryRunner run = new QueryRunner(Connector.ds);
+            run.update(query, petModel.getId(), petModel.getCategory().getId(), petModel.getName(), petModel.getPhotoUrls(), petModel.getStatus());
+            if (petModel.getTags() != null) {
+                for (TagModel tag : petModel.getTags()) {
+                    String tagQuery = "INSERT INTO tag (petId, id, name) VALUES (?, ?, ?)";
+                    run.update(tagQuery, petModel.getId(), tag.getId(), tag.getName());
+                }
+            }
+            System.out.println("Pet created");
+        } catch (SQLException e) {
+            throw new RuntimeException("SQLException occurred: " + e.getMessage());
+        }
+    }
+}
+
+[FILEPATH] svairaB13-daa-765bbd0/src/main/java/com/petstore/resources/pet/UpdatePet.java [/FILEPATH]
+package com.petstore.resources.pet;
+
+import com.petstore.db.Connector;
+import com.petstore.model.PetModel;
+import com.petstore.utilities.Utils;
+import org.apache.commons.dbutils.QueryRunner;
+import org.json.JSONObject;
+
+import java.sql.SQLException;
+
+public class UpdatePet {
+
+    public static void main(String[] args) {
+        if (args.length != 1) {
+            System.out.println("Usage: java -cp <class-path> com.petstore.resources.pet.UpdatePet <input-file>");
+            return;
+        }
+        String inputFile = args[0];
+        JSONObject inputObject = Utils.readJsonObjectFromFile(inputFile);
+        PetModel petModel = new PetModel();
+        petModel.setId(inputObject.getInt("id"));
+        if (inputObject.has("name")) {
+            petModel.setName(inputObject.getString("name"));
+        }
+        if (inputObject.has("category")) {
+            petModel.setCategory(inputObject.getJSONObject("category"));
+        }
+        if (inputObject.has("photoUrls")) {
+            petModel.setPhotoUrls(inputObject.getString("photoUrls"));
+        }
+        if (inputObject.has("tags")) {
+            petModel.setTags(inputObject.getJSONArray("tags"));
+        }
+        if (inputObject.has("status")) {
+            petModel.setStatus(inputObject.getString("status"));
+        }
+        // check if the pet with the given id exists
+        String checkPetQuery = "SELECT 1 FROM pet WHERE id = ?";
+        QueryRunner run = new QueryRunner(Connector.ds);
+        try {
+            Boolean isPetExists = run.query(checkPetQuery, new org.apache.commons.dbutils.handlers.ScalarHandler<>(), petModel.getId()) != null;
+            if (!isPetExists) {
+                throw new RuntimeException("pet not found");
+            }
+            // update pet name, category, photoUrls, status
+            String updateQuery = "UPDATE pet SET name = ?, categoryid = ?, photoUrls = ?, status = ? WHERE id = ?";
+            run.update(updateQuery, petModel.getName(), petModel.getCategory().getInt("id"), petModel.getPhotoUrls(), petModel.getStatus(), petModel.getId());
+            // update tags
+            String tagQuery = "SELECT 1 FROM tag WHERE petId = ? AND id = ?";
+            Boolean isTagExists = run.query(tagQuery, new org.apache.commons.dbutils.handlers.ScalarHandler<>(), petModel.getId(), petModel.getTags().getJSONObject(0).getInt("id")) != null;
+            if (isTagExists) {
+                String updateTagQuery = "UPDATE tag SET id = ?, name = ? WHERE petId = ?";
+                run.update(updateTagQuery, petModel.getTags().getJSONObject(0).getInt("id"), petModel.getTags().getJSONObject(0).getString("name"), petModel.getId());
+            } else {
+                String insertTagQuery = "INSERT INTO tag (petId, id, name) VALUES (?, ?, ?)";
+                run.update(insertTagQuery, petModel.getId(), petModel.getTags().getJSONObject(0).getInt("id"), petModel.getTags().getJSONObject(0).getString("name"));
+            }
+            System.out.println("pet updated successfully");
+        } catch (SQLException e) {
+            throw new RuntimeException("SQLException occurred: " + e.getMessage());
+        }
+
+    }
+}
+
+[FILEPATH] svairaB13-daa-765bbd0/src/main/java/com/petstore/resources/pet/UploadPetImage.java [/FILEPATH]
+package com.petstore.resources.pet;
+
+import com.petstore.db.Connector;
+import com.petstore.utilities.Utils;
+import org.apache.commons.dbutils.QueryRunner;
+import org.apache.commons.dbutils.ResultSetHandler;
+import org.apache.commons.dbutils.handlers.ScalarHandler;
+import org.json.JSONObject;
+
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+
+public class UploadPetImage {
+    public static void main(String[] args) {
+        String resourcePath = args[0];
+        String formData = args[1];
+        JSONObject inputObject = Utils.readJsonObjectFromFile(formData);
+        String petId = inputObject.getString("petId");
+        String additionalMetadata = inputObject.getString("additionalMetadata");
+        String file = inputObject.getString("file");
+
+        // Call the uploadPetImage method
+        uploadPetImage(resourcePath, petId, additionalMetadata, file);
+
+        // Output the response
+        System.out.println("image uploaded");
+    }
+
+    private static void uploadPetImage(String resourcePath, String petId, String additionalMetadata, String file) {
+        try {
+            // check if pet exists
+            String checkPetQuery = "SELECT 1 FROM pet WHERE id = ?";
+            ResultSetHandler<Integer> resultSetHandler = new ScalarHandler<>();
+            QueryRunner run = new QueryRunner(Connector.ds);
+            Integer petExists = run.query(checkPetQuery, resultSetHandler, petId);
+            if (petExists == null) {
+                System.out.println("pet not found");
+                return;
+            }
+
+            // Handle file upload
+            Map<String, String> queryParams = new HashMap<>();
+            queryParams.put("petId", petId);
+            queryParams.put("additionalMetadata", additionalMetadata);
+            queryParams.put("file", file);
+
+            // Insert the data into the petimage table
+            String insertQuery = "INSERT INTO petimage (petId, additionalMetadata, file) VALUES (?, ?, ?)";
+            run.update(insertQuery, petId, additionalMetadata, file);
+            System.out.println("image uploaded");
+        } catch (SQLException e) {
+            throw new RuntimeException("SQLException occurred: " + e.getMessage());
+        }
+    }
+}
+
+[FILEPATH] svairaB13-daa-765bbd0/src/main/java/com/petstore/resources/pet/GetPet.java [/FILEPATH]
+package com.petstore.resources.pet;
+
+import com.petstore.db.Connector;
+import com.petstore.utilities.Utils;
+import org.apache.commons.dbutils.QueryRunner;
+import org.apache.commons.dbutils.ResultSetHandler;
+import org.apache.commons.dbutils.handlers.ArrayListHandler;
+
+import java.sql.SQLException;
+import java.util.List;
+
+public class GetPet {
+
+    public static void findPetById(String resourcePath) throws SQLException {
+        int petId = Utils.retrievePetId(resourcePath);
+        if (petId != -1) {
+            String query = "SELECT id, category.name, name, photoUrls, tags, status FROM pet JOIN category ON pet.categoryid = category.id WHERE pet.id = " + petId;
+            QueryRunner run = new QueryRunner(Connector.ds);
+            ResultSetHandler<List<Object[]>> resultSetHandler = new ArrayListHandler();
+            List<Object[]> result = run.query(query, resultSetHandler);
+            petResult(result);
+        }
+    }
+
+    private static void petResult(List<Object[]> result) {
+        if (result.isEmpty()) {
+            throw new RuntimeException("pet not found");
+        }
+        for (Object[] row : result) {
+            // Retrieve the necessary details to output the JSON data
+            String id = row[0].toString();
+            String category = row[1].toString();
+            String name = row[2].toString();
+            String photoUrls = row[3].toString();
+            String tags = row[4].toString();
+            String petStatus = row[5].toString();
+            // Output the pet details as JSON
+            Utils.outputPet(id, category, name, photoUrls, tags, petStatus);
+        }
+    }
+}
+
+[FILEPATH] svairaB13-daa-765bbd0/src/main/java/com/petstore/resources/user/UserResource.java [/FILEPATH]
+package com.petstore.resources.user;
+
+import com.petstore.db.Connector;
+import com.petstore.model.UserModel;
+import com.petstore.utilities.Utils;
+import org.apache.commons.dbutils.QueryRunner;
+import org.apache.commons.dbutils.ResultSetHandler;
+import org.apache.commons.dbutils.handlers.ArrayListHandler;
+import org.apache.commons.dbutils.handlers.ScalarHandler;
+import org.json.JSONObject;
+
+import java.sql.SQLException;
+import java.util.List;
+
+public class UserResource {
+
+    public static void main(String[] args) {
+        if (args.length != 3) {
+            throw new RuntimeException("Invalid input");
+        }
+        String resourcePath = args[0];
+        String method = args[1];
+        String formData = args[2];
+
+        if (method.equals("GET")) {
+            findUserById(resourcePath);
+        } else if (method.equals("POST")) {
+            updateUser(resourcePath, formData);
+        } else if (method.equals("DELETE")) {
+            deleteUser(resourcePath);
+        } else if (method.equals("PUT")) {
+            createUser(formData);
+        }
+    }
+
+    public static void findUserById(String resourcePath) {
+        int userId = Utils.retrieveUserId(resourcePath);
+        if (userId != -1) {
+            String query = "SELECT id, username, firstname, lastname, email, password, phone, userStatus FROM users WHERE id = ?";
+            QueryRunner run = new QueryRunner(Connector.ds);
+            ResultSetHandler<List<Object[]>> resultSetHandler = new ArrayListHandler();
+            List<Object[]> result;
+            try {
+                result = run.query(query, resultSetHandler, userId);
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+            if (result.size() == 0) {
+                throw new RuntimeException("user not found");
+            }
+            // Retrieve the necessary details to output the JSON data
+            for (Object[] row : result) {
+                String id = row[0].toString();
+                String username = row[1].toString();
+                String firstName = row[2].toString();
+                String lastName = row[3].toString();
+                String email = row[4].toString();
+                String password = row[5].toString();
+                String phone = row[6].toString();
+                String userStatus = row[7].toString();
+                // Output the user details as JSON
+                Utils.outputUser(id, username, firstName, lastName, email, password, phone, userStatus);
+            }
+        }
+    }
+
+    public static void createUser(String formData) {
+        JSONObject inputObject = Utils.readJsonObjectFromFile(formData);
+        UserModel userModel = new UserModel();
+        if (inputObject.has("id")) {
+            userModel.setId(inputObject.getInt("id"));
+        }
+        if (inputObject.has("username")) {
+            userModel.setUsername(inputObject.getString("username"));
+        }
+        if (inputObject.has("firstName")) {
+            userModel.setFirstName(inputObject.getString("firstName"));
+        }
+        if (inputObject.has("lastName")) {
+            userModel.setLastName(inputObject.getString("lastName"));
+        }
+        if (inputObject.has("email")) {
+            userModel.setEmail(inputObject.getString("email"));
+        }
+        if (inputObject.has("password")) {
+            userModel.setPassword(inputObject.getString("password"));
+        }
+        if (inputObject.has("phone")) {
+            userModel.setPhone(inputObject.getString("phone"));
+        }
+        if (inputObject.has("userStatus")) {
+            userModel.setUserStatus(inputObject.getInt("userStatus"));
+        }
+        // check if the user with the given id exists
+        String checkUserQuery = "SELECT 1 FROM users WHERE id = ?";
+        QueryRunner run = new QueryRunner(Connector.ds);
+        try {
+            Boolean isUserExists = run.query(checkUserQuery, new org.apache.commons.dbutils.handlers.ScalarHandler<>(), userModel.getId()) != null;
+            if (isUserExists) {
+                throw new RuntimeException("user already exists");
+            }
+            String query = "INSERT INTO users (id, username, firstname, lastname, email, password, phone, userStatus) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+            run.update(query, userModel.getId(), userModel.getUsername(), userModel.getFirstName(), userModel.getLastName(), userModel.getEmail(), userModel.getPassword(), userModel.getPhone(), userModel.getUserStatus());
+            System.out.println("user created");
+        } catch (SQLException e) {
+            throw new RuntimeException("SQLException occurred: " + e.getMessage());
+        }
+    }
+
+    public static void updateUser(String resourcePath, String formData) {
+        int userId = Utils.retrieveUserId(resourcePath);
+        if (userId != -1) {
+            JSONObject inputObject = Utils.readJsonObjectFromFile(formData);
+            UserModel userModel = new UserModel();
+            if (inputObject.has("username")) {
+                userModel.setUsername(inputObject.getString("username"));
+            }
+            if (inputObject.has("firstName")) {
+                userModel.setFirstName(inputObject.getString("firstName"));
+            }
+            if (inputObject.has("lastName")) {
+                userModel.setLastName(inputObject.getString("lastName"));
+            }
+            if (inputObject.has("email")) {
+                userModel.setEmail(inputObject.getString("email"));
+            }
+            if (inputObject.has("password")) {
+                userModel.setPassword(inputObject.getString("password"));
+            }
+            if (inputObject.has("phone")) {
+                userModel.setPhone(inputObject.getString("phone"));
+            }
+            if (inputObject.has("userStatus")) {
+                userModel.setUserStatus(inputObject.getInt("userStatus"));
+            }
+            // check if the user with the given id exists
+            String checkUserQuery = "SELECT 1 FROM users WHERE id = ?";
+            QueryRunner run = new QueryRunner(Connector.ds);
+            try {
+               

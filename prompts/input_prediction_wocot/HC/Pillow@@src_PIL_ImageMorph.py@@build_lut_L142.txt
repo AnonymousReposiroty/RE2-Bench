@@ -1,0 +1,262 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import re
+
+class LutBuilder:
+
+    def __init__(self, patterns: list[str] | None=None, op_name: str | None=None) -> None:
+        if patterns is not None:
+            self.patterns = patterns
+        else:
+            self.patterns = []
+        self.lut: bytearray | None = None
+        if op_name is not None:
+            known_patterns = {'corner': ['1:(... ... ...)->0', '4:(00. 01. ...)->1'], 'dilation4': ['4:(... .0. .1.)->1'], 'dilation8': ['4:(... .0. .1.)->1', '4:(... .0. ..1)->1'], 'erosion4': ['4:(... .1. .0.)->0'], 'erosion8': ['4:(... .1. .0.)->0', '4:(... .1. ..0)->0'], 'edge': ['1:(... ... ...)->0', '4:(.0. .1. ...)->1', '4:(01. .1. ...)->1']}
+            if op_name not in known_patterns:
+                msg = 'Unknown pattern ' + op_name + '!'
+                raise Exception(msg)
+            self.patterns = known_patterns[op_name]
+
+    def build_default_lut(self) -> None:
+        symbols = [0, 1]
+        m = 1 << 4
+        self.lut = bytearray((symbols[i & m > 0] for i in range(LUT_SIZE)))
+
+    def _string_permute(self, pattern: str, permutation: list[int]) -> str:
+        assert len(permutation) == 9
+        return ''.join((pattern[p] for p in permutation))
+
+    def _pattern_permute(self, basic_pattern: str, options: str, basic_result: int) -> list[tuple[str, int]]:
+        patterns = [(basic_pattern, basic_result)]
+        if '4' in options:
+            res = patterns[-1][1]
+            for i in range(4):
+                patterns.append((self._string_permute(patterns[-1][0], ROTATION_MATRIX), res))
+        if 'M' in options:
+            n = len(patterns)
+            for pattern, res in patterns[:n]:
+                patterns.append((self._string_permute(pattern, MIRROR_MATRIX), res))
+        if 'N' in options:
+            n = len(patterns)
+            for pattern, res in patterns[:n]:
+                pattern = pattern.replace('0', 'Z').replace('1', '0').replace('Z', '1')
+                res = 1 - int(res)
+                patterns.append((pattern, res))
+        return patterns
+
+    def build_lut(self) -> bytearray:
+        self.build_default_lut()
+        assert self.lut is not None
+        patterns = []
+        for p in self.patterns:
+            m = re.search('(\\w*):?\\s*\\((.+?)\\)\\s*->\\s*(\\d)', p.replace('\n', ''))
+            if not m:
+                msg = 'Syntax error in pattern "' + p + '"'
+                raise Exception(msg)
+            options = m.group(1)
+            pattern = m.group(2)
+            result = int(m.group(3))
+            pattern = pattern.replace(' ', '').replace('\n', '')
+            patterns += self._pattern_permute(pattern, options, result)
+        compiled_patterns = []
+        for pattern in patterns:
+            p = pattern[0].replace('.', 'X').replace('X', '[01]')
+            compiled_patterns.append((re.compile(p), pattern[1]))
+        for i in range(LUT_SIZE):
+            bitpattern = bin(i)[2:]
+            bitpattern = ('0' * (9 - len(bitpattern)) + bitpattern)[::-1]
+            for pattern, r in compiled_patterns:
+                if pattern.match(bitpattern):
+                    self.lut[i] = [0, 1][r]
+        return self.lut
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+Pillow.src.PIL.ImageMorph._pattern_permute
+
+def _pattern_permute(
+    self, basic_pattern: str, options: str, basic_result: int
+) -> list[tuple[str, int]]:
+    """pattern_permute takes a basic pattern and its result and clones
+    the pattern according to the modifications described in the $options
+    parameter. It returns a list of all cloned patterns."""
+    patterns = [(basic_pattern, basic_result)]
+
+    # rotations
+    if "4" in options:
+        res = patterns[-1][1]
+        for i in range(4):
+            patterns.append(
+                (self._string_permute(patterns[-1][0], ROTATION_MATRIX), res)
+            )
+    # mirror
+    if "M" in options:
+        n = len(patterns)
+        for pattern, res in patterns[:n]:
+            patterns.append((self._string_permute(pattern, MIRROR_MATRIX), res))
+
+    # negate
+    if "N" in options:
+        n = len(patterns)
+        for pattern, res in patterns[:n]:
+            # Swap 0 and 1
+            pattern = pattern.replace("0", "Z").replace("1", "0").replace("Z", "1")
+            res = 1 - int(res)
+            patterns.append((pattern, res))
+
+    return patterns
+
+Pillow.src.PIL.ImageMorph.build_default_lut
+
+def build_default_lut(self) -> None:
+    symbols = [0, 1]
+    m = 1 << 4  # pos of current pixel
+    self.lut = bytearray(symbols[(i & m) > 0] for i in range(LUT_SIZE))
+
+
+[/PYTHON]
+What will be the input of `build_lut`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "bytearray(b'\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x01')"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "patterns": XXX,
+        "lut": XXX
+    },
+    "args": {},
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

@@ -1,0 +1,138 @@
+[THOUGHT]
+Given input: exprs = ["2", "-1*2*cos(phi)"], opt = {}.
+
+We trace the function:
+
+1. origs = ["2", "-1*2*cos(phi)"]. Loop at line 48: enumerate(origs) gives i=0, expr="2"; then i=1, expr="-1*2*cos(phi)". So i = [0,1], expr = ["2", "-1*2*cos(phi)"]. origs remains the same list, so for each iteration we have origs = ["2", "-1*2*cos(phi)"].
+
+2. After sympifying, exprs becomes [2, -2*cos(phi)]. _exprs becomes [0,1], _polys remains [].
+
+3. _parallel_dict_from_expr is called with exprs and opt. We assume it returns reps = [{(): 2}, {(cos(phi),): -2}] and sets opt.gens = [cos(phi)].
+
+4. Loop at line 77: for k in opt.gens: there is one iteration with k = cos(phi). So k = [cos(phi)], opt.gens is [cos(phi)] and we repeat it once: [[cos(phi)]].
+
+5. Loop at line 86: for rep in reps: two iterations. rep takes values {(): 2} and {(cos(phi),): -2}. So rep = [{(): 2}, {(cos(phi),): -2}]. reps is the list of these two dictionaries, repeated for each iteration: [[{(): 2}, {(cos(phi),): -2}], [{(): 2}, {(cos(phi),): -2}]].
+
+6. Inside that loop, we build all_monoms and all_coeffs. For first rep: monoms = ((),), coeffs = (2,). For second: monoms = ((cos(phi),),), coeffs = (-2,). Then all_monoms becomes [((),), ((cos(phi),),)], lengths becomes [1,1]. After construct_domain, coeffs_list becomes [2, -2] (as domain elements). Then all_coeffs becomes [[2], [-2]].
+
+7. Loop at line 107: zip(all_monoms, all_coeffs) yields two pairs: first: (monoms=((),), coeffs=[2]), second: (monoms=((cos(phi),),), coeffs=[-2]). So monoms = [((),), ((cos(phi),),)], coeffs = [[2], [-2]]. For zip(all_monoms, all_coeffs), we represent it as the list of pairs: [ ( ((),), [2] ), ( ((cos(phi),),), [-2] ) ], and since there are two iterations, we repeat this list twice: [ [ ( ((),), [2] ), ( ((cos(phi),),), [-2] ) ], [ ( ((),), [2] ), ( ((cos(phi),),), [-2] ) ] ].
+
+[/THOUGHT]
+
+[ANSWER]
+1 from sympy.core.basic import Basic
+2 from sympy.core.sympify import sympify, _sympify
+3 from sympy.polys.constructor import construct_domain
+4 from sympy.polys.polyerrors import (
+5     OperationNotSupported, DomainError,
+6     CoercionFailed, UnificationFailed,
+7     GeneratorsNeeded, PolynomialError,
+8     MultivariatePolynomialError,
+9     ExactQuotientFailed,
+10     PolificationFailed,
+11     ComputationFailed,
+12     GeneratorsError,
+13 )
+14 from sympy.polys.polyutils import (
+15     basic_from_dict,
+16     _sort_gens,
+17     _unify_gens,
+18     _dict_reorder,
+19     _dict_from_expr,
+20     _parallel_dict_from_expr,
+21 )
+22 from sympy.functions.elementary.piecewise import Piecewise
+23 from sympy.functions.elementary.piecewise import Piecewise
+24 
+25 def _parallel_poly_from_expr(exprs, opt):
+26     if len(exprs) == 2:
+27         f, g = exprs
+28 
+29         if isinstance(f, Poly) and isinstance(g, Poly):
+30             f = f.__class__._from_poly(f, opt)
+31             g = g.__class__._from_poly(g, opt)
+32 
+33             f, g = f.unify(g)
+34 
+35             opt.gens = f.gens
+36             opt.domain = f.domain
+37 
+38             if opt.polys is None:
+39                 opt.polys = True
+40 
+41             return [f, g], opt
+42 
+43     origs, exprs = list(exprs), []
+44     _exprs, _polys = [], []
+45 
+46     failed = False
+47 
+48     for i, expr in enumerate(origs):## [STATE]i=[0,1][/STATE] [STATE]expr=['2','-1*2*cos(phi)'][/STATE] [STATE]origs=[['2','-1*2*cos(phi)'], ['2','-1*2*cos(phi)']][/STATE]
+49         expr = sympify(expr)
+50 
+51         if isinstance(expr, Basic):
+52             if expr.is_Poly:
+53                 _polys.append(i)
+54             else:
+55                 _exprs.append(i)
+56 
+57                 if opt.expand:
+58                     expr = expr.expand()
+59         else:
+60             failed = True
+61 
+62         exprs.append(expr)
+63 
+64     if failed:
+65         raise PolificationFailed(opt, origs, exprs, True)
+66 
+67     if _polys:
+68 
+69         for i in _polys:
+70             exprs[i] = exprs[i].as_expr()
+71 
+72     reps, opt = _parallel_dict_from_expr(exprs, opt)
+73     if not opt.gens:
+74         raise PolificationFailed(opt, origs, exprs, True)
+75 
+76     from sympy.functions.elementary.piecewise import Piecewise
+77     for k in opt.gens:## [STATE]k=[cos(phi)][/STATE] [STATE]opt.gens=[[cos(phi)]][/STATE]
+78         if isinstance(k, Piecewise):
+79             raise PolynomialError("Piecewise generators do not make sense")
+80 
+81     coeffs_list, lengths = [], []
+82 
+83     all_monoms = []
+84     all_coeffs = []
+85 
+86     for rep in reps:## [STATE]rep=[{(): 2}, {(cos(phi),): -2}][/STATE] [STATE]reps=[[{(): 2}, {(cos(phi),): -2}], [{(): 2}, {(cos(phi),): -2}]][/STATE]
+87         monoms, coeffs = list(zip(*list(rep.items())))
+88 
+89         coeffs_list.extend(coeffs)
+90         all_monoms.append(monoms)
+91 
+92         lengths.append(len(coeffs))
+93 
+94     domain = opt.domain
+95 
+96     if domain is None:
+97         opt.domain, coeffs_list = construct_domain(coeffs_list, opt=opt)
+98     else:
+99         coeffs_list = list(map(domain.from_sympy, coeffs_list))
+100 
+101     for k in lengths:
+102         all_coeffs.append(coeffs_list[:k])
+103         coeffs_list = coeffs_list[k:]
+104 
+105     polys = []
+106 
+107     for monoms, coeffs in zip(all_monoms, all_coeffs):## [STATE]monoms=[((),), ((cos(phi),),)][/STATE] [STATE]coeffs=[[2], [-2]][/STATE] [STATE]zip(all_monoms, all_coeffs)=[[ ( ((),), [2] ), ( ((cos(phi),),), [-2] ) ], [ ( ((),), [2] ), ( ((cos(phi),),), [-2] ) ]][/STATE]
+108         rep = dict(list(zip(monoms, coeffs)))
+109         poly = Poly._from_dict(rep, opt)
+110         polys.append(poly)
+111 
+112     if opt.polys is None:
+113         opt.polys = bool(_polys)
+114 
+115     return polys, opt
+[/ANSWER]

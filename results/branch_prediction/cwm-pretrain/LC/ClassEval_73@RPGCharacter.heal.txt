@@ -1,0 +1,379 @@
+<think>
+The method heal is called on an RPGCharacter instance named John with 100 hp. 
+- Line 15 checks if hp > 100. Since hp is exactly 100, the condition is not met. 
+- So the branch on line 15 is not taken, and 'N' is appended.
+- No change to hp occurs.
+</think>
+
+[ANSWER]
+1 
+2 
+3 class RPGCharacter():
+4 
+5     def __init__(self, name, hp, attack_power, defense, level=1):
+6         self.name = name
+7         self.hp = hp
+8         self.attack_power = attack_power
+9         self.defense = defense
+10         self.level = level
+11         self.exp = 0
+12 
+13     def heal(self):
+14         self.hp += 10
+15         if (self.hp > 100): ## [BRANCH]taken=[N][/BRANCH]
+16             self.hp = 100
+17         return self.hp
+[/ANSWER]
+
+[FILEPATH] cifyi-mymistral-d3af14f/mymistral/inference/eval_gt_branch_gt_label.py [/FILEPATH]
+import os
+import json
+import re
+import argparse
+import glob
+from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+from pathlib import Path
+from collections import defaultdict
+
+def load_gt_branch(out_dir):
+    # gt_branch_map = defaultdict(list)
+    gt_branch_map = {}
+    all_gt_branch_files = glob.glob(f'{out_dir}/**/*_gt_branch.out', recursive=True)
+    print(all_gt_branch_files)
+    for gt_branch_file in all_gt_branch_files:
+        # project_name = Path(gt_branch_file).parent.stem
+        with open(gt_branch_file, 'r') as f:
+            gt_branch_list = eval(f.read())
+        for gt_branch in gt_branch_list:
+            key = f'{gt_branch["filepath"]} {gt_branch["function_name"]} {gt_branch["coverage_index"]}'
+            # gt_branch_map[project_name].append(gt_branch)
+            gt_branch_map[key] = gt_branch
+    return gt_branch_map
+
+def read_jsonl(file_path):
+    data = []
+    with open(file_path, 'r') as file:
+        for line in file:
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON in file {file_path}: {e}")
+    return data
+
+
+def load_gt_label(out_dir):
+    gt_label_map = defaultdict(list)
+    all_label_files = glob.glob(f'{out_dir}/**/*_gt_branch.label', recursive=True)
+    print(all_label_files)
+    for gt_label_file in all_label_files:
+        project_name = Path(gt_label_file).parent.stem
+        with open(gt_label_file, 'r') as f:
+            gt_label_json = json.load(f)
+        gt_label_map[project_name].append(gt_label_json)
+    return gt_label_map
+
+def tokenize_code(gt_branch, tokenizer):
+    function_name = gt_branch['function_name']
+    method_input_json = gt_branch['method_input_json']
+    coverage_index = gt_branch['coverage_index']
+    pattern = rf"def {re.escape(function_name)}\(.*?\):"
+    method_code = gt_branch['method_code']
+    if pattern not in method_code:
+        print(f"Function {function_name} not found in coverage_index {coverage_index}")
+        print(method_code)
+        return None, None, None, None
+    
+    branch_pattern = r"## \[BRANCH\]taken=\?\?(\[\]?)(?!\[BRANCH\]|:)"
+    replacement = r"## \[BRANCH\]taken=\?\?\1"
+    method_code = re.sub(branch_pattern, replacement, method_code)
+    branch_markers = re.finditer(r"## \[BRANCH\]taken=\?\?(\[\]?)(?!\[BRANCH\]|:)", method_code)
+    branch_markers_indices = [m.span() for m in branch_markers]
+    pattern = rf"def {re.escape(function_name)}\(.*?\):"
+    match = re.search(pattern, method_code)
+    if match is not None:
+        start_index = match.end()
+    else:
+        print("error: function not found")
+        return None, None, None, None
+    code_after_function = method_code[start_index:]
+    
+    method_input_str = json.dumps(method_input_json, indent=4)
+    prompt = f"[PYTHON]\n{code_after_function}\n[/PYTHON]\n\nThe input to the method ```{function_name}``` is:\n```\n{method_input_str}\n```\nComplete the branch annotation in the code with \"Y\" and \"N\".\n"
+    print(f"prompt: {prompt}")
+
+    inputs = tokenizer(prompt, return_tensors="pt")
+    labels = tokenizer(code_after_function, return_tensors="pt")
+
+    branch_marker_pos_start = [0] * len(branch_markers_indices)
+    branch_marker_pos_end = [0] * len(branch_markers_indices)
+    for i, (branch_marker_start, branch_marker_end) in enumerate(branch_markers_indices):
+        branch_marker_pos_start[i] = labels.char_to_token(branch_marker_start, offset=1)
+        branch_marker_pos_end[i] = labels.char_to_token(branch_marker_end-1, offset=1)
+        if branch_marker_pos_start[i] == None or branch_marker_pos_end[i] == None:
+            print("error: branch marker not found")
+            return None, None, None, None
+    return inputs, labels, branch_marker_pos_start, branch_marker_pos_end
+
+def extract_y_n_from_gpt_generated_code(answer):
+    # print("answer: ")
+    # print(answer)
+    y_n = ''
+    y_n_match = re.search(r"\[BRANCH\]taken=\[(.*?)\]", answer)
+    if y_n_match:
+        y_n = y_n_match.group(1)
+    # print(f"y_n: {y_n}")
+    return y_n
+
+def eval_one_branch(gt_branch, gt_label_map, tokenizer):
+    function_name = gt_branch['function_name']
+    method_input_json = gt_branch['method_input_json']
+    coverage_index = gt_branch['coverage_index']
+    if not gt_label_map:
+        return 0.0, 0.0, 0.0
+    
+    method_input_hash = gt_branch['method_input_hash']
+    method_code_hash = gt_branch['method_code_hash']
+    filepath = gt_branch['filepath']
+    function_input_key = f"{filepath} {function_name} {method_input_hash}"
+    branch_label_gt = None
+    for label in gt_label_map:
+        if function_input_key == label["function_input_key"]:
+            branch_label_gt = label["branch_label"]
+            # print("function_input_key: ")
+            # print(function_input_key)
+            # print("branch_label_gt: ")
+            # print(branch_label_gt)
+            break
+    if not branch_label_gt:
+        print(f"gt_label not found for {function_input_key}")
+        return 0.0, 0.0, 0.0
+    
+    inputs, labels, branch_marker_pos_start, branch_marker_pos_end = tokenize_code(gt_branch, tokenizer)
+    if inputs == None or labels == None or branch_marker_pos_start == None or branch_marker_pos_end == None:
+        print(f"error in tokenize_code for {function_name} {method_input_hash}")
+        return 0.0, 0.0, 0.0
+
+    y_n = ''.join(branch_label_gt)
+    y_n = [y_n[i:i+2] for i in range(0, len(y_n), 2)]
+    branch_markers = [i for i, x in enumerate(branch_marker_pos_start) if x < 4096]
+    branch_marker_pos_start = [x for x in branch_marker_pos_start if x < 4096]
+    branch_marker_pos_end = [x for x in branch_marker_pos_end if x < 4096]
+    y_n = y_n[:len(branch_marker_pos_start)]
+    if len(branch_marker_pos_start) != len(branch_marker_pos_end) or len(branch_marker_pos_start) != len(y_n):
+        print(f"len(branch_marker_pos_start) != len(branch_marker_pos_end) for {function_name} {method_input_hash}")
+        return 0.0, 0.0, 0.0
+    if len(branch_marker_pos_start) == 0:
+        print(f"no branch marker for {function_name} {method_input_hash}")
+        return 0.0, 0.0, 0.0
+
+    TP = 0
+    FP = 0
+    FN = 0
+    TN = 0
+    for i in range(len(branch_marker_pos_start)):
+        if i >= len(y_n):
+            print(f"i >= len(y_n) for {function_name} {method_input_hash}")
+            return 0.0, 0.0, 0.0
+        pos_s = branch_marker_pos_start[i]
+        pos_e = branch_marker_pos_end[i]
+        if pos_e >= 4096 or pos_s >= 4096:
+            print(f"pos_e or pos_s >= 4096 for {function_name} {method_input_hash}")
+            continue
+        prediction = "".join(inputs.input_ids[0][pos_s+1:pos_e]).replace("<s>", "").replace("</s>", "").replace("]", "").replace("[", "").upper()
+        # print(f"prediction: {prediction}")
+        if prediction == y_n[i]:
+            if y_n[i] == "Y":
+                TP += 1
+            else:
+                TN += 1
+        else:
+            if y_n[i] == "Y":
+                FN += 1
+            else:
+                FP += 1
+    try:
+        accuracy = (TP + TN) / (TP + TN + FP + FN)
+    except ZeroDivisionError:
+        print(f"ZeroDivisionError for {function_name} {method_input_hash}")
+        accuracy = 0.0
+    try:
+        precision = TP / (TP + FP)
+    except ZeroDivisionError:
+        precision = 0.0
+    try:
+        recall = TP / (TP + FN)
+    except ZeroDivisionError:
+        recall = 0.0
+    print(f"accuracy: {accuracy}, precision: {precision}, recall: {recall}")
+    return accuracy, precision, recall
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate branch prediction using GPT")
+    parser.add_argument("--out_dir", type=str, required=True, help="Output directory")
+    parser.add_argument("--tokenizer_path", type=str, required=True, help="Tokenizer path")
+    args = parser.parse_args()
+
+    out_dir = args.out_dir
+    tokenizer_path = args.tokenizer_path
+    tokenizer = MistralTokenizer.from_file(tokenizer_path)
+
+    gt_branch_map = load_gt_branch(out_dir)
+    gt_label_map = load_gt_label(out_dir)
+    # gt_label_map = defaultdict(list)
+
+    accuracy_sum = 0.0
+    precision_sum = 0.0
+    recall_sum = 0.0
+    cnt = 0
+    print(f"gt_branch_map: {len(gt_branch_map)}")
+    for key, gt_branch in gt_branch_map.items():
+        filepath = gt_branch['filepath']
+        function_name = gt_branch['function_name']
+        coverage_index = gt_branch['coverage_index']
+        method_input_hash = gt_branch['method_input_hash']
+        if "/" in function_name:
+            function_name = function_name.split("/")[-1]
+        project_name = gt_branch['project_name']
+        method_input_hash = gt_branch['method_input_hash']
+        gt_label_map = [label for label in gt_label_map[project_name] if label["filepath"] == filepath and label["function_name"] == function_name and label["method_input_hash"] == method_input_hash]
+        accuracy, precision, recall = eval_one_branch(gt_branch, gt_label_map, tokenizer)
+        accuracy_sum += accuracy
+        precision_sum += precision
+        recall_sum += recall
+        cnt += 1
+    print(f"accuracy_sum: {accuracy_sum}, precision_sum: {precision_sum}, recall_sum: {recall_sum}, cnt: {cnt}")
+    print(f"accuracy: {accuracy_sum/cnt}, precision: {precision_sum/cnt}, recall: {recall_sum/cnt}")
+
+if __name__ == "__main__":
+    main()
+
+[FILEPATH] cifyi-mymistral-d3af14f/mymistral/inference/eval_gt_branch_custom_gt_label.py [/FILEPATH]
+import os
+import json
+import re
+import argparse
+import glob
+from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+from pathlib import Path
+from collections import defaultdict
+
+def load_gt_branch(out_dir):
+    # gt_branch_map = defaultdict(list)
+    gt_branch_map = {}
+    all_gt_branch_files = glob.glob(f'{out_dir}/**/*_gt_branch.out', recursive=True)
+    print(all_gt_branch_files)
+    for gt_branch_file in all_gt_branch_files:
+        # project_name = Path(gt_branch_file).parent.stem
+        with open(gt_branch_file, 'r') as f:
+            gt_branch_list = eval(f.read())
+        for gt_branch in gt_branch_list:
+            key = f'{gt_branch["filepath"]} {gt_branch["function_name"]} {gt_branch["coverage_index"]}'
+            # gt_branch_map[project_name].append(gt_branch)
+            gt_branch_map[key] = gt_branch
+    return gt_branch_map
+
+def read_jsonl(file_path):
+    data = []
+    with open(file_path, 'r') as file:
+        for line in file:
+            try:
+                data.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON in file {file_path}: {e}")
+    return data
+
+def load_custom_label(custom_label_file):
+    custom_label_map = {}
+    custom_labels = read_jsonl(custom_label_file)
+    for custom_label in custom_labels:
+        filepath = custom_label["method_code_path"]
+        function_name = custom_label["function_name"]
+        method_input_hash = custom_label["method_input_hash"]
+        custom_label_map[(filepath, function_name, method_input_hash)] = custom_label
+    print(f"custom_label_map: {len(custom_label_map)}")
+    return custom_label_map
+
+def tokenize_code(gt_branch, tokenizer):
+    function_name = gt_branch['function_name']
+    method_input_json = gt_branch['method_input_json']
+    coverage_index = gt_branch['coverage_index']
+    pattern = rf"def {re.escape(function_name)}\(.*?\):"
+    method_code = gt_branch['method_code']
+    if pattern not in method_code:
+        print(f"Function {function_name} not found in coverage_index {coverage_index}")
+        print(method_code)
+        return None, None, None, None
+    
+    branch_pattern = r"## \[BRANCH\]taken=\?\?(\[\]?)(?!\[BRANCH\]|:)"
+    replacement = r"## \[BRANCH\]taken=\?\?\1"
+    method_code = re.sub(branch_pattern, replacement, method_code)
+    branch_markers = re.finditer(r"## \[BRANCH\]taken=\?\?(\[\]?)(?!\[BRANCH\]|:)", method_code)
+    branch_markers_indices = [m.span() for m in branch_markers]
+    pattern = rf"def {re.escape(function_name)}\(.*?\):"
+    match = re.search(pattern, method_code)
+    if match is not None:
+        start_index = match.end()
+    else:
+        print("error: function not found")
+        return None, None, None, None
+    code_after_function = method_code[start_index:]
+    
+    method_input_str = json.dumps(method_input_json, indent=4)
+    prompt = f"[PYTHON]\n{code_after_function}\n[/PYTHON]\n\nThe input to the method ```{function_name}``` is:\n```\n{method_input_str}\n```\nComplete the branch annotation in the code with \"Y\" and \"N\".\n"
+    print(f"prompt: {prompt}")
+
+    inputs = tokenizer(prompt, return_tensors="pt")
+    labels = tokenizer(code_after_function, return_tensors="pt")
+
+    branch_marker_pos_start = [0] * len(branch_markers_indices)
+    branch_marker_pos_end = [0] * len(branch_markers_indices)
+    for i, (branch_marker_start, branch_marker_end) in enumerate(branch_markers_indices):
+        branch_marker_pos_start[i] = labels.char_to_token(branch_marker_start, offset=1)
+        branch_marker_pos_end[i] = labels.char_to_token(branch_marker_end-1, offset=1)
+        if branch_marker_pos_start[i] == None or branch_marker_pos_end[i] == None:
+            print("error: branch marker not found")
+            return None, None, None, None
+    return inputs, labels, branch_marker_pos_start, branch_marker_pos_end
+
+def extract_y_n_from_gpt_generated_code(answer):
+    # print("answer: ")
+    # print(answer)
+    y_n = ''
+    y_n_match = re.search(r"\[BRANCH\]taken=\[(.*?)\]", answer)
+    if y_n_match:
+        y_n = y_n_match.group(1)
+    # print(f"y_n: {y_n}")
+    return y_n
+
+def eval_one_branch(gt_branch, custom_label_map, tokenizer):
+    function_name = gt_branch['function_name']
+    method_input_json = gt_branch['method_input_json']
+    coverage_index = gt_branch['coverage_index']
+    
+    method_input_hash = gt_branch['method_input_hash']
+    method_code_hash = gt_branch['method_code_hash']
+    filepath = gt_branch['filepath']
+    function_input_key = (filepath, function_name, method_input_hash)
+    branch_label_gt = None
+    custom_label_gt = custom_label_map.get(function_input_key, None)
+    if custom_label_gt:
+        branch_label_gt = custom_label_gt["branch_label"]
+    else:
+        print(f"gt_label not found for {function_input_key}")
+        return 0.0, 0.0, 0.0
+    
+    inputs, labels, branch_marker_pos_start, branch_marker_pos_end = tokenize_code(gt_branch, tokenizer)
+    if inputs == None or labels == None or branch_marker_pos_start == None or branch_marker_pos_end == None:
+        print(f"error in tokenize_code for {function_name} {method_input_hash}")
+        return 0.0, 0.0, 0.0
+
+    y_n = ''.join(branch_label_gt)
+    y_n = [y_n[i:i+2] for i in range(0, len(y_n), 2)]
+    branch_markers = [i for i, x in enumerate(branch_marker_pos_start) if x < 4096]
+    branch_marker_pos_start = [x for x in branch_marker_pos_start if x < 4096]
+    branch_marker_pos_end = [x for x in branch_marker_pos_end if x < 4096]
+    y_n = y_n[:len(branch_marker_pos_start)]
+    if len(branch_marker_pos_start) != len(branch_marker_pos_end) or len(branch_marker_pos_start) != len(y_n):
+        print(f"len(branch_marker_pos_start) != len(branch_marker_pos_end) for {function_name} {method_input_hash}")
+        return 0.0, 0.0, 0.0
+    if len(branch_marker_pos_start) == 

@@ -1,0 +1,305 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. You need to predict output variable values, and print output between [OUTPUT] and [/OUTPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[PYTHON]
+from abc import ABCMeta, abstractmethod
+from numbers import Integral, Real
+import numpy as np
+from scipy.sparse import issparse
+from sklearn.base import BaseEstimator, ClassifierMixin, MultiOutputMixin, RegressorMixin, _fit_context, clone, is_classifier
+from sklearn.tree._utils import _any_isnan_axis0
+from sklearn.utils import Bunch, check_random_state, compute_sample_weight, metadata_routing
+from sklearn.utils._param_validation import Hidden, Interval, RealNotInt, StrOptions
+from sklearn.utils.validation import _assert_all_finite_element_wise, _check_n_features, _check_sample_weight, assert_all_finite, check_is_fitted, validate_data
+
+class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
+    __metadata_request__predict = {'check_input': metadata_routing.UNUSED}
+    _parameter_constraints: dict = {'splitter': [StrOptions({'best', 'random'})], 'max_depth': [Interval(Integral, 1, None, closed='left'), None], 'min_samples_split': [Interval(Integral, 2, None, closed='left'), Interval(RealNotInt, 0.0, 1.0, closed='right')], 'min_samples_leaf': [Interval(Integral, 1, None, closed='left'), Interval(RealNotInt, 0.0, 1.0, closed='neither')], 'min_weight_fraction_leaf': [Interval(Real, 0.0, 0.5, closed='both')], 'max_features': [Interval(Integral, 1, None, closed='left'), Interval(RealNotInt, 0.0, 1.0, closed='right'), StrOptions({'sqrt', 'log2'}), None], 'random_state': ['random_state'], 'max_leaf_nodes': [Interval(Integral, 2, None, closed='left'), None], 'min_impurity_decrease': [Interval(Real, 0.0, None, closed='left')], 'ccp_alpha': [Interval(Real, 0.0, None, closed='left')], 'monotonic_cst': ['array-like', None]}
+
+    @abstractmethod
+    def __init__(self, *, criterion, splitter, max_depth, min_samples_split, min_samples_leaf, min_weight_fraction_leaf, max_features, max_leaf_nodes, random_state, min_impurity_decrease, class_weight=None, ccp_alpha=0.0, monotonic_cst=None):
+        self.criterion = criterion
+        self.splitter = splitter
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.min_weight_fraction_leaf = min_weight_fraction_leaf
+        self.max_features = max_features
+        self.max_leaf_nodes = max_leaf_nodes
+        self.random_state = random_state
+        self.min_impurity_decrease = min_impurity_decrease
+        self.class_weight = class_weight
+        self.ccp_alpha = ccp_alpha
+        self.monotonic_cst = monotonic_cst
+
+    def _support_missing_values(self, X):
+        return not issparse(X) and self.__sklearn_tags__().input_tags.allow_nan and (self.monotonic_cst is None)
+
+    def _compute_missing_values_in_feature_mask(self, X, estimator_name=None):
+        estimator_name = estimator_name or self.__class__.__name__
+        common_kwargs = dict(estimator_name=estimator_name, input_name='X')
+        if not self._support_missing_values(X):
+            assert_all_finite(X, **common_kwargs)
+            return None
+        with np.errstate(over='ignore'):
+            overall_sum = np.sum(X)
+        if not np.isfinite(overall_sum):
+            _assert_all_finite_element_wise(X, xp=np, allow_nan=True, **common_kwargs)
+        if not np.isnan(overall_sum):
+            return None
+        missing_values_in_feature_mask = _any_isnan_axis0(X)
+        return missing_values_in_feature_mask
+
+    def __sklearn_tags__(self):
+        tags = super().__sklearn_tags__()
+        tags.input_tags.sparse = True
+        return tags
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.tree._classes._support_missing_values
+
+def _support_missing_values(self, X):
+    return (
+        not issparse(X)
+        and self.__sklearn_tags__().input_tags.allow_nan
+        and self.monotonic_cst is None
+    )
+
+scikit-learn.sklearn.utils.validation._assert_all_finite_element_wise
+
+def _assert_all_finite_element_wise(
+    X, *, xp, allow_nan, msg_dtype=None, estimator_name=None, input_name=""
+):
+    # Cython implementation doesn't support FP16 or complex numbers
+    use_cython = (
+        xp is np and X.data.contiguous and X.dtype.type in {np.float32, np.float64}
+    )
+    if use_cython:
+        out = cy_isfinite(X.reshape(-1), allow_nan=allow_nan)
+        has_nan_error = False if allow_nan else out == FiniteStatus.has_nan
+        has_inf = out == FiniteStatus.has_infinite
+    else:
+        has_inf = xp.any(xp.isinf(X))
+        has_nan_error = False if allow_nan else xp.any(xp.isnan(X))
+    if has_inf or has_nan_error:
+        if has_nan_error:
+            type_err = "NaN"
+        else:
+            msg_dtype = msg_dtype if msg_dtype is not None else X.dtype
+            type_err = f"infinity or a value too large for {msg_dtype!r}"
+        padded_input_name = input_name + " " if input_name else ""
+        msg_err = f"Input {padded_input_name}contains {type_err}."
+        if estimator_name and input_name == "X" and has_nan_error:
+            # Improve the error message on how to handle missing values in
+            # scikit-learn.
+            msg_err += (
+                f"\n{estimator_name} does not accept missing values"
+                " encoded as NaN natively. For supervised learning, you might want"
+                " to consider sklearn.ensemble.HistGradientBoostingClassifier and"
+                " Regressor which accept missing values encoded as NaNs natively."
+                " Alternatively, it is possible to preprocess the data, for"
+                " instance by using an imputer transformer in a pipeline or drop"
+                " samples with missing values. See"
+                " https://scikit-learn.org/stable/modules/impute.html"
+                " You can find a list of all estimators that handle NaN values"
+                " at the following page:"
+                " https://scikit-learn.org/stable/modules/impute.html"
+                "#estimators-that-handle-nan-values"
+            )
+        raise ValueError(msg_err)
+
+scikit-learn.sklearn.utils.validation.assert_all_finite
+
+def assert_all_finite(
+    X,
+    *,
+    allow_nan=False,
+    estimator_name=None,
+    input_name="",
+):
+    """Throw a ValueError if X contains NaN or infinity.
+
+    Parameters
+    ----------
+    X : {ndarray, sparse matrix}
+        The input data.
+
+    allow_nan : bool, default=False
+        If True, do not throw error when `X` contains NaN.
+
+    estimator_name : str, default=None
+        The estimator name, used to construct the error message.
+
+    input_name : str, default=""
+        The data name used to construct the error message. In particular
+        if `input_name` is "X" and the data has NaN values and
+        allow_nan is False, the error message will link to the imputer
+        documentation.
+
+    Examples
+    --------
+    >>> from sklearn.utils import assert_all_finite
+    >>> import numpy as np
+    >>> array = np.array([1, np.inf, np.nan, 4])
+    >>> try:
+    ...     assert_all_finite(array)
+    ...     print("Test passed: Array contains only finite values.")
+    ... except ValueError:
+    ...     print("Test failed: Array contains non-finite values.")
+    Test failed: Array contains non-finite values.
+    """
+    _assert_all_finite(
+        X.data if sp.issparse(X) else X,
+        allow_nan=allow_nan,
+        estimator_name=estimator_name,
+        input_name=input_name,
+    )
+
+
+[/PYTHON]
+What will be the output of `_compute_missing_values_in_feature_mask`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "criterion": "gini",
+        "splitter": "best",
+        "max_depth": 2,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "min_weight_fraction_leaf": 0.0,
+        "max_features": null,
+        "max_leaf_nodes": null,
+        "random_state": 643999637,
+        "min_impurity_decrease": 0.0,
+        "class_weight": null,
+        "ccp_alpha": 0.0,
+        "monotonic_cst": null,
+        "n_features_in_": 4
+    },
+    "args": {
+        "X": "array([[3.1, 0.2, 0.2, 4.8],\n       [3.4, 2.3, 2.3, 6.2],\n       [2.9, 1.3, 1.3, 6.4],\n       [4.2, 0.2, 0.2, 5.5],\n       [3.2, 1.8, 1.8, 5.9],\n       [3.5, 0.6, 0.6, 5. ],\n       [2.6, 1.4, 1.4, 6.1],\n       [3.4, 1.6, 1.6, 6. ],\n       [3.8, 2. , 2. , 7.9],\n       [3.7, 0.4, 0.4, 5.1],\n       [3. , 1.8, 1.8, 6. ],\n       [2.8, 1.3, 1.3, 5.7],\n       [3. , 0.1, 0.1, 4.3],\n       [2.4, 1. , 1. , 5.5],\n       [2.5, 1.7, 1.7, 4.9],\n       [3.6, 2.5, 2.5, 7.2],\n       [3.2, 0.2, 0.2, 4.7],\n       [3. , 1.7, 1.7, 6.7],\n       [3.1, 0.2, 0.2, 4.9],\n       [2.9, 1.8, 1.8, 6.3],\n       [2.5, 1.1, 1.1, 5.6],\n       [2.7, 1. , 1. , 5.8],\n       [3. , 2.2, 2.2, 6.5],\n       [3.1, 1.8, 1.8, 6.4],\n       [3.9, 0.4, 0.4, 5.4],\n       [2.5, 2. , 2. , 5.7],\n       [2.9, 1.3, 1.3, 5.6],\n       [3.2, 2. , 2. , 6.5],\n       [2.3, 0.3, 0.3, 4.5],\n       [3.3, 0.2, 0.2, 5. ],\n       [2.2, 1.5, 1.5, 6. ],\n       [2.8, 1.5, 1.5, 6.5],\n       [3.3, 0.5, 0.5, 5.1],\n       [3.1, 2.1, 2.1, 6.9],\n       [2.8, 2. , 2. , 5.6],\n       [3.6, 0.1, 0.1, 4.9],\n       [3.3, 1.6, 1.6, 6.3],\n       [2.9, 1.8, 1.8, 7.3],\n       [3.2, 0.2, 0.2, 4.6],\n       [3. , 1.6, 1.6, 7.2],\n       [3.5, 0.3, 0.3, 5. ],\n       [3.7, 0.2, 0.2, 5.3],\n       [3. , 1.4, 1.4, 6.6],\n       [3.2, 0.2, 0.2, 4.4],\n       [2.8, 1.2, 1.2, 6.1],\n       [2.3, 1.3, 1.3, 5.5],\n       [4. , 0.2, 0.2, 5.8],\n       [3. , 2.1, 2.1, 7.6],\n       [2.7, 1.2, 1.2, 5.8],\n       [3. , 1.8, 1.8, 6.5],\n       [3.2, 1.5, 1.5, 6.4],\n       [3.2, 0.2, 0.2, 5. ],\n       [2.8, 1.9, 1.9, 7.4],\n       [3.2, 0.2, 0.2, 4.7],\n       [3.8, 2.2, 2.2, 7.7],\n       [2.2, 1. , 1. , 6. ],\n       [3.4, 0.4, 0.4, 5.4],\n       [2.9, 1.3, 1.3, 6.6],\n       [3.1, 2.3, 2.3, 6.9],\n       [3.4, 0.2, 0.2, 5. ],\n       [2.6, 1. , 1. , 5.7],\n       [2.6, 1.2, 1.2, 5.5],\n       [3. , 1.5, 1.5, 5.9],\n       [3.3, 2.5, 2.5, 6.3],\n       [2.4, 1.1, 1.1, 5.5],\n       [3.5, 0.2, 0.2, 5.5],\n       [3.5, 0.2, 0.2, 5.1],\n       [2.8, 2.4, 2.4, 5.8],\n       [2.8, 2.2, 2.2, 6.4],\n       [2.3, 1. , 1. , 5. ],\n       [2.8, 1.5, 1.5, 6.3],\n       [3.1, 0.2, 0.2, 4.6],\n       [2.7, 1.4, 1.4, 5.2],\n       [2.9, 0.2, 0.2, 4.4],\n       [3.1, 1.5, 1.5, 6.9],\n       [3. , 1.5, 1.5, 5.4],\n       [4.1, 0.1, 0.1, 5.2],\n       [2.5, 1.9, 1.9, 6.3],\n       [3. , 2.3, 2.3, 6.7],\n       [2.5, 1.3, 1.3, 5.5],\n       [3.5, 0.2, 0.2, 5.2],\n       [3.4, 0.2, 0.2, 5.1],\n       [2.9, 1.4, 1.4, 6.1],\n       [3.8, 0.3, 0.3, 5.1],\n       [3.9, 0.4, 0.4, 5.4],\n       [3.4, 0.4, 0.4, 5. ],\n       [3.2, 2.3, 2.3, 6.4],\n       [2.5, 1.8, 1.8, 6.7],\n       [3.1, 2.4, 2.4, 6.7],\n       [3.5, 0.3, 0.3, 5.1],\n       [3. , 0.1, 0.1, 4.8],\n       [2.2, 1.5, 1.5, 6.2],\n       [2.4, 1. , 1. , 4.9],\n       [3.1, 0.1, 0.1, 4.9],\n       [3.4, 0.2, 0.2, 5.4],\n       [2.5, 1.1, 1.1, 5.1],\n       [3.6, 0.2, 0.2, 4.6],\n       [2.9, 1.3, 1.3, 5.7],\n       [3. , 1.3, 1.3, 5.6],\n       [2.3, 1.3, 1.3, 6.3],\n       [2.6, 1.2, 1.2, 5.8],\n       [3.2, 1.4, 1.4, 7. ],\n       [3.4, 0.2, 0.2, 4.8],\n       [2.7, 1.9, 1.9, 6.4],\n       [3.8, 0.2, 0.2, 5.1],\n       [3.8, 0.3, 0.3, 5.7],\n       [3. , 1.5, 1.5, 5.6],\n       [2.8, 1.3, 1.3, 6.1],\n       [3.2, 2.3, 2.3, 6.8],\n       [3.2, 1.8, 1.8, 7.2],\n       [3.1, 1.4, 1.4, 6.7],\n       [3.3, 2.5, 2.5, 6.7]], dtype=float32)",
+        "estimator_name": null
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]

@@ -1,0 +1,85 @@
+from scipy import linalg, optimize, sparse
+from sklearn.linear_model._base import (
+    LinearClassifierMixin,
+    LinearModel,
+    _preprocess_data,
+    _rescale_data,
+)
+from sklearn.preprocessing import LabelBinarizer
+from sklearn.utils import (
+    Bunch,
+    check_array,
+    check_consistent_length,
+    check_scalar,
+    column_or_1d,
+    compute_sample_weight,
+)
+from sklearn.utils._array_api import (
+    _is_numpy_namespace,
+    _max_precision_float_dtype,
+    _ravel,
+    device,
+    get_namespace,
+    get_namespace_and_device,
+    move_to,
+)
+from sklearn.utils.validation import (
+    _check_sample_weight,
+    check_is_fitted,
+    validate_data,
+)
+
+class _RidgeClassifierMixin(LinearClassifierMixin):
+
+    def _prepare_data(self, X, y, sample_weight, solver):
+        """Validate `X` and `y` and binarize `y`.
+
+        Parameters
+        ----------
+        X : {ndarray, sparse matrix} of shape (n_samples, n_features)
+            Training data.
+
+        y : ndarray of shape (n_samples,)
+            Target values.
+
+        sample_weight : float or ndarray of shape (n_samples,), default=None
+            Individual weights for each sample. If given a float, every sample
+            will have the same weight.
+
+        solver : str
+            The solver used in `Ridge` to know which sparse format to support.
+
+        Returns
+        -------
+        X : {ndarray, sparse matrix} of shape (n_samples, n_features)
+            Validated training data.
+
+        y : ndarray of shape (n_samples,)
+            Validated target values.
+
+        sample_weight : ndarray of shape (n_samples,)
+            Validated sample weights.
+
+        Y : ndarray of shape (n_samples, n_classes)
+            The binarized version of `y`.
+        """
+        accept_sparse = _get_valid_accept_sparse(sparse.issparse(X), solver)
+        xp, _, device_ = get_namespace_and_device(X)
+        sample_weight = move_to(sample_weight, xp=xp, device=device_)
+        X, y = validate_data(self, X, y, accept_sparse=accept_sparse, multi_output=True, y_numeric=False, force_writeable=True)
+        self._label_binarizer = LabelBinarizer(pos_label=1, neg_label=-1)
+        xp_y, y_is_array_api = get_namespace(y)
+        Y = self._label_binarizer.fit_transform(y)
+        Y = move_to(Y, xp=xp, device=device_)
+        if y_is_array_api and xp_y.isdtype(y.dtype, 'numeric'):
+            self.classes_ = move_to(self._label_binarizer.classes_, xp=xp, device=device_)
+        else:
+            self.classes_ = self._label_binarizer.classes_
+        if not self._label_binarizer.y_type_.startswith('multilabel'):
+            y = column_or_1d(y, warn=True)
+        sample_weight = _check_sample_weight(sample_weight, X, dtype=X.dtype)
+        if self.class_weight:
+            reweighting = compute_sample_weight(self.class_weight, y)
+            reweighting = move_to(reweighting, xp=xp, device=device_)
+            sample_weight = sample_weight * reweighting
+        return (X, y, sample_weight, Y)

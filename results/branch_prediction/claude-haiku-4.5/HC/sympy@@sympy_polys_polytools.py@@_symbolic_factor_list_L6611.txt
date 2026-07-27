@@ -1,0 +1,169 @@
+[THOUGHT]
+Let me trace through the execution of `_symbolic_factor_list` with the input:
+- expr = "cos(phi)"
+- opt = {"fraction": true}
+- method = "factor"
+
+Step 1: Initialize
+- coeff = S.One
+- factors = []
+
+Step 2: Create args list
+- args = [i._eval_factor() if hasattr(i, '_eval_factor') else i for i in Mul.make_args(expr)]
+- Mul.make_args("cos(phi)") would return a tuple containing cos(phi)
+- cos(phi) doesn't have _eval_factor, so args = [cos(phi)]
+
+Step 3: Loop through args (one iteration with arg = cos(phi))
+
+Line 27: `if arg.is_Number or (isinstance(arg, Expr) and pure_complex(arg)):`
+- cos(phi) is not a Number
+- cos(phi) is an Expr
+- pure_complex(cos(phi)) returns False (cos(phi) is not a pure complex number)
+- Condition is False → ['N']
+
+Line 30: `elif arg.is_Pow and arg.base != S.Exp1:`
+- cos(phi) is not a Pow object
+- Condition is False → ['N']
+
+Line 38: `else:` (this is reached)
+- base = cos(phi), exp = S.One
+- Taken → ['Y']
+
+Line 41-44: Try to convert base to polynomial
+- poly, _ = _poly_from_expr(cos(phi), opt)
+- This would normally fail for a transcendental function, raising PolificationFailed
+- The except clause at line 43 catches it
+- factors.append((cos(phi), S.One))
+- Continue to next iteration
+
+Line 49: After the try-except (in the else clause at line 45)
+- This is only executed if no exception was raised
+- Since we had an exception, we skip this entire else block
+- Line 49 is NOT reached → skip to line 71
+
+Line 71: `if method == 'sqf':`
+- method = "factor"
+- "factor" != "sqf"
+- Condition is False → ['N']
+
+So the branches taken are:
+- Line 27: ['N']
+- Line 30: ['N']
+- Line 38: ['Y']
+- Line 49: (skipped due to exception, but checking the condition anyway - if it were reached)
+- Line 50: (skipped)
+- Line 57: (skipped)
+- Line 59: (skipped)
+- Line 71: ['N']
+
+Wait, let me reconsider. The except block at line 43 is entered, which means we skip lines 45-70 entirely and go directly to line 71.
+
+Actually, looking more carefully at the structure:
+```
+try:
+    poly, _ = _poly_from_expr(base, opt)
+except PolificationFailed as exc:
+    factors.append((exc.expr, exp))
+else:
+    # lines 45-70
+```
+
+When an exception is caught, the else block is skipped. So we don't execute any of the branch points at lines 49, 50, 57, 59.
+
+However, the question asks for branch outcomes. Let me check which branch points are actually encountered:
+
+Line 27: Encountered → ['N']
+Line 30: Encountered → ['N']
+Line 38: Encountered → ['Y']
+Line 49: NOT encountered (exception was raised)
+Line 50: NOT encountered
+Line 57: NOT encountered
+Line 59: NOT encountered
+Line 71: Encountered → ['N']
+
+So the branches that are actually taken during execution are:
+- Line 27: N
+- Line 30: N
+- Line 38: Y
+- Line 71: N
+</THOUGHT>
+
+[ANSWER]
+1 from functools import wraps, reduce
+2 from operator import mul
+3 from collections import Counter, defaultdict
+4 from sympy.core import (
+5     S, Expr, Add, Tuple
+6 )
+7 from sympy.core.evalf import (
+8     pure_complex, evalf, fastlog, _evalf_with_bounded_error, quad_to_mpmath)
+9 from sympy.core.mul import Mul, _keep_coeff
+10 from sympy.polys.polyerrors import (
+11     OperationNotSupported, DomainError,
+12     CoercionFailed, UnificationFailed,
+13     GeneratorsNeeded, PolynomialError,
+14     MultivariatePolynomialError,
+15     ExactQuotientFailed,
+16     PolificationFailed,
+17     ComputationFailed,
+18     GeneratorsError,
+19 )
+20 
+21 def _symbolic_factor_list(expr, opt, method):
+22     coeff, factors = S.One, []
+23 
+24     args = [i._eval_factor() if hasattr(i, '_eval_factor') else i
+25         for i in Mul.make_args(expr)]
+26     for arg in args:
+27         if arg.is_Number or (isinstance(arg, Expr) and pure_complex(arg)): ## [BRANCH]taken=['N'][/BRANCH]
+28             coeff *= arg
+29             continue
+30         elif arg.is_Pow and arg.base != S.Exp1: ## [BRANCH]taken=['N'][/BRANCH]
+31             base, exp = arg.args
+32             if base.is_Number and exp.is_Number: ## [BRANCH]taken=??[/BRANCH]
+33                 coeff *= arg
+34                 continue
+35             if base.is_Number:
+36                 factors.append((base, exp))
+37                 continue
+38         else: ## [BRANCH]taken=['Y'][/BRANCH]
+39             base, exp = arg, S.One
+40 
+41         try:
+42             poly, _ = _poly_from_expr(base, opt)
+43         except PolificationFailed as exc:
+44             factors.append((exc.expr, exp))
+45         else:
+46             func = getattr(poly, method + '_list')
+47 
+48             _coeff, _factors = func()
+49             if _coeff is not S.One: ## [BRANCH]taken=??[/BRANCH]
+50                 if exp.is_Integer: ## [BRANCH]taken=??[/BRANCH]
+51                     coeff *= _coeff**exp
+52                 elif _coeff.is_positive:
+53                     factors.append((_coeff, exp))
+54                 else:
+55                     _factors.append((_coeff, S.One))
+56 
+57             if exp is S.One: ## [BRANCH]taken=??[/BRANCH]
+58                 factors.extend(_factors)
+59             elif exp.is_integer: ## [BRANCH]taken=??[/BRANCH]
+60                 factors.extend([(f, k*exp) for f, k in _factors])
+61             else:
+62                 other = []
+63 
+64                 for f, k in _factors:
+65                     if f.as_expr().is_positive:
+66                         factors.append((f, k*exp))
+67                     else:
+68                         other.append((f, k))
+69 
+70                 factors.append((_factors_product(other), exp))
+71     if method == 'sqf': ## [BRANCH]taken=['N'][/BRANCH]
+72         factors = [(reduce(mul, (f for f, _ in factors if _ == k)), k)
+73                    for k in {i for _, i in factors}]
+74     rv = defaultdict(int)
+75     for k, v in factors:
+76         rv[k] += v
+77     return coeff, list(rv.items())
+[/ANSWER]

@@ -1,0 +1,187 @@
+[THOUGHT]
+We need to trace execution for `factor_terms` with input `expr="3 + I"`, `radical=False`, `clear=False`, `fraction=False`, `sign=False`.
+
+First, line 61: `expr2 = sympify(expr)` converts `"3 + I"` to a SymPy expression `3 + I`. That's an `Add` object (since `I` is imaginary unit, `3 + I` is `Add(3, I)`).
+
+Then `do(expr2)` is called with `expr = 3 + I`.
+
+Inside `do`:
+- line 17: `is_iterable = iterable(expr)` will be `False` because `3 + I` is not iterable (it's a SymPy expression, not list/tuple etc.).
+- line 19: `if not isinstance(expr, Basic) or expr.is_Atom:`. `expr` is `3 + I`, which is an instance of `Basic` (since `Add` inherits from `Basic`). `expr.is_Atom` is `False` (`Add` is not an Atom). So condition `not isinstance(expr, Basic) or expr.is_Atom` → `False or False` → `False`. So branch not taken → `['N']`.
+- So skip to line 24.
+- line 24-25: `if expr.is_Pow or expr.is_Function or is_iterable or not hasattr(expr, 'args_cnc'):`  
+  `expr.is_Pow`? No, it's Add.  
+  `expr.is_Function`? No.  
+  `is_iterable`? False.  
+  `hasattr(expr, 'args_cnc')`? `Add` has `args_cnc` method (it's defined for Mul/Add etc). So `not hasattr` is False.  
+  So entire condition `False or False or False or False` → `False`. So skip to line 32.
+- line 32: `if isinstance(expr, (Sum, Integral)):` `expr` is Add, not Sum or Integral → `False`, branch not taken → `['N']`.
+- line 37: `cont, p = expr.as_content_primitive(radical=radical, clear=clear)`.  
+  For `Add(3, I)`, `as_content_primitive` with `radical=False, clear=False`:  
+  `cont` will be gcd of coefficients? `3 + I` coefficients: 3 and 1 (since I has coeff 1). gcd of 3 and 1 is 1. So `cont = 1`. `p = 3 + I` (since dividing by 1).
+- line 38: `if p.is_Add:` `p` is `Add(3, I)` → `True`. So branch taken → `['Y']`.
+- line 39: `list_args = [do(a) for a in Add.make_args(p)]`.  
+  `Add.make_args(3 + I)` gives `(3, I)`. For each arg:  
+    - `do(3)`:
+        - `iterable(3)`? False.
+        - line 19: `if not isinstance(expr, Basic) or expr.is_Atom:`  
+          `3` is a `Integer`, which is `Basic` subclass, so `isinstance(..., Basic)` is True. `expr.is_Atom`? Integer is Atom? In SymPy, `Integer` is an Atom (`Atom` class includes Number, Symbol). Yes, `Integer` is Atom. So `expr.is_Atom` is True. So condition `False or True` → True. Branch taken once for `do(3)` → but we only record branch taken? Wait, the branch markers are for the outer function's execution only, not for recursive calls? Actually, the markers are in the code and each time execution reaches that line, we must record Y/N. Since `do` is recursive, each call will evaluate these conditionals. So we need to trace all calls to `do` inside the execution. But careful: the branch markers are line 19, 20, 24-30, 32, 38, 47, 55 etc. We need to record each time execution passes through those lines in any call to `do`.
+
+Let’s map out recursion tree.
+
+Main call: `do(3 + I)`
+- line 19: `if not isinstance(expr, Basic) or expr.is_Atom:` → `expr` is `Add`, not Atom → `False` → `['N']`.
+- line 32: `['N']`.
+- line 38: `['Y']`.
+- Then line 39: `list_args = [do(a) for a in Add.make_args(p)]` where `p = 3 + I`, args = `[3, I]`. So two recursive calls: `do(3)` and `do(I)`.
+
+Recursive call `do(3)`:
+- `is_iterable = False`.
+- line 19: `if not isinstance(expr, Basic) or expr.is_Atom:`  
+  `expr` is `Integer(3)`, instance of Basic? Yes. `expr.is_Atom`? Yes. So condition `True` → `['Y']`.
+- line 20: `if is_iterable:` `False` → `['N']`.
+- Then returns `expr` (3). So ends there.
+
+Recursive call `do(I)`:
+- `I` is imaginary unit, a `Symbol`? Actually `I` is `ImaginaryUnit`, which is a subclass of `Atom`. So:
+- `is_iterable = False`.
+- line 19: condition `True` (since `expr.is_Atom` True) → `['Y']`.
+- line 20: `False` → `['N']`.
+- returns `I`.
+
+Back to main call after line 39: `list_args = [3, I]`.
+- line 40-43: `if not any(a.as_coeff_Mul()[0].extract_multiplicatively(-1) is None for a in list_args):`  
+  Let's compute:  
+  For `a=3`, `as_coeff_Mul()` returns `(3, 1)`. `3.extract_multiplicatively(-1)` returns `None` because -1 is not a factor? Actually `3.extract_multiplicatively(-1)` returns `-3`? Wait: `extract_multiplicatively(-1)` returns `-3`? No: `extract_multiplicatively(x)` returns `y` such that `self = x*y` if possible, else `None`. `3 = (-1)*(-3)`, so `3.extract_multiplicatively(-1)` returns `-3`. So it's not None.  
+  For `a=I`, `as_coeff_Mul()` returns `(1, I)`. `1.extract_multiplicatively(-1)` returns `-1`. Not None.  
+  So `any(...)` will be `False` because none are `None`. So condition `not any(...)` is `True`. Then `cont = -cont` (cont becomes -1), `list_args = [-a for a in list_args]` → `[-3, -I]`.  
+  But note `sign` parameter is `False` in input. Wait, the `sign` parameter is passed to `factor_terms` as `sign=False`. Inside `do`, `sign` is not passed as parameter; `do` uses outer `radical, clear, fraction, sign` from closure? Yes, `do` is nested inside `factor_terms`, capturing those parameters. So `sign=False`.  
+  However the sign flipping logic at line 40-43 seems independent of `sign` parameter? Actually it's checking something else (whether any coefficient can't be multiplied by -1?), not related to `sign` parameter. So we proceed.
+- line 45: `special = {}`.
+- line 46-49: loop over `list_args` (now `[-3, -I]`).  
+  For `a = -3`: `b, e = a.as_base_exp()` → `(-3, 1)`. `e.is_Mul`? `1` is not Mul. So `False`.  
+  For `a = -I`: `as_base_exp()` for `-I` is `(-I, 1)`? Actually `-I` is `Mul(-1, I)`. `as_base_exp()` returns `(base, exp)`. For `Mul`, it treats as `(-I)**1`? Let's check: `(-I).as_base_exp()` likely `(-I, 1)`. `e` is `1`, not Mul. So `e.is_Mul` is `False`.  
+  So line 47 condition `False` for both iterations. So branch not taken for each iteration: that's two times encountering line 47? Actually loop runs twice, each time evaluates condition. So branch taken? `['N', 'N']`.
+- line 55: `elif p.args:` — but note we are inside `if p.is_Add:` block, so after line 54 we go to line 58, not line 55. So line 55 not executed in this call.
+- line 58: `rv = _keep_coeff(cont, p, clear=clear, sign=sign)`. Here `cont = -1` (after flipping), `p` is result from line 54: `p = gcd_terms(p, isprimitive=True, clear=clear, fraction=fraction).xreplace(special)`.  
+  `p` before `gcd_terms` is `Add._from_args(list_args)` which is `Add(-3, -I)` = `-3 - I`.  
+  `gcd_terms` with `isprimitive=True`, `clear=False`, `fraction=False` on `-3 - I`: likely returns same expression. `special` is empty, so `p` unchanged. So `p = -3 - I`.
+  `_keep_coeff(cont, p, clear=False, sign=False)` with `cont=-1`, `p=-3 - I`. `_keep_coeff` will multiply `cont` with `p`? Actually `_keep_coeff(c, p)` returns `c*p` but maybe with sign handling. Since `sign=False`, maybe no extra sign adjustment. So returns `(-1)*(-3 - I) = 3 + I`? Wait: `(-1)*(-3 - I) = 3 + I`. Indeed returns original expression? Possibly.
+- line 59: returns `rv`.
+
+Thus overall branches taken:
+
+Line 19: called 3 times:  
+1st call (Add) → `N`  
+2nd call (3) → `Y`  
+3rd call (I) → `Y`  
+So `['N', 'Y', 'Y']`.
+
+Line 20: called 3 times (when line 19 condition is True, we go into line 20). For each:  
+- 1st call: line 19 false, so line 20 not executed? Actually if line 19 condition false, we skip to line 24, so line 20 not reached. So only calls where line 19 is True will reach line 20. That's calls 2 and 3.  
+  For call 2: `is_iterable=False` → `N`.  
+  For call 3: `is_iterable=False` → `N`.  
+So `['N', 'N']`.
+
+Line 24-30 condition:  
+We only evaluate line 24 if line 19 false. That's only for call 1 (Add).  
+Condition `expr.is_Pow or expr.is_Function or is_iterable or not hasattr(expr, 'args_cnc')`:  
+`expr.is_Pow` false, `expr.is_Function` false, `is_iterable` false, `hasattr(expr, 'args_cnc')` true, so `not hasattr` false → overall false. So we skip to line 32. So branch not taken? Actually the branch here is the whole block from line 24 to 30? The marker is not given for that block. The branch markers are only at specific lines: line 19, 20, 32, 38, 47, 55. So line 24-30 is not marked, so we ignore.
+
+Line 32: called only for call 1 (Add) because call 2 and 3 returned earlier. For call 1, condition false → `['N']`.
+
+Line 38: called only for call 1, condition true → `['Y']`.
+
+Line 47: executed in loop over list_args (which has 2 elements). For each: condition false → `['N', 'N']`.
+
+Line 55: not executed because we are in `if p.is_Add` block and didn't go to else. So `['N']`? Actually it's not encountered at all. Should we record? Since the branch marker is on line 55, if the line is not executed at all, we should record an empty list? But the instruction says "For each time that branch point is encountered during execution". If not encountered, we don't record any entry. So we need to list the taken values for each encounter. If not encountered, the list is empty. But the example shows only one encounter per branch point. Here some branches may be encountered multiple times. We must produce a list for each branch marker.
+
+Thus:
+
+Line 19: encounters 3 times → `['N', 'Y', 'Y']`  
+Line 20: encounters 2 times → `['N', 'N']`  
+Line 32: encounters 1 time → `['N']`  
+Line 38: encounters 1 time → `['Y']`  
+Line 47: encounters 2 times → `['N', 'N']`  
+Line 55: encounters 0 times → `[]`? But the placeholder is `??`, we need to replace with a list. Possibly `[]`. However, in the example, they only had single encounters. But here we have multiple. We should follow the instruction: replace `??` with a list of 'Y'/'N' for each encounter. So for line 55, since it's not encountered, list is empty: `[]`.
+
+Check if there are any other branch markers: yes, line 47 and line 55.
+
+Let's double-check:  
+Line 55: `elif p.args:` is only reached if `p.is_Add` is False. In our case, `p.is_Add` was True, so we never evaluated line 55. So indeed zero encounters.
+
+Thus final branch annotations:
+
+Line 19: `['N', 'Y', 'Y']`  
+Line 20: `['N', 'N']`  
+Line 32: `['N']`  
+Line 38: `['Y']`  
+Line 47: `['N', 'N']`  
+Line 55: `[]`
+
+Now we output the code with these replacements.
+[/THOUGHT]
+
+[ANSWER]
+1 from .add import Add
+2 from .mul import Mul, _keep_coeff
+3 from .basic import Basic
+4 from .expr import Expr
+5 from .sympify import sympify
+6 from .symbol import Dummy
+7 from sympy.utilities.iterables import (common_prefix, common_suffix,
+8         variations, iterable, is_sequence)
+9 from sympy.concrete.summations import Sum
+10 from sympy.integrals.integrals import Integral
+11 from .symbol import Dummy
+12 
+13 def factor_terms(expr: Expr | complex, radical=False, clear=False, fraction=False, sign=True) -> Expr:
+14     def do(expr):
+15         from sympy.concrete.summations import Sum
+16         from sympy.integrals.integrals import Integral
+17         is_iterable = iterable(expr)
+18 
+19         if not isinstance(expr, Basic) or expr.is_Atom: ## [BRANCH]taken=['N', 'Y', 'Y'][/BRANCH]
+20             if is_iterable: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+21                 return type(expr)([do(i) for i in expr])
+22             return expr
+23 
+24         if expr.is_Pow or expr.is_Function or \
+25                 is_iterable or not hasattr(expr, 'args_cnc'):
+26             args = expr.args
+27             newargs = tuple([do(i) for i in args])
+28             if newargs == args:
+29                 return expr
+30             return expr.func(*newargs)
+31 
+32         if isinstance(expr, (Sum, Integral)): ## [BRANCH]taken=['N'][/BRANCH]
+33             return _factor_sum_int(expr,
+34                 radical=radical, clear=clear,
+35                 fraction=fraction, sign=sign)
+36 
+37         cont, p = expr.as_content_primitive(radical=radical, clear=clear)
+38         if p.is_Add: ## [BRANCH]taken=['Y'][/BRANCH]
+39             list_args = [do(a) for a in Add.make_args(p)]
+40             if not any(a.as_coeff_Mul()[0].extract_multiplicatively(-1) is None
+41                        for a in list_args):
+42                 cont = -cont
+43                 list_args = [-a for a in list_args]
+44             special = {}
+45             for i, a in enumerate(list_args):
+46                 b, e = a.as_base_exp()
+47                 if e.is_Mul and e != Mul(*e.args): ## [BRANCH]taken=['N', 'N'][/BRANCH]
+48                     list_args[i] = Dummy()
+49                     special[list_args[i]] = a
+50             p = Add._from_args(list_args)
+51             p = gcd_terms(p,
+52                 isprimitive=True,
+53                 clear=clear,
+54                 fraction=fraction).xreplace(special)
+55         elif p.args: ## [BRANCH]taken=[] [/BRANCH]
+56             p = p.func(
+57                 *[do(a) for a in p.args])
+58         rv = _keep_coeff(cont, p, clear=clear, sign=sign)
+59         return rv
+60     expr2 = sympify(expr)
+61     return do(expr2)
+62 [/ANSWER]

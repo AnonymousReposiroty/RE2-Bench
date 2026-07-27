@@ -1,0 +1,109 @@
+[THOUGHT]
+The constructor's loop iterates over the sequence "attrs" produced earlier by _transform_attrs. The code checks each attribute object's "validator" and "converter" attributes; "attrs" itself does not change during the loop. The concrete contents of "attrs" are not provided by the input (we only know the builder instance self refers to a class HypClass), so I'll represent the elements symbolically as attribute objects a0, a1, a2. The loop will iterate once per attribute, so "a" will take values [a0, a1, a2] and "attrs" will remain the same list on each iteration; thus the "attrs" state is repeated for each iteration: [[a0,a1,a2], [a0,a1,a2], [a0,a1,a2]].
+[/THOUGHT]
+
+[ANSWER]
+1 from __future__ import annotations
+2 import contextlib
+3 import inspect
+4 from collections.abc import Callable, Mapping
+5 from typing import Any, NamedTuple, TypeVar
+6 from . import _compat, _config, setters
+7 
+8 class _ClassBuilder:
+9     __slots__ = ('_add_method_dunders', '_attr_names', '_attrs', '_base_attr_map', '_base_names', '_cache_hash', '_cls', '_cls_dict', '_delete_attribs', '_frozen', '_has_custom_setattr', '_has_post_init', '_has_pre_init', '_is_exc', '_on_setattr', '_pre_init_has_args', '_repr_added', '_script_snippets', '_slots', '_weakref_slot', '_wrote_own_setattr')
+10 
+11     def __init__(self, cls: type, these, auto_attribs: bool, props: ClassProps, has_custom_setattr: bool):
+12         attrs, base_attrs, base_map = _transform_attrs(cls, these, auto_attribs, props.kw_only, props.collected_fields_by_mro, props.field_transformer)
+13         self._cls = cls
+14         self._cls_dict = dict(cls.__dict__) if props.is_slotted else {}
+15         self._attrs = attrs
+16         self._base_names = {a.name for a in base_attrs}
+17         self._base_attr_map = base_map
+18         self._attr_names = tuple((a.name for a in attrs))
+19         self._slots = props.is_slotted
+20         self._frozen = props.is_frozen
+21         self._weakref_slot = props.has_weakref_slot
+22         self._cache_hash = props.hashability is ClassProps.Hashability.HASHABLE_CACHED
+23         self._has_pre_init = bool(getattr(cls, '__attrs_pre_init__', False))
+24         self._pre_init_has_args = False
+25         if self._has_pre_init:
+26             pre_init_func = cls.__attrs_pre_init__
+27             pre_init_signature = inspect.signature(pre_init_func)
+28             self._pre_init_has_args = len(pre_init_signature.parameters) > 1
+29         self._has_post_init = bool(getattr(cls, '__attrs_post_init__', False))
+30         self._delete_attribs = not bool(these)
+31         self._is_exc = props.is_exception
+32         self._on_setattr = props.on_setattr_hook
+33         self._has_custom_setattr = has_custom_setattr
+34         self._wrote_own_setattr = False
+35         self._cls_dict['__attrs_attrs__'] = self._attrs
+36         self._cls_dict['__attrs_props__'] = props
+37         if props.is_frozen:
+38             self._cls_dict['__setattr__'] = _frozen_setattrs
+39             self._cls_dict['__delattr__'] = _frozen_delattrs
+40             self._wrote_own_setattr = True
+41         elif self._on_setattr in (_DEFAULT_ON_SETATTR, setters.validate, setters.convert):
+42             has_validator = has_converter = False
+43             for a in attrs: ## [STATE]a=['a0','a1','a2'][/STATE] [STATE]attrs=[['a0','a1','a2'], ['a0','a1','a2'], ['a0','a1','a2']][/STATE]
+44                 if a.validator is not None:
+45                     has_validator = True
+46                 if a.converter is not None:
+47                     has_converter = True
+48                 if has_validator and has_converter:
+49                     break
+50             if self._on_setattr == _DEFAULT_ON_SETATTR and (not (has_validator or has_converter)) or (self._on_setattr == setters.validate and (not has_validator)) or (self._on_setattr == setters.convert and (not has_converter)):
+51                 self._on_setattr = None
+52         if props.added_pickling:
+53             self._cls_dict['__getstate__'], self._cls_dict['__setstate__'] = self._make_getstate_setstate()
+54         self._script_snippets: list[tuple[str, dict, Callable[[dict, dict], Any]]] = []
+55         self._repr_added = False
+56         if not hasattr(self._cls, '__module__') or not hasattr(self._cls, '__qualname__'):
+57             self._add_method_dunders = self._add_method_dunders_safe
+58         else:
+59             self._add_method_dunders = self._add_method_dunders_unsafe
+60 
+61     def _make_getstate_setstate(self):
+62         state_attr_names = tuple((an for an in self._attr_names if an != '__weakref__'))
+63 
+64         def slots_getstate(self):
+65             return {name: getattr(self, name) for name in state_attr_names}
+66         hash_caching_enabled = self._cache_hash
+67 
+68         def slots_setstate(self, state):
+69             __bound_setattr = _OBJ_SETATTR.__get__(self)
+70             if isinstance(state, tuple):
+71                 for name, value in zip(state_attr_names, state):
+72                     __bound_setattr(name, value)
+73             else:
+74                 for name in state_attr_names:
+75                     if name in state:
+76                         __bound_setattr(name, state[name])
+77             if hash_caching_enabled:
+78                 __bound_setattr(_HASH_CACHE_FIELD, None)
+79         return (slots_getstate, slots_setstate)
+80 
+81     def add_attrs_init(self):
+82         script, globs, annotations = _make_init_script(self._cls, self._attrs, self._has_pre_init, self._pre_init_has_args, self._has_post_init, self._frozen, self._slots, self._cache_hash, self._base_attr_map, self._is_exc, self._on_setattr, attrs_init=True)
+83 
+84         def _attach_attrs_init(cls_dict, globs):
+85             init = globs['__attrs_init__']
+86             init.__annotations__ = annotations
+87             cls_dict['__attrs_init__'] = self._add_method_dunders(init)
+88         self._script_snippets.append((script, globs, _attach_attrs_init))
+89         return self
+90 
+91     def _add_method_dunders_unsafe(self, method: Callable) -> Callable:
+92         method.__module__ = self._cls.__module__
+93         method.__qualname__ = f'{self._cls.__qualname__}.{method.__name__}'
+94         method.__doc__ = f'Method generated by attrs for class {self._cls.__qualname__}.'
+95         return method
+96 
+97     def _add_method_dunders_safe(self, method: Callable) -> Callable:
+98         with contextlib.suppress(AttributeError):
+99             method.__module__ = self._cls.__module__
+100         with contextlib.suppress(AttributeError):
+101             method.__qualname__ = f'{self._cls.__qualname__}.{method.__name__}'
+102         with contextlib.suppress(AttributeError):
+103             method.__doc__ = f'Method generated by attrs for class {self._cls.__qualname__}.'
+104         return method

@@ -1,0 +1,1 @@
+from django.contrib.admindocs.utils import replace_named_groups

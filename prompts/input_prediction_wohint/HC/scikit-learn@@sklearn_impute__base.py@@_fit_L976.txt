@@ -1,0 +1,358 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import numpy as np
+from scipy import sparse as sp
+from sklearn.base import BaseEstimator, TransformerMixin, _fit_context
+from sklearn.utils._mask import _get_mask
+from sklearn.utils._missing import is_pandas_na, is_scalar_nan
+from sklearn.utils._param_validation import MissingValues, StrOptions
+from sklearn.utils.validation import FLOAT_DTYPES, _check_feature_names_in, _check_n_features, check_is_fitted, validate_data
+
+class MissingIndicator(TransformerMixin, BaseEstimator):
+    _parameter_constraints: dict = {'missing_values': [MissingValues()], 'features': [StrOptions({'missing-only', 'all'})], 'sparse': ['boolean', StrOptions({'auto'})], 'error_on_new': ['boolean']}
+
+    def __init__(self, *, missing_values=np.nan, features='missing-only', sparse='auto', error_on_new=True):
+        self.missing_values = missing_values
+        self.features = features
+        self.sparse = sparse
+        self.error_on_new = error_on_new
+
+    def _get_missing_features_info(self, X):
+        if not self._precomputed:
+            imputer_mask = _get_mask(X, self.missing_values)
+        else:
+            imputer_mask = X
+        if sp.issparse(X):
+            imputer_mask.eliminate_zeros()
+            if self.features == 'missing-only':
+                n_missing = imputer_mask.sum(axis=0)
+            if self.sparse is False:
+                imputer_mask = imputer_mask.toarray()
+            elif imputer_mask.format == 'csr':
+                imputer_mask = imputer_mask.tocsc()
+        else:
+            if not self._precomputed:
+                imputer_mask = _get_mask(X, self.missing_values)
+            else:
+                imputer_mask = X
+            if self.features == 'missing-only':
+                n_missing = imputer_mask.sum(axis=0)
+            if self.sparse is True:
+                imputer_mask = sp.csc_matrix(imputer_mask)
+        if self.features == 'all':
+            features_indices = np.arange(X.shape[1])
+        else:
+            features_indices = np.flatnonzero(n_missing)
+        return (imputer_mask, features_indices)
+
+    def _validate_input(self, X, in_fit):
+        if not is_scalar_nan(self.missing_values):
+            ensure_all_finite = True
+        else:
+            ensure_all_finite = 'allow-nan'
+        X = validate_data(self, X, reset=in_fit, accept_sparse=('csc', 'csr'), dtype=None, ensure_all_finite=ensure_all_finite)
+        _check_inputs_dtype(X, self.missing_values)
+        if X.dtype.kind not in ('i', 'u', 'f', 'O'):
+            raise ValueError('MissingIndicator does not support data with dtype {0}. Please provide either a numeric array (with a floating point or integer dtype) or categorical data represented either as an array with integer dtype or an array of string values with an object dtype.'.format(X.dtype))
+        if sp.issparse(X) and self.missing_values == 0:
+            raise ValueError('Sparse input with missing_values=0 is not supported. Provide a dense array instead.')
+        return X
+
+    def _fit(self, X, y=None, precomputed=False):
+        if precomputed:
+            if not (hasattr(X, 'dtype') and X.dtype.kind == 'b'):
+                raise ValueError('precomputed is True but the input data is not a mask')
+            self._precomputed = True
+        else:
+            self._precomputed = False
+        if not self._precomputed:
+            X = self._validate_input(X, in_fit=True)
+        else:
+            _check_n_features(self, X, reset=True)
+        self._n_features = X.shape[1]
+        missing_features_info = self._get_missing_features_info(X)
+        self.features_ = missing_features_info[1]
+        return missing_features_info[0]
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.impute._base._get_missing_features_info
+
+def _get_missing_features_info(self, X):
+    """Compute the imputer mask and the indices of the features
+    containing missing values.
+
+    Parameters
+    ----------
+    X : {ndarray, sparse matrix} of shape (n_samples, n_features)
+        The input data with missing values. Note that `X` has been
+        checked in :meth:`fit` and :meth:`transform` before to call this
+        function.
+
+    Returns
+    -------
+    imputer_mask : {ndarray, sparse matrix} of shape \
+    (n_samples, n_features)
+        The imputer mask of the original data.
+
+    features_with_missing : ndarray of shape (n_features_with_missing)
+        The features containing missing values.
+    """
+    if not self._precomputed:
+        imputer_mask = _get_mask(X, self.missing_values)
+    else:
+        imputer_mask = X
+
+    if sp.issparse(X):
+        imputer_mask.eliminate_zeros()
+
+        if self.features == "missing-only":
+            # count number of True values in each row.
+            n_missing = imputer_mask.sum(axis=0)
+
+        if self.sparse is False:
+            imputer_mask = imputer_mask.toarray()
+        elif imputer_mask.format == "csr":
+            imputer_mask = imputer_mask.tocsc()
+    else:
+        if not self._precomputed:
+            imputer_mask = _get_mask(X, self.missing_values)
+        else:
+            imputer_mask = X
+
+        if self.features == "missing-only":
+            n_missing = imputer_mask.sum(axis=0)
+
+        if self.sparse is True:
+            imputer_mask = sp.csc_matrix(imputer_mask)
+
+    if self.features == "all":
+        features_indices = np.arange(X.shape[1])
+    else:
+        features_indices = np.flatnonzero(n_missing)
+
+    return imputer_mask, features_indices
+
+scikit-learn.sklearn.impute._base._validate_input
+
+def _validate_input(self, X, in_fit):
+    if not is_scalar_nan(self.missing_values):
+        ensure_all_finite = True
+    else:
+        ensure_all_finite = "allow-nan"
+    X = validate_data(
+        self,
+        X,
+        reset=in_fit,
+        accept_sparse=("csc", "csr"),
+        dtype=None,
+        ensure_all_finite=ensure_all_finite,
+    )
+    _check_inputs_dtype(X, self.missing_values)
+    if X.dtype.kind not in ("i", "u", "f", "O"):
+        raise ValueError(
+            "MissingIndicator does not support data with "
+            "dtype {0}. Please provide either a numeric array"
+            " (with a floating point or integer dtype) or "
+            "categorical data represented either as an array "
+            "with integer dtype or an array of string values "
+            "with an object dtype.".format(X.dtype)
+        )
+
+    if sp.issparse(X) and self.missing_values == 0:
+        # missing_values = 0 not allowed with sparse data as it would
+        # force densification
+        raise ValueError(
+            "Sparse input with missing_values=0 is "
+            "not supported. Provide a dense "
+            "array instead."
+        )
+
+    return X
+
+scikit-learn.sklearn.utils.validation._check_n_features
+
+def _check_n_features(estimator, X, reset):
+    """Set the `n_features_in_` attribute, or check against it on an estimator.
+
+    .. note::
+        To only check n_features without conducting a full data validation, prefer
+        using `validate_data(..., skip_check_array=True)` if possible.
+
+    .. versionchanged:: 1.6
+        Moved from :class:`~sklearn.base.BaseEstimator` to
+        :mod:`~sklearn.utils.validation`.
+
+    Parameters
+    ----------
+    estimator : estimator instance
+        The estimator to validate the input for.
+
+    X : {ndarray, sparse matrix} of shape (n_samples, n_features)
+        The input samples.
+
+    reset : bool
+        Whether to reset the `n_features_in_` attribute.
+        If True, the `n_features_in_` attribute is set to `X.shape[1]`.
+        If False and the attribute exists, then check that it is equal to
+        `X.shape[1]`. If False and the attribute does *not* exist, then
+        the check is skipped.
+
+        .. note::
+           It is recommended to call `reset=True` in `fit` and in the first
+           call to `partial_fit`. All other methods that validate `X`
+           should set `reset=False`.
+    """
+    try:
+        n_features = _num_features(X)
+    except TypeError as e:
+        if not reset and hasattr(estimator, "n_features_in_"):
+            raise ValueError(
+                "X does not contain any features, but "
+                f"{estimator.__class__.__name__} is expecting "
+                f"{estimator.n_features_in_} features"
+            ) from e
+        # If the number of features is not defined and reset=True,
+        # then we skip this check
+        return
+
+    if reset:
+        estimator.n_features_in_ = n_features
+        return
+
+    if not hasattr(estimator, "n_features_in_"):
+        # Skip this check if the expected number of expected input features
+        # was not recorded by calling fit first. This is typically the case
+        # for stateless transformers.
+        return
+
+    if n_features != estimator.n_features_in_:
+        raise ValueError(
+            f"X has {n_features} features, but {estimator.__class__.__name__} "
+            f"is expecting {estimator.n_features_in_} features as input."
+        )
+
+
+[/PYTHON]
+What will be the input of `_fit`, given the following input:
+[OUTPUT]
+```
+{
+    "output": "array([[ True,  True],\n       [False, False],\n       [ True,  True],\n       [False, False],\n       [ True,  True],\n       [False, False],\n       [ True,  True],\n       [False, False],\n       [ True,  True],\n       [False, False]])"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

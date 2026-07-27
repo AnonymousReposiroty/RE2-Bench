@@ -1,0 +1,432 @@
+<think>
+The method __format_line_feed is a static method that replaces one or more newlines with a single newline character. 
+Given the input text is "Some sentence here.", which does not contain any newlines, the method will simply return the text unchanged.
+Therefore, the output of the method will be the same as the input text.
+</think>
+
+[OUTPUT]
+{
+    "output": "Some sentence here."
+}
+[/OUTPUT]
+<|user|>
+
+## Code Form for natural language
+
+We assume that all output from the model is wrapped in markdown code blocks. In this setup, `<python>` and `</python>` are used as block markers, similar to the common use of triple backticks ```` ```python ``` ```` in markdown. The dataset is divided into three parts: `test.py`, `train.py`, and `valid.py`, with 144, 155, and 155 questions, respectively. The test set is the same as the CoNaLo challenge's test set, while the train and valid sets have some additional questions.
+
+## Structure of data and dataset
+
+The format of all three data components is the same, and each data component consists of four files in JSON format. These files have different suffixes, such as `[args]`, `[results]`, `[question]`, and `[__init__]`. Each JSON object contains a list where each item corresponds to a specific programming problem. The following are examples of the contents of each file.
+
+```[question]```
+```json
+[{"args": {"a": 3, "b": 4}, "kwargs": {}, "metadata": {"question_id": 0, "choices": "['/', '-', '+', '*']"}},
+{"args": {"a": 3, "b": 4}, "kwargs": {}, "metadata": {"question_id": 1, "choices": "['%', '-', '+', '*']"}},
+{"args": {"a": 3, "b": 4}, "kwargs": {}, "metadata": {"question_id": 2, "choices": "['%', '/', '+', '*']"}},
+{"args": {"a": 3, "b": 4}, "kwargs": {}, "metadata": {"question_id": 3, "choices": "['%', '-', '/', '*']"}}]
+```
+
+```[args]```
+```json
+[{"self": {}, "args": {"a": 3, "b": 4}, "kwargs": {}, "metadata": {"question_id": 0}},
+{"self": {}, "args": {"a": 3, "b": 4}, "kwargs": {}, "metadata": {"question_id": 1}},
+{"self": {}, "args": {"a": 3, "b": 4}, "kwargs": {}, "metadata": {"question_id": 2}},
+{"self": {}, "args": {"a": 3, "b": 4}, "kwargs": {}, "metadata": {"question_id": 3}}]
+```
+
+```[results]```
+```json
+["/", "%", "%", "%"]
+```
+
+```[__init__]```
+```json
+"def somefunction(self, a, b):\n    return a * b"
+```
+
+```python
+# This file is a formatted copy of utils/q_na/conalo-code-2.py
+# 
+# utils/q_na/conalo-code-2.py was downloaded from
+# https://github.com/alexexibaby/co-na-lo/blob/main/utils/q_na/conalo-code-2.py
+
+# The only change is the license, which is appended with a BSD-2-Clause.
+# 
+# BSD 2-Clause License
+# 
+# Copyright (c) 2024, Ryan C. Jackson
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+# 
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# 
+# SPDX-License-Identifier: BSD-2-Clause
+# 
+# The BSD-2-Clause license applies to all code in this project.
+
+import ast
+import re
+
+import co_na_lo
+from co_na_lo import utils
+
+
+class DuplicateObjectFound(Exception):
+    pass
+
+
+class GenerateCodePrompt:
+
+    OUTPUT_TAG: str
+    QUESTION_TAG: str
+
+    PROBLEM_SOLVING_PROMPT: str
+    CODE_DOCSTRING_PROMPT: str
+
+    CODE_LANGUAGES: list[str]
+
+    CLASS_TYPE: str
+    CLASS_METHOD_NAME: str
+
+    OUTPUT_OBJECT_FIELD_NAME: str
+    MODEL_OUTPUT_CODE_BLOCK_NAME: str
+    ALL_RESULTS_CODE_BLOCK_NAME: str
+
+    STARTING_CODE_BLOCK_NAME: str
+    CODE_INDENTATION: str
+    CODE_LANG_TAG: str
+
+    # ignore non-tagged code in comments, strings, etc.
+    # does not handle complex strings (ex. eval("def a(): ..."))
+    # TODO this does not support generator functions currently
+    CODE_BLOCK_START: str
+    CODE_BLOCK_END: str
+
+    # https://docs.python.org/3/library/functions.html#compile
+    # format must be as follows: ({parameters}) -> ({return_annotation})
+    CODE_BLOCK_START_STRING_RE: re.Pattern
+    CODE_BLOCK_END_STRING_RE: re.Pattern
+
+    # https://docs.python.org/3/library/inspect.html#inspect.getmembers
+    # also see:
+    # https://docs.python.org/3/library/inspect.html#inspect.getmodule
+    # https://docs.python.org/3/library/inspect.html#module-inspect
+    INSPECT_CODE_BLOCK_PATTERN: re.Pattern
+    DOCS_INSPECT_CODE_BLOCK_NAME: str
+
+    # source code extraction
+    NUM_PRECEEDING_NEWLINES: int
+
+    @staticmethod
+    def get_code_content(code: str) -> str:
+        """Get the code content from a code string.
+        The code content is the code without the `CODE_LANG_TAG` tag."""
+        return re.split(
+            GenerateCodePrompt.CODE_LANG_TAG,
+            code,
+        )[-1]
+
+    def __init__(
+        self,
+        code_languages: list[str] | None = None,
+        problem_solving_prompt: str | None = None,
+        code_docstring_prompt: str | None = None,
+        class_type: str | None = None,
+        class_method_name: str | None = None,
+        output_object_field_name: str | None = None,
+        starting_code_block_name: str | None = None,
+        code_indentation: str | None = None,
+        code_lang_tag: str | None = None,
+        code_block_start: str | None = None,
+        code_block_end: str | None = None,
+        code_block_start_string_re: re.Pattern | None = None,
+        code_block_end_string_re: re.Pattern | None = None,
+        inspect_code_block_pattern: re.Pattern | None = None,
+        docs_inspect_code_block_name: str | None = None,
+        model_output_code_block_name: str | None = None,
+        all_results_code_block_name: str | None = None,
+        output_tag: str | None = None,
+        question_tag: str | None = None,
+        num_preceeding_newlines: int | None = None,
+    ):
+        """Initialize the code generation prompt.
+
+        Args:
+            code_languages (list[str] | None, optional): A list of programming languages.
+                Must include 'python', 'lua', and 'javascript'. Defaults to None.
+            problem_solving_prompt (str | None, optional): The problem solving prompt.
+                Defaults to None.
+            code_docstring_prompt (str | None, optional): The code docstring prompt.
+                Defaults to None.
+            class_type (str | None, optional): The type of the class to be generated.
+                Defaults to None.
+            class_method_name (str | None, optional): The name of the method to be generated.
+                Defaults to None.
+            output_object_field_name (str | None, optional): The name of the output object field.
+                Defaults to None.
+            starting_code_block_name (str | None, optional): The name of the starting code block.
+                Defaults to None.
+            code_indentation (str | None, optional): The indentation of the code block.
+                Defaults to None.
+            code_lang_tag (str | None, optional): The code language tag.
+                Defaults to None.
+            code_block_start (str | None, optional): The code block start delimiter.
+                Defaults to None.
+            code_block_end (str | None, optional): The code block end delimiter.
+                Defaults to None.
+            code_block_start_string_re (re.Pattern | None, optional): The code block start string regex.
+                Defaults to None.
+            code_block_end_string_re (re.Pattern | None, optional): The code block end string regex.
+                Defaults to None.
+            inspect_code_block_pattern (re.Pattern | None, optional): The inspect code block pattern.
+                Defaults to None.
+            docs_inspect_code_block_name (str | None, optional): The docs inspect code block name.
+                Defaults to None.
+            model_output_code_block_name (str | None, optional): The model output code block name.
+                Defaults to None.
+            all_results_code_block_name (str | None, optional): The all results code block name.
+                Defaults to None.
+            output_tag (str | None, optional): The output tag. Defaults to None.
+            question_tag (str | None, optional): The question tag. Defaults to None.
+            num_preceeding_newlines (int | None, optional): The number of preceeding newlines.
+                Defaults to None.
+        """
+        if code_languages is None:
+            code_languages = ['python', 'lua', 'javascript']
+        self.CODE_LANGUAGES = code_languages
+
+        if problem_solving_prompt is None:
+            problem_solving_prompt = """
+You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+"""
+        self.PROBLEM_SOLVING_PROMPT = problem_solving_prompt
+
+        if code_docstring_prompt is None:
+            code_docstring_prompt = f"""
+```
+{self.PROBLEM_SOLVING_PROMPT}
+<s>
+"""
+        self.CODE_DOCSTRING_PROMPT = code_docstring_prompt
+
+        if class_type is None:
+            class_type = 'class'
+        self.CLASS_TYPE = class_type
+
+        if class_method_name is None:
+            class_method_name = 'solve'
+        self.CLASS_METHOD_NAME = class_method_name
+
+        if output_object_field_name is None:
+            output_object_field_name = 'output'
+        self.OUTPUT_OBJECT_FIELD_NAME = output_object_field_name
+
+        if starting_code_block_name is None:
+            starting_code_block_name = 'class_string'
+        self.STARTING_CODE_BLOCK_NAME = starting_code_block_name
+
+        if code_indentation is None:
+            code_indentation = '    '
+        self.CODE_INDENTATION = code_indentation
+
+        if code_lang_tag is None:
+            code_lang_tag = 'code'
+        self.CODE_LANG_TAG = code_lang_tag
+
+        if code_block_start is None:
+            code_block_start = '<' + self.CODE_LANG_TAG + '>'
+        self.CODE_BLOCK_START = code_block_start
+
+        if code_block_end is None:
+            code_block_end = '</' + self.CODE_LANG_TAG + '>'
+        self.CODE_BLOCK_END = code_block_end
+
+        if code_block_start_string_re is None:
+            code_block_start_string_re = re.compile(
+                re.escape(self.CODE_BLOCK_START) + '[ ]*'
+            )
+        self.CODE_BLOCK_START_STRING_RE = code_block_start_string_re
+
+        if code_block_end_string_re is None:
+            code_block_end_string_re = re.compile(
+                '[ ]*' + re.escape(self.CODE_BLOCK_END)
+            )
+        self.CODE_BLOCK_END_STRING_RE = code_block_end_string_re
+
+        if inspect_code_block_pattern is None:
+            inspect_code_block_pattern = re.compile(
+                self.CODE_BLOCK_START_STRING_RE.pattern +
+                '([^\n]*)' +
+                self.CODE_BLOCK_END_STRING_RE.pattern
+            )
+        self.INSPECT_CODE_BLOCK_PATTERN = inspect_code_block_pattern
+
+        if docs_inspect_code_block_name is None:
+            docs_inspect_code_block_name = self.CODE_LANG_TAG + '_code'
+        self.DOCS_INSPECT_CODE_BLOCK_NAME = docs_inspect_code_block_name
+
+        if model_output_code_block_name is None:
+            model_output_code_block_name = self.STARTING_CODE_BLOCK_NAME
+        self.MODEL_OUTPUT_CODE_BLOCK_NAME = model_output_code_block_name
+
+        if all_results_code_block_name is None:
+            all_results_code_block_name = 'all_code_blocks'
+        self.ALL_RESULTS_CODE_BLOCK_NAME = all_results_code_block_name
+
+        if output_tag is None:
+            output_tag = '[OUTPUT]'
+        self.OUTPUT_TAG = output_tag
+
+        if question_tag is None:
+            question_tag = '[QUESTION]'
+        self.QUESTION_TAG = question_tag
+
+        if num_preceeding_newlines is None:
+            num_preceeding_newlines = 5
+        self.NUM_PRECEEDING_NEWLINES = num_preceeding_newlines
+
+    def docstring(self) -> str:
+        """Generate the docstring for the prompt."""
+        docstring = f"""
+<s>
+<|python|>
+{self.PROBLEM_SOLVING_PROMPT}
+</s>
+You are given a Python {self.CLASS_TYPE} (between <PYTHON> and </PYTHON>). This {self.CLASS_TYPE} has a method, {self.CLASS_METHOD_NAME}, which I want to call. For this, I want you to take the provided inputs (between <INPUT> and </INPUT>) and predict the output of the method. Both input and output are presented in a JSON format. The output structure is defined between <STRUCTURE> and </STRUCTURE>. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between {self.OUTPUT_TAG} and </OUTPUT>. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+
+<STRUCTURE>
+```
+{self.CODE_BLOCK_START}{self.DOCS_INSPECT_CODE_BLOCK_NAME}{self.CODE_BLOCK_END}
+```
+</STRUCTURE>
+
+Your output must be in the following format:
+{self.CODE_BLOCK_START}{self.MODEL_OUTPUT_CODE_BLOCK_NAME}{self.CODE_BLOCK_END}
+
+""".strip() + '\n' * self.NUM_PRECEEDING_NEWLINES
+        return docstring
+
+    def input_string(
+        self,
+        input_string: str,
+        structure_string: str | None = None,
+        tags_to_remove: list[str] | None = None,
+        object_to_remove: str | None = None,
+        num_extra_newlines: int | None = None,
+        encode: bool = True,
+    ) -> str:
+        """Generates the input string for the prompt.
+
+        This is the initial string the model receives when it is generating the output.
+        The model is then "unwrapped" after the initial prompt is given to the model.
+
+        Args:
+            input_string (str): The initial prompt.
+            structure_string (str | None, optional): The structure string. Defaults to None.
+            tags_to_remove (list[str] | None, optional): The tags to remove from the structure string. Defaults to None.
+            object_to_remove (str | None, optional): The object to remove from the structure string. Defaults to None.
+            num_extra_newlines (int | None, optional): The number of extra newlines. Defaults to None.
+            encode (bool, optional): Whether to encode the input string. Defaults to True.
+
+        Returns:
+            str: The input string to give to the model.
+        """
+        if object_to_remove is None:
+            object_to_remove = 'output'
+        if tags_to_remove is None:
+            tags_to_remove = ['output']
+
+        if structure_string is None:
+            structure_string = self._get_structure_string_from_input_string(input_string=input_string)
+        structure_string = self._remove_structure_object(
+            structure_string=structure_string,
+            object_to_remove=object_to_remove,
+            tags_to_remove=tags_to_remove,
+        )
+        if structure_string:
+            structure_string = f'<STRUCTURE>\n{structure_string}\n</STRUCTURE>\n'
+
+        output_string = input_string + structure_string + self._get_code_string_from_structure_string(structure_string=structure_string)
+        if num_extra_newlines is None:
+            num_extra_newlines = 2
+        output_string = output_string + '\n' * num_extra_newlines
+        if encode:
+            output_string = output_string.encode('utf-8')
+        return output_string
+
+    def _remove_structure_object(
+        self,
+        structure_string: str,
+        object_to_remove: str,
+        tags_to_remove: list[str] | None = None,
+    ) -> str:
+        """Remove the object to remove from the structure string.
+
+        Args:
+            structure_string (str): The structure string.
+            object_to_remove (str): The object to remove.
+            tags_to_remove (list[str] | None, optional): The tags to remove. Defaults to None.
+
+        Returns:
+            str: The structure string with the object removed.
+        """
+        if tags_to_remove is None:
+            tags_to_remove = [object_to_remove]
+        for tag in tags_to_remove:
+            pattern = f'<{tag}>(.*?)</{tag}>'
+            if object_to_remove == tag:
+                object_to_remove = ''
+            else:
+                object_to_remove = f'<{object_to_remove}>'
+            structure_string = re.sub(pattern, object_to_remove, structure_string)
+        return structure_string
+
+    def _get_structure_string_from_input_string(
+        self,
+        input_string: str,
+        method_name: str | None = None,
+    ) -> str:
+        """Get the structure string from the input string.
+
+        Args:
+            input_string (str): The input string.
+            method_name (str | None, optional): The method name. Defaults to None.
+
+        Returns:
+            str: The structure string.
+        """
+        if method_name is None:
+            method_name = self.CLASS_METHOD_NAME
+
+        match = re.search(f'{method_name}\(', input_string)
+        input_string = input_string[: match.start()] + '\n' + input_string[match.start():]
+        structure_string = re.split(
+            f'{method_name}\(',
+            input_string,
+        )[-1]
+        structure_string = structure_string.split(')\n')[0] + ')\n'
+        return structure_string
+
+    def _get_code_string_from_structure_string(self, structure

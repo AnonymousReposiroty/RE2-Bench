@@ -1,0 +1,249 @@
+<s>
+    [OUTPUT]
+    {
+        "output": "(2, '-21', False, [])"
+    }
+    [/OUTPUT]
+</s>
+
+[FILEPATH] alexanderpatter-transparencia_backend-402b929/test_sample.py [/FILEPATH]
+from llamaindex import GPTVectorStoreIndex, SimpleDirectoryReader, StorageContext, load_index_from_storage
+import os
+import json
+import requests
+from rich import print
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-m', '--model', choices=["gpt-4-32k", "claude-2"], required=True)
+parser.add_argument('-p', '--prompt', type=str, required=True)
+args = parser.parse_args()
+
+BASELINE_URL = "http://localhost:8000"
+MODEL = args.model
+DATA = "test_data" if MODEL == "claude-2" else "test_data_32k"
+
+file_contents = {}
+
+query = json.load(open(os.path.join(DATA, args.prompt, 'input.json')))
+keys = [k for k in query if k != "query"]
+text = ["[PYTHON]"]
+for k in keys:
+    text.append(query[k])
+    text.append("[/PYTHON]")
+doc_path = os.path.join(DATA, args.prompt, "ground_truth.py")
+text.append("[GROUND_TRUTH]")
+with open(doc_path, "r") as f:
+    text.append(f.read())
+text.append("[/GROUND_TRUTH]")
+doc_text = "\n".join(text)
+
+EXAMPLE_DOC_PATH = "data/example_with_function_texts.md"
+EXAMPLE_GROUND_TRUTH_PATH = "data/example_ground_truth.md"
+EXAMPLE_PROMPT_PATH = "data/example_input.json"
+EXAMPLE_OUTPUT_PATH = "data/example_output.json"
+RELEVANT_FUNCTION_PATH = "data/example_functions.txt"
+TEMP_DATA_PATH = "data/temp"
+
+
+def load_model(model, text, query, temperature, max_tokens):
+    global session_id
+    prompt = {
+        "model": model,
+        "text": text,
+        "query": query,
+        "groundtruth_path": "",
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "session_id": session_id
+    }
+    try:
+        response = requests.post(f"{BASELINE_URL}/get_response", json=prompt, timeout=1800)
+        if response.status_code != 200:
+            print(f"Error: {response.status_code}, {response.text}")
+            return {"error": response.text}
+        session_id = response.json()["session_id"]
+        return response.json()
+    except requests.exceptions.ConnectionError:
+        print("Connection error occurred. Could not connect to the server.")
+        return {"error": "ConnectionError"}
+    except requests.exceptions.ReadTimeout:
+        print("Request timed out. Could not receive a response from the server within the timeout period.")
+        return {"error": "ReadTimeout"}
+    except requests.exceptions.Timeout:
+        print("Timeout error occurred. The request to the server took too long.")
+        return {"error": "Timeout"}
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return {"error": str(e)}
+
+
+def get_example_documents():
+    text = doc_text
+
+    # Read file_contents from ground_truth_path
+    try:
+        with open(EXAMPLE_GROUND_TRUTH_PATH, "r") as f:
+            file_contents = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: File not found at {EXAMPLE_GROUND_TRUTH_PATH}")
+        return None
+    except json.JSONDecodeError:
+        print(f"Error: JSON decoding error in file at {EXAMPLE_GROUND_TRUTH_PATH}")
+        return None
+
+    # Convert file_contents to string and add [GROUND_TRUTH] and [/GROUND_TRUTH] markers
+    file_contents_str = json.dumps(file_contents)
+    ground_truth = f"[GROUND_TRUTH]\n{file_contents_str}\n[/GROUND_TRUTH]"
+    text = text + "\n" + ground_truth
+
+    docs = SimpleDirectoryReader(input_files=[EXAMPLE_DOC_PATH]).load_data()
+    # Read contents of relevant_functions.txt and store in file_contents
+    with open(RELEVANT_FUNCTION_PATH, "r") as f:
+        file_contents = f.read()
+    return text, file_contents, docs
+
+
+def evaluate_response(data, response):
+    all_reasoning = []
+    all_corresponding_output = []
+
+    # Initialize variables for accuracy calculation
+    accuracy = 0
+    total_labels = 0
+
+    for i, pred_value in enumerate(response):
+        corresponding_label = data[i][1]
+        all_corresponding_output.append(corresponding_label)
+
+        # Initialize a temporary list to store parts of reasoning for each label
+        temp_reasoning = []
+
+        # Handle cases where label is a string and strip quotes
+        if corresponding_label.strip() == pred_value.strip():
+            accuracy += 1
+            temp_reasoning.append("Your prediction matches the correct output.")
+
+        # Handle numeric comparisons
+        else:
+            try:
+                if float(corresponding_label) == float(pred_value):
+                    accuracy += 1
+                    temp_reasoning.append(f"Your prediction {pred_value} matches the correct output.")
+                else:
+                    temp_reasoning.append(f"Your prediction {pred_value} does not match the correct output.")
+            except ValueError:
+                temp_reasoning.append(f"Could not compare {pred_value} with {corresponding_label}.")
+        temp_reasoning.append("The ground truth:")
+        temp_reasoning.append(str(all_corresponding_output[i]))
+        temp_reasoning.append("The predicted value:")
+        temp_reasoning.append(str(response[i]))
+        all_reasoning.append("\n".join(temp_reasoning))
+
+    accuracy /= len(response) if response else 1
+    if accuracy == 0.0:
+        accuracy = 0.1
+    return accuracy, all_reasoning
+
+
+def evaluate(file_name, responses):
+    label_path = os.path.join(file_name, 'labels.json')
+    try:
+        with open(label_path, 'r') as file:
+            data = json.load(file)
+            accuracy, reasoning = evaluate_response(data, responses)
+            return accuracy, reasoning
+    except FileNotFoundError:
+        print(f"Error: File not found at {label_path}")
+        return None
+    except json.JSONDecodeError:
+        print(f"Error: JSON decoding error in file at {label_path}")
+        return None
+
+
+def main():
+    global session_id
+    file_contents = {}
+    accurate = 0
+    total = 0
+
+    if not os.path.exists(TEMP_DATA_PATH):
+        os.mkdir(TEMP_DATA_PATH)
+
+    # Generate indices for the files in the folder
+    for file_name in os.listdir(DATA):
+        if not os.path.isdir(os.path.join(DATA, file_name)):
+            continue
+
+        # Initialize response array
+        response = []
+
+        print(f"Processing {file_name}...")
+
+        session_id = None
+        max_tokens = 8000
+
+        with open(os.path.join(DATA, file_name, "ground_truth.py"), "r") as f:
+            text = f.read()
+            file_contents = {file_name: text}
+
+        # Retrieve the query
+        with open(os.path.join(DATA, file_name, "input.json"), "r") as f:
+            query = json.load(f)
+
+        temperature = 0
+
+        all_text = ""
+        if "index" in query:
+            for doc in query["index"]:
+                all_text += file_contents[doc] + "\n"
+
+        all_text += text
+        query_string = query["query"]
+        text = query_string + "\n" + all_text
+        text = text + "\n" + str(query["index"]) + "\n"
+        text = text + "\n" + str(query["texts"])
+
+        # Run the language model and get the response
+        llm_response = load_model(MODEL, text, query_string, temperature, max_tokens)
+        result = llm_response.get("response", "")
+
+        # Remove the text before the first instance of `"""json`
+        start_idx = result.find('"""json')
+        if start_idx != -1:
+            result = result[start_idx + len('"""json'):]
+        else:
+            print("Response does not contain '"""json'. Skipping this response.")
+            return
+
+        # Remove everything after the last instance of `"""`
+        end_idx = result.rfind('"""')
+        if end_idx != -1:
+            result = result[:end_idx]
+        else:
+            print("Response does not contain closing '""". Skipping this response.")
+            return
+
+        response = json.loads(result)
+
+        # Store the response in output.json
+        with open(os.path.join(DATA, file_name, "output.json"), "w") as f:
+            json.dump(response, f)
+
+        # Evaluate the response
+        accuracy, reasoning = evaluate(os.path.join(DATA, file_name), response)
+        accurate += accuracy
+        total += 1
+
+        # Print the reasoning
+        print(f"Reasoning for {file_name}:")
+        for i, r in enumerate(reasoning):
+            print(f"{i}: {r}")
+        print()
+
+    print(f"Average accuracy: {accurate / total}")
+
+
+if __name__ == "__main__":
+    main()
+

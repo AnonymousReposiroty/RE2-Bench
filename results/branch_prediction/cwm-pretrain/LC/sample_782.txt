@@ -1,0 +1,458 @@
+<think>Reasoning:</think>
+
+[ANSWER]
+1 def f(input):
+2     for char in input:
+3         if char.isupper(): ## [BRANCH]taken=[N,N,N,N,N,Y,N][/BRANCH]
+4             return False
+5     return True
+[/ANSWER]
+
+[FILEPATH] aghayev-serhat-SeniorAIFlatten-HumanEval-1ff37cb/train-0_v0.1.py [/FILEPATH]
+import torch
+from torch.utils.data import DataLoader
+import json
+import random
+import re
+import logging
+import os
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from datasets import Dataset
+
+from human_eval import jsonl
+
+### Dataset creation and processing ###
+
+# Load HumanEval dataset
+train_data = jsonl.load_dataset_from_jsonl(os.path.join("data", "HumanEval-Py", "jsonl", "HumanEval.jsonl"))["train"]
+train_data = train_data.apply(lambda example: {**example, "task_id": example["task_id"].split(".")[0]})
+
+def to_camel_case(s):
+    s = s.replace("-", " ").title().replace(" ", "")
+    s = s[0].lower() + s[1:]
+    return s
+
+human_eval_ids = set(d["task_id"] for d in train_data)
+
+# Open Group dataset
+data = []
+with open(os.path.join("data", "OpenGroupCoder.json")) as f:
+    for line in f:
+        sample = json.loads(line)
+        data.append(sample)
+print(f"Loaded {len(data)} lines from OpenGroupCoder dataset")
+
+# Filter for samples with train/valid/test splits
+data = [d for d in data if "train_solutions" in d or "valid_solutions" in d or "test_solutions" in d]
+print(f"Filtered to {len(data)} lines with train/valid/test splits")
+
+def sample_solutions(solutions, n, dataset="valid"):
+    """
+    Sample n solutions from a dataset. Ensure that at least 30% have no n/2 or n/4 in comments, and at least 50% have unique arg names.
+    """
+    solutions = [s for s in solutions if s["dataset"] == dataset]
+    remaining = solutions
+    n_unique_args = [s for s in remaining if not any(arg in str(i) for i in range(10) for arg in s["solution"]["signature"])]
+    n_no_numbers = [s for s in n_unique_args if not any(str(i) in s["solution"]["full_solution"] for i in range(5))]
+
+    # Shuffle and take first half for no numbers
+    half = n // 2
+    random.shuffle(n_no_numbers)
+    sampled_no_numbers = n_no_numbers[:half]
+
+    # Add the rest from unique args
+    remaining = list(set(n_unique_args) - set(n_no_numbers))
+    random.shuffle(remaining)
+    sampled_unique_args = remaining[:n - len(sampled_no_numbers)]
+
+    # Check if we have enough
+    if len(sampled_no_numbers) + len(sampled_unique_args) < n:
+        print(f"WARNING: Could not sample enough solutions with constraints.")
+        return solutions[:n]
+
+    # Combine and return
+    return sampled_no_numbers + sampled_unique_args
+
+# Build expert dataset
+experts = []
+solution_ids = set()
+for sample in data:
+    # Determine maximum solutions
+    max_solutions = 0
+    if "train_solutions" in sample:
+        max_solutions = max(max_solutions, len(sample["train_solutions"]))
+    if "valid_solutions" in sample:
+        max_solutions = max(max_solutions, len(sample["valid_solutions"]))
+    if "test_solutions" in sample:
+        max_solutions = max(max_solutions, len(sample["test_solutions"]))
+
+    # Sample n solutions per dataset (min n: n//2 in train, n//4 in test and valid)
+    n = max_solutions
+    if "train_solutions" in sample:
+        train_solutions = sample_solutions(sample["train_solutions"], n // 2, dataset="train")
+        for sol in train_solutions:
+            task_id = sample["task_id"].split(".")[0]
+            if (task_id, sol["solution"]["task_id"]) in solution_ids:
+                continue
+            solution_ids.add((task_id, sol["solution"]["task_id"]))
+            experts.append({
+                "task_id": task_id,
+                "gold_id": to_camel_case(sample["task_id"].split(".")[-1]),
+                "problem": f"Write a function that {sample['prompt']}",
+                "canonical_solution": sol["solution"]["full_solution"],
+                "test_example": sample["test_inputs"],
+                "entry_point": sample["entry_point"],
+                "test_list": sample["test_list"],
+            })
+    if "valid_solutions" in sample:
+        valid_solutions = sample_solutions(sample["valid_solutions"], n // 4, dataset="valid")
+        for sol in valid_solutions:
+            task_id = sample["task_id"].split(".")[0]
+            if (task_id, sol["solution"]["task_id"]) in solution_ids:
+                continue
+            solution_ids.add((task_id, sol["solution"]["task_id"]))
+            experts.append({
+                "task_id": task_id,
+                "gold_id": to_camel_case(sample["task_id"].split(".")[-1]),
+                "problem": f"Write a function that {sample['prompt']}",
+                "canonical_solution": sol["solution"]["full_solution"],
+                "test_example": sample["test_inputs"],
+                "entry_point": sample["entry_point"],
+                "test_list": sample["test_list"],
+            })
+    if "test_solutions" in sample:
+        test_solutions = sample_solutions(sample["test_solutions"], n // 4, dataset="test")
+        for sol in test_solutions:
+            task_id = sample["task_id"].split(".")[0]
+            if (task_id, sol["solution"]["task_id"]) in solution_ids:
+                continue
+            solution_ids.add((task_id, sol["solution"]["task_id"]))
+            experts.append({
+                "task_id": task_id,
+                "gold_id": to_camel_case(sample["task_id"].split(".")[-1]),
+                "problem": f"Write a function that {sample['prompt']}",
+                "canonical_solution": sol["solution"]["full_solution"],
+                "test_example": sample["test_inputs"],
+                "entry_point": sample["entry_point"],
+                "test_list": sample["test_list"],
+            })
+
+print(f"Created expert dataset with {len(experts)} entries")
+
+random.shuffle(experts)
+
+### ChatML template ###
+"""
+<|im_start|>user
+{user}<|im_end|>
+<|im_start|>assistant
+{assistant}<|im_end|>
+"""
+
+def process_data(dataset):
+    data = []
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        code = sample["prompt"].split("''")[1]
+        if code[0] != "\n":
+            code = "\n" + code
+        test_input = re.search(r"Input:\n(.*?)Output:", dataset[i]["task_description"], re.DOTALL).group(1).strip()
+        func_name = re.search(r"\((.*?)\):", code, re.DOTALL).group(1)
+        data.append({
+            "prompt": sample["prompt"].split("''")[1].strip(),
+            "test_input": test_input,
+            "code": f"<|im_start|>user\n{sample['task_description']}\n\nThe given solution is:\n```python\n{code}\n```</s>\n<|im_start|>assistant",
+            "func_name": func_name
+        })
+    return data
+
+experts = process_data(experts)
+
+from collections import Counter
+
+# Load Train set and create dataset 
+train_data = jsonl.load_dataset_from_jsonl(os.path.join("data", "HumanEval-Py", "jsonl", "HumanEval.jsonl"))["train"]
+train_data = train_data.apply(lambda example: {**example, "task_id": example["task_id"].split(".")[0]})
+
+def process_train_data(dataset):
+    data = []
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        canonical_solution = sample["canonical_solution"].strip()
+        test_input = re.search(r"Input:\n(.*?)Output:", dataset[i]["prompt"], re.DOTALL).group(1).strip()
+        func_name = re.search(r"def (\w+)", canonical_solution, re.DOTALL).group(1)
+        data.append({
+            "canonical_solution": canonical_solution,
+            "test_input": test_input,
+            "code": f"<|im_start|>user\nWrite a program that takes the following input:\n{test_input} and returns the following output:\n{sample['test']}\n\nThe output should be a program that is syntactically correct and passes the test case.</s>\n<|im_start|>assistant",
+            "func_name": func_name,
+            "task_id": sample["task_id"],
+        })
+    return data
+
+train = process_train_data(train_data)
+
+### Instruct-template ###
+
+"""
+<s>
+[INST] {system_message} [/INST] {user_message} [/s]
+<s>
+[INST] {system_message} [/INST] {assistant_message} [/s]
+"""
+
+def process_instruct_data(dataset):
+    data = []
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        if sample["task_id"] not in human_eval_ids:
+            print(f"Skipping {sample['task_id']} as it is not in HumanEval")
+            continue
+        # add test inputs as JSON array
+        test_input = re.search(r"Input:\n(.*?)Output:", dataset[i]["prompt"], re.DOTALL).group(1).strip()
+        func_name = re.search(r"def (\w+)", sample["canonical_solution"], re.DOTALL).group(1)
+        #example = [{"args": {arg.strip(): sample["test_example"][arg.strip()]} for arg in sample["entry_point"]}]
+        test_input = {"args": {arg.strip(): sample["test_example"][arg.strip()] for arg in sample["entry_point"]}}
+        test_input = json.dumps(test_input)
+
+        test_list = eval(sample["test_list"])[:2]  # get 2 test cases, actual length is 100
+        code = ""
+        for testcase in test_list:
+            signature = "def {}(".format(func_name)
+            for key in testcase["args"]:
+                signature += f"{key},"
+            signature = signature[:-1] + "):"
+            input = f"```{func_name}("
+            for key in testcase["args"]:
+                input += f"{testcase['args'][key]},"
+            input = input[:-1] + ")```"
+
+            answer = f"```{json.dumps(testcase['return_value'])}```"
+
+            #problem
+            problem = f"Read the following function signature and input arguments and return the output of the function.\n{signature}\n{input}\nAnswer:\n{answer}"
+
+            code += f"{sample['code']} {problem}\n\n"
+
+        #code = code.strip() + f"<|im_end|>\n<|im_start|>assistant"
+        code = f"<|im_start|>user\n{problem}</s>\n<|im_start|>assistant"
+        data.append({
+            "canonical_solution": sample["canonical_solution"],
+            "test_input": test_input,
+            "code": code,
+            "func_name": func_name,
+            "task_id": sample["task_id"],
+        })
+    return data
+
+train = process_instruct_data(experts)
+
+random.shuffle(train)
+
+expert_ids = set(d["task_id"] for d in experts)
+train = [d for d in train if d["task_id"] not in expert_ids]
+train = train[:len(train)//3]  # keep 1/3 of the data
+random.shuffle(train)
+
+print(f"Created HumanEval Dataset with {len(train)} entries")
+
+test_data = jsonl.load_dataset_from_jsonl(os.path.join("data", "HumanEval-Py", "jsonl", "HumanEval.jsonl"))["test"]
+test_data = test_data.apply(lambda example: {**example, "task_id": example["task_id"].split(".")[0]})
+
+test = process_instruct_data(test_data)
+
+from transformers import LlamaForCausalLM, LlamaTokenizer
+import gc
+
+# Load Code Llama model with QLoRA config
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+)
+
+model = LlamaForCausalLM.from_pretrained(
+    "codellama/CodeLlama-13b-hf",
+    quantization_config=quantization_config,
+    device_map="auto",
+)
+tokenizer = LlamaTokenizer.from_pretrained("codellama/CodeLlama-13b-hf")
+
+# Freeze layers up to 6
+for name, param in model.named_parameters():
+    layer_idx = name.split(".")[2] if len(name.split(".")) > 2 else 0
+    if isinstance(layer_idx, str) and layer_idx.isdigit() and int(layer_idx) <= 6:
+        param.requires_grad = False
+
+# Move model to device
+model = model.to("cuda")
+
+# Create datasets
+train_dataset = Dataset.from_dict({
+    "prompt": [d["code"] for d in train],
+    "response": [d["canonical_solution"] for d in train],
+})
+
+test_dataset = Dataset.from_dict({
+    "prompt": [d["code"] for d in test],
+    "response": [d["canonical_solution"] for d in test],
+})
+
+from peft import LoraConfig, get_peft_model
+from peft.utils import PromptTuningConfig, PromptEncoderConfig
+from transformers import Trainer, TrainingArguments
+
+# Create LoRA config
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    target_modules=["q_proj", "v_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+
+model = get_peft_model(model, lora_config)
+
+from huggingface_hub import login
+import os
+from datetime import datetime
+
+# Authenticate
+login()
+
+from accelerate import FullyShardedDataParallelPlugin, Accelerator
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+from tqdm.auto import tqdm
+
+def log_gpu_memory():
+    total_mem = torch.cuda.get_device_properties(0).total_memory
+    allocated_mem = torch.cuda.memory_allocated()
+    cached_mem = torch.cuda.memory_reserved()
+    print(f"Total GPU Memory: {total_mem / 1e9:.2f} GB")
+    print(f"Allocated GPU Memory: {allocated_mem / 1e9:.2f} GB")
+    print(f"Cached GPU Memory: {cached_mem / 1e9:.2f} GB")
+    print("\n")
+
+# Free up memory
+gc.collect()
+torch.cuda.empty_cache()
+
+# Confirm GPU availability
+print(f"GPU Available: {torch.cuda.is_available()}")
+print(f"CUDA Device Count: {torch.cuda.device_count()}")
+print(f"Current CUDA Device: {torch.cuda.current_device()}")
+print(f"GPU Name: {torch.cuda.get_device_name(0)}")
+
+log_gpu_memory()
+
+# Initialize model with minimal size
+model_name = "codellama/CodeLlama-13b-hf"
+tokenizer = LlamaTokenizer.from_pretrained(model_name)
+tokenizer.pad_token = tokenizer.eos_token  # Set pad token
+
+# Free up GPU memory
+gc.collect()
+torch.cuda.empty_cache()
+
+# Create PEFT config
+peft_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    target_modules=["q_proj", "v_proj"],
+    lora_dropout=0.1,
+    bias="none"
+)
+
+model = LlamaForCausalLM.from_pretrained(model_name, device_map="auto", load_in_8bit=True)
+model.resize_token_embeddings(len(tokenizer))
+
+# Move model to GPU and set evaluation mode
+model = model.to("cuda")
+model.eval()
+
+# Enable gradient checkpointing
+model.gradient_checkpointing_enable()
+
+# Configure data loading
+train_dataset = Dataset.from_dict({"text": train[:64]["code"] + train[:64]["canonical_solution"]})
+val_dataset = Dataset.from_dict({"text": test[:64]["code"] + test[:64]["canonical_solution"]})
+train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+
+from datasets import Dataset
+from transformers import LlamaForCausalLM, LlamaTokenizer, Trainer, TrainingArguments, BitsAndBytesConfig, DataCollatorForLanguageModeling
+
+# Data collator for language modeling
+data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+# Define training arguments
+model_name = f"seniorAI/humanEval-flaten-SLORA-chatML-cLlama-13b_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+training_args = TrainingArguments(
+    output_dir=model_name,
+    num_train_epochs=3,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=4,
+    gradient_checkpointing=True,
+    gradient_checkpointing_kwargs={"use_reentrant": False},
+    optim="paged_adamw_8bit",
+    save_steps=200,
+    logging_steps=50,
+    learning_rate=2e-4,
+    weight_decay=0.01,
+    fp16=False,
+    bf16=False,
+    max_grad_norm=1.0,
+    max_steps=-1,
+    warmup_ratio=0.03,
+    group_by_length=False,
+    lr_scheduler_type="linear",
+    evaluation_strategy="steps",
+    eval_steps=200,
+    do_eval=True,
+    report_to="none",
+    logging_dir=f"./logs/{model_name}",
+    logging_strategy="steps",
+)
+
+# Initialize trainer
+trainer = Trainer(
+    model=model,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
+    args=training_args,
+    data_collator=data_collator
+)
+
+# Add hooks to monitor memory usage
+class GPUUsageMonitor:
+    def on_train_begin(self, args, state, control, **kwargs):
+        print("Training started")
+        log_gpu_memory()
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step % 50 == 0:
+            print(f"\nStep {state.global_step}")
+            log_gpu_memory()
+
+    def on_log(self, args, state, control, **kwargs):
+        if state.is_local_process_zero:
+            print(f"\nLog step: {state.log_history[-1]['step']}")
+            log_gpu_memory()
+
+gpu_monitor = GPUUsageMonitor()
+trainer.add_callback(gpu_monitor)
+
+# Train the model
+trainer.train()
+
+# Save model and tokenizer
+trainer.save_model(model_name)
+tokenizer.save_pretrained(model_name)
+
+[FILEPATH] aghayev-serhat-SeniorAIFlatten-HumanEval-1ff37cb/test-0.py [/FILEPATH]
+import torch
+from transformers import AutoModelForCausalLM, Auto

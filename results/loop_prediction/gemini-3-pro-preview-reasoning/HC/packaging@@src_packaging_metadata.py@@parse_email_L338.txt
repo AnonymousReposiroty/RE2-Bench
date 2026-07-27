@@ -1,0 +1,136 @@
+Input contains "download-url: VaLuE". This is passed to `parse_email` as argument `data`.
+
+Trace:
+1.  `data` is a string. `email.parser.Parser(policy=email.policy.compat32).parsestr(data)` is called.
+2.  `parsestr` parses the string `"download-url: VaLuE"`.
+    *   It finds one header.
+    *   Key: `"download-url"` (parsed from the string before the colon).
+    *   Value: `" VaLuE"` (parsed from the string after the colon; in `compat32` mode, leading whitespace after the colon is preserved).
+3.  `parsed.keys()` returns `['download-url']`.
+4.  Line 24: `for name_with_case in frozenset(parsed.keys()):`
+    *   `frozenset(parsed.keys())` creates `frozenset({'download-url'})`.
+    *   The loop iterates once.
+    *   Iteration 1: `name_with_case` is `"download-url"`.
+5.  Inside Outer Loop:
+    *   Line 26: `name = name_with_case.lower()` result is `"download-url"`.
+    *   Line 28: `headers = parsed.get_all(name)`. `parsed.get_all('download-url')` returns the list of values.
+    *   `headers` is `[' VaLuE']`.
+6.  Line 33: `for h in headers:`
+    *   The loop iterates over `headers` which has 1 element.
+    *   Iteration 1: `h` is `" VaLuE"`.
+    *   `headers` state is `[[' VaLuE']]` (value of the list variable `headers` during the loop logic).
+
+States:
+*   `name_with_case`: `['download-url']`
+*   `frozenset(parsed.keys())`: `[frozenset({'download-url'})]`
+*   `h`: `[' VaLuE']`
+*   `headers`: `[[' VaLuE']]`
+
+[ANSWER]
+1 import email.feedparser
+2 import email.header
+3 import email.message
+4 import email.parser
+5 import email.policy
+6 from typing import (
+7     Any,
+8     Callable,
+9     Generic,
+10     Literal,
+11     TypedDict,
+12     cast,
+13 )
+14 
+15 def parse_email(data: bytes | str) -> tuple[RawMetadata, dict[str, list[str]]]:
+16     raw: dict[str, str | list[str] | dict[str, str]] = {}
+17     unparsed: dict[str, list[str]] = {}
+18 
+19     if isinstance(data, str):
+20         parsed = email.parser.Parser(policy=email.policy.compat32).parsestr(data)
+21     else:
+22         parsed = email.parser.BytesParser(policy=email.policy.compat32).parsebytes(data)
+23 
+24     for name_with_case in frozenset(parsed.keys()):## [STATE]name_with_case=['download-url'][/STATE] [STATE]frozenset(parsed.keys())=[frozenset({'download-url'})][/STATE]
+25 
+26         name = name_with_case.lower()
+27 
+28         headers = parsed.get_all(name) or []
+29 
+30         value = []
+31 
+32         valid_encoding = True
+33         for h in headers:## [STATE]h=[' VaLuE'][/STATE] [STATE]headers=[[' VaLuE']][/STATE]
+34 
+35             assert isinstance(h, (email.header.Header, str))
+36 
+37             if isinstance(h, email.header.Header):
+38 
+39                 chunks: list[tuple[bytes, str | None]] = []
+40                 for binary, _encoding in email.header.decode_header(h):
+41                     try:
+42                         binary.decode("utf8", "strict")
+43                     except UnicodeDecodeError:
+44 
+45                         encoding = "latin1"
+46                         valid_encoding = False
+47                     else:
+48                         encoding = "utf8"
+49                     chunks.append((binary, encoding))
+50 
+51                 value.append(str(email.header.make_header(chunks)))
+52 
+53             else:
+54                 value.append(h)
+55 
+56         if not valid_encoding:
+57             unparsed[name] = value
+58             continue
+59 
+60         raw_name = _EMAIL_TO_RAW_MAPPING.get(name)
+61         if raw_name is None:
+62 
+63             unparsed[name] = value
+64             continue
+65 
+66         if raw_name in _STRING_FIELDS and len(value) == 1:
+67             raw[raw_name] = value[0]
+68 
+69         elif raw_name == "import_names" and value == [""]:
+70             raw[raw_name] = []
+71 
+72         elif raw_name in _LIST_FIELDS:
+73             raw[raw_name] = value
+74 
+75         elif raw_name == "keywords" and len(value) == 1:
+76             raw[raw_name] = _parse_keywords(value[0])
+77 
+78         elif raw_name == "project_urls":
+79             try:
+80                 raw[raw_name] = _parse_project_urls(value)
+81             except KeyError:
+82                 unparsed[name] = value
+83 
+84         else:
+85             unparsed[name] = value
+86 
+87     try:
+88         payload = _get_payload(parsed, data)
+89     except ValueError:
+90         unparsed.setdefault("description", []).append(
+91             parsed.get_payload(decode=isinstance(data, bytes))
+92         )
+93     else:
+94         if payload:
+95 
+96             if "description" in raw:
+97                 description_header = cast("str", raw.pop("description"))
+98                 unparsed.setdefault("description", []).extend(
+99                     [description_header, payload]
+100                 )
+101             elif "description" in unparsed:
+102                 unparsed["description"].append(payload)
+103             else:
+104                 raw["description"] = payload
+105 
+106     return cast("RawMetadata", raw), unparsed
+[/ANSWER]

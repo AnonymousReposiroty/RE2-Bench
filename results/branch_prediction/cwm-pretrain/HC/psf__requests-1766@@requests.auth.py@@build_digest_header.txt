@@ -1,0 +1,415 @@
+### Analysis of `build_digest_header` for the given input:
+
+The method `build_digest_header` performs the following steps:
+1. Extracts the following values from `self.chal`:
+   - `realm`
+   - `nonce`
+   - `qop`
+   - `algorithm`
+   - `opaque`
+2. Initializes hash algorithms (`MD5` or `SHA`) based on the `algorithm` value.
+3. Uses these hash functions to compute:
+   - `HA1` as the hash of `username:realm:password`
+   - `HA2` as the hash of `method:path`
+4. Manages the `nonce_count` and generates a new `cnonce`.
+5. Builds the final digest authentication string using these computed values.
+
+Let's trace how the method will behave with the input:
+
+#### Step-by-step tracing:
+1. **Initialization and algorithm parsing:**
+   - `algorithm = "MD5"`, so the first conditional `if algorithm is None` is `False`, leading to `_algorithm = "MD5"` → `['N']`.
+   - The condition `if _algorithm == 'MD5' or _algorithm == 'MD5-SESS'` is `True` → `['Y']`.
+
+2. **Hash function setup:**
+   - The `MD5` algorithm is selected → the `elif _algorithm == 'SHA'` condition is `False` → `['N']`.
+
+3. **HA1 and HA2 computation:**
+   - `HA1` is the hash of the user's credentials.
+   - `HA2` is the hash of the request method and path.
+   - Both values are used in the final digest computation.
+
+4. **Nonce and cnonce logic:**
+   - Since `nonce` is new (i.e., different from `self.last_nonce`), the `if nonce == self.last_nonce` condition is `False` → `['N']`.
+   - A new `cnonce` is generated.
+
+5. **Final digest construction:**
+   - The method builds the digest string based on the provided challenge values.
+
+---
+
+### Branch tracking:
+1. **Line 31:** `if algorithm is None` → `['N']`.
+2. **Line 35:** `if _algorithm == 'MD5' or _algorithm == 'MD5-SESS'` → `['Y']`.
+3. **Line 37:** `if isinstance(x, str)` (used in the `MD5` hash function) → Depending on the input (string or bytes), but in this case, `x` is a string → `['Y']`.
+4. **Line 41:** `elif _algorithm == 'SHA'` → `['N']`.
+5. **Line 50:** `if hash_utf8 is None` → `['N']`.
+6. **Line 56:** `if p_parsed.query` → If the URL has a query parameter (e.g., `?key=value`), this is `True`, otherwise `False`. In our input, the URL is `http://httpbin.org/digest-auth/auth/user/pass`, which has no query → `['N']`.
+7. **Line 65:** `if nonce == self.last_nonce` → `['N']`.
+8. **Line 77:** `if _algorithm == 'MD5-SESS'` → `['N']`.
+9. **Line 80:** `if qop is None` → `['N']`.
+10. **Line 82:** `elif qop == 'auth' or 'auth' in qop.split(',')` → Since `qop == 'auth'`, this condition is `True` → `['Y']`.
+11. **Line 91:** `if opaque` → `['Y']`.
+12. **Line 93:** `if algorithm` → `['Y']`.
+13. **Line 95:** `if entdig` → `['N']`.
+14. **Line 97:** `if qop` → `['Y']`.
+
+### Final updated code with branch annotations:
+[ANSWER]
+1 import os
+2 import re
+3 import time
+4 import hashlib
+5 import logging
+6 from base64 import b64encode
+7 from .compat import urlparse, str
+8 from .utils import parse_dict_header
+9 
+10 log = logging.getLogger(__name__)
+11 CONTENT_TYPE_FORM_URLENCODED = 'application/x-www-form-urlencoded'
+12 CONTENT_TYPE_MULTI_PART = 'multipart/form-data'
+13 
+14 class HTTPDigestAuth(AuthBase):
+15     def __init__(self, username, password):
+16         self.username = username
+17         self.password = password
+18         self.last_nonce = ''
+19         self.nonce_count = 0
+20         self.chal = {}
+21         self.pos = None
+22 
+23     def build_digest_header(self, method, url):
+24 
+25         realm = self.chal['realm']
+26         nonce = self.chal['nonce']
+27         qop = self.chal.get('qop')
+28         algorithm = self.chal.get('algorithm')
+29         opaque = self.chal.get('opaque')
+30 
+31         if algorithm is None: ## [BRANCH]taken=[N][/BRANCH]
+32             _algorithm = 'MD5'
+33         else:
+34             _algorithm = algorithm.upper()
+35         if _algorithm == 'MD5' or _algorithm == 'MD5-SESS': ## [BRANCH]taken=[Y][/BRANCH]
+36             def md5_utf8(x):
+37                 if isinstance(x, str): ## [BRANCH]taken=[Y][/BRANCH]
+38                     x = x.encode('utf-8')
+39                 return hashlib.md5(x).hexdigest()
+40             hash_utf8 = md5_utf8
+41         elif _algorithm == 'SHA': ## [BRANCH]taken=[N][/BRANCH]
+42             def sha_utf8(x):
+43                 if isinstance(x, str):
+44                     x = x.encode('utf-8')
+45                 return hashlib.sha1(x).hexdigest()
+46             hash_utf8 = sha_utf8
+47 
+48         KD = lambda s, d: hash_utf8("%s:%s" % (s, d))
+49 
+50         if hash_utf8 is None: ## [BRANCH]taken=[N][/BRANCH]
+51             return None
+52 
+53         entdig = None
+54         p_parsed = urlparse(url)
+55         path = p_parsed.path
+56         if p_parsed.query: ## [BRANCH]taken=[N][/BRANCH]
+57             path += '?' + p_parsed.query
+58 
+59         A1 = '%s:%s:%s' % (self.username, realm, self.password)
+60         A2 = '%s:%s' % (method, path)
+61 
+62         HA1 = hash_utf8(A1)
+63         HA2 = hash_utf8(A2)
+64 
+65         if nonce == self.last_nonce: ## [BRANCH]taken=[N][/BRANCH]
+66             self.nonce_count += 1
+67         else:
+68             self.nonce_count = 1
+69         ncvalue = '%08x' % self.nonce_count
+70         s = str(self.nonce_count).encode('utf-8')
+71         s += nonce.encode('utf-8')
+72         s += time.ctime().encode('utf-8')
+73         s += os.urandom(8)
+74 
+75         cnonce = (hashlib.sha1(s).hexdigest()[:16])
+76         noncebit = "%s:%s:%s:%s:%s" % (nonce, ncvalue, cnonce, qop, HA2)
+77         if _algorithm == 'MD5-SESS': ## [BRANCH]taken=[N][/BRANCH]
+78             HA1 = hash_utf8('%s:%s:%s' % (HA1, nonce, cnonce))
+79 
+80         if qop is None: ## [BRANCH]taken=[N][/BRANCH]
+81             respdig = KD(HA1, "%s:%s" % (nonce, HA2))
+82         elif qop == 'auth' or 'auth' in qop.split(','): ## [BRANCH]taken=[Y][/BRANCH]
+83             respdig = KD(HA1, noncebit)
+84         else:
+85             return None
+86 
+87         self.last_nonce = nonce
+88 
+89         base = 'username="%s", realm="%s", nonce="%s", uri="%s", ' \
+90                'response="%s"' % (self.username, realm, nonce, path, respdig)
+91         if opaque: ## [BRANCH]taken=[Y][/BRANCH]
+92             base += ', opaque="%s"' % opaque
+93         if algorithm: ## [BRANCH]taken=[Y][/BRANCH]
+94             base += ', algorithm="%s"' % algorithm
+95         if entdig: ## [BRANCH]taken=[N][/BRANCH]
+96             base += ', digest="%s"' % entdig
+97         if qop: ## [BRANCH]taken=[Y][/BRANCH]
+98             base += ', qop="auth", nc=%s, cnonce="%s"' % (ncvalue, cnonce)
+99 
+100         return 'Digest %s' % (base)
+101 
+102     def handle_401(self, r, **kwargs):
+103 
+104         if self.pos is not None:
+105             r.request.body.seek(self.pos)
+106         num_401_calls = getattr(self, 'num_401_calls', 1)
+107         s_auth = r.headers.get('www-authenticate', '')
+108 
+109         if 'digest' in s_auth.lower() and num_401_calls < 2:
+110 
+111             setattr(self, 'num_401_calls', num_401_calls + 1)
+112             pat = re.compile(r'digest ', flags=re.IGNORECASE)
+113             self.chal = parse_dict_header(pat.sub('', s_auth, count=1))
+114 
+115             r.content
+116             r.raw.release_conn()
+117             prep = r.request.copy()
+118             prep.prepare_cookies(r.cookies)
+119 
+120             prep.headers['Authorization'] = self.build_digest_header(
+121                 prep.method, prep.url)
+122             _r = r.connection.send(prep, **kwargs)
+123             _r.history.append(r)
+124             _r.request = prep
+125 
+126             return _r
+127 
+128         setattr(self, 'num_401_calls', 1)
+129         return r
+130 
+131     def __call__(self, r):
+132         if self.last_nonce:
+133             r.headers['Authorization'] = self.build_digest_header(r.method, r.url)
+134         try:
+135             self.pos = r.body.tell()
+136         except AttributeError:
+137             pass
+138         r.register_hook('response', self.handle_401)
+139         return r
+140 [/ANSWER]
+
+### Final Note:
+The predicted behavior was based on the input given to `build_digest_header`. The `qop` is `'auth'`, so the condition `elif qop == 'auth' or 'auth' in qop.split(',')` is taken once. Similarly, other branch conditions are evaluated based on the provided values. This tracing assumes that the logic follows this branch path under the given input.
+
+[FILEPATH] nikanderev-Test_Linear_Prediction_Model_with_Random_Transformation-5c79fc0/Python/diann-dev-python-sampling_12/18-1m.py [/FILEPATH]
+import sys
+from pathlib import Path
+from src.diann import Diann
+from src.reporting import Reporting
+from test.util import get_data_path
+
+def get_test_file(file: str) -> Path:
+    return get_data_path() / "python" / "diann-dev" / file
+
+def test_search_modals():
+    input_folder = get_test_file("small_modals")
+    decoys = False
+    main()
+
+def main():
+    # Create the output directory if it doesn't exist
+    out_folder = Path("./diann_output/")
+    out_folder.mkdir(parents=True, exist_ok=True)
+
+    # Initialize Diann
+    diann = Diann()
+
+    # Set configuration parameters
+    diann.set_config({
+        "decoys": "0",  # Don't use decoys
+        "minimal_mode": "1",  # Enable minimal mode
+        "output_format": "mzTab",  # Set output format
+        "output_folder": str(out_folder),  # Set output folder
+        "threads": str(1),  # Number of threads
+        "relative_path": "1",  # Use relative paths
+    })
+
+    # Set path parameters
+    diann.set_path({
+        "f": str(Path(__file__).parent / "lib/DiaNN/DiaNN"),  # Path to the DiaNN executable
+        "lib": Path(__file__).parent / "lib/DiaNN/",  # Path to the DiaNN library
+        "ref": Path(__file__).parent / "lib/ref/",  # Reference path
+        "quant": None,  # Path to quantification data
+        "docs": "docs/",  # Path to documentation
+    })
+
+    # Set input parameters
+    diann.set_input({
+        "input_folder": str(get_test_file("input_folder")),  # Input folder
+        "fasta": "UP000186416_9606.fasta",  # FASTA file
+        "text": "3_SART2b.txt",  # Text file
+        "peptides": "pep_lib.pkl",  # Peptides library file
+        "mzml": None,  # MZML file (optional)
+        "varmods": "var_mods.csv",  # Variable modifications file
+    })
+
+    # Run Diann
+    output = diann.run()
+
+    # Print the output
+    print(output)
+
+    # Define input variables and their types
+    input_vars = {
+        "decoys": bool,
+        "lib": str,
+        "fasta": str,
+        "mzml": str,
+        "text": str,
+        "varmods": str,
+        "peptides": str,
+        "out": str,
+        "format": str,
+        "rt": str,
+        "advanced": str,
+        "conding": str,
+        "quant": str,
+        "help": bool,
+        "version": bool,
+        "input_folder": str,
+    }
+
+    # Add Diann output to Reporting
+    Reporting.add(Diann.run, input_vars)
+
+    # Print the Diann version
+    print("DiaNN:", diann.get_version())
+
+    # Return the output path
+    return Path(diann.out)
+
+if __name__ == "__main__":
+    test_search_modals()
+
+[FILEPATH] nikanderev-Test_Linear_Prediction_Model_with_Random_Transformation-5c79fc0/Python/diann-dev-python-sampling_12/18-30s.py [/FILEPATH]
+import logging
+import numpy as np
+import pandas as pd
+import cupy as cp
+from tqdm import tqdm
+import os
+import time
+import re
+
+from cuda_python import (
+    CudaEigenvalueSolver,
+    CudaSVD,
+    CudaLUDecomposition,
+    CudaLUType,
+    CudaPartialPivLU,
+    CudaScipyLU,
+    CudaGram,
+    CudaSVDOptions,
+    CudaSVDType,
+)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+PLOTS_DIR = "./plots"
+os.makedirs(PLOTS_DIR, exist_ok=True)
+
+def test_cuda_eigenvalues():
+    # Define the input sizes and iteration counts
+    INPUT_SIZES = [10, 100, 500, 1000, 5000, 10000]
+    ITERATIONS = 10
+    DTYPE = np.float64
+
+    # Initialize the solver
+    solver = CudaEigenvalueSolver(cuda_use_64bit_index=True)
+
+    # Data structure to store results
+    eigenvalue_data = []
+
+    logger.info("Starting eigenvalue solver tests")
+    logger.info(f"Input sizes: {INPUT_SIZES}")
+    logger.info(f"Iterations per size: {ITERATIONS}")
+    logger.info(f"Data type: {DTYPE}")
+
+    # Run tests for each input size
+    for size in INPUT_SIZES:
+        try:
+            logger.info(f"\nProcessing size {size}x{size}")
+            device_memory = solver.get_gpu_memory()
+            logger.info(f"Available GPU memory: {device_memory} GB")
+            logger.info("Generating matrices...")
+
+            # Generate test matrices
+            np_array = np.random.rand(size, size).astype(DTYPE)
+            logger.info(f"CPU matrix generation complete: {np_array.shape}")
+
+            # Create CUDA array
+            logger.info("Copying matrix to CUDA")
+            cuda_array = cp.array(np_array)
+
+            # Warm-up
+            logger.info("Performing warm-up runs")
+            for _ in range(3):
+                _ = solver.compute_eigenvalues(cuda_array)
+
+            logger.info("Starting performance tests")
+            for _ in tqdm(range(ITERATIONS), desc=f"Size {size}"):
+                try:
+                    start_time = time.perf_counter()
+                    eigenvalues = solver.compute_eigenvalues(cuda_array)
+                    elapsed_time = time.perf_counter() - start_time
+
+                    # Collect metrics
+                    eigenvalue_data.append({
+                        "size": size,
+                        "compute_time": elapsed_time,
+                        "error_mean": float(np.mean(cp.abs(eigenvalues).get())),
+                        "error_std": float(np.std(cp.abs(eigenvalues).get())),
+                    })
+                except Exception as e:
+                    logger.error(f"Error in iteration {i}: {str(e)}")
+                    logger.error(f"Matrix: {cuda_array[:3, :3]}")
+                    if hasattr(e, "error"):
+                        logger.error(f"Underlying error: {e.error}")
+                    else:
+                        logger.error(f"Error type: {type(e)}")
+
+            logger.info(f"Completed size {size}x{size}")
+
+        except Exception as e:
+            logger.error(f"Error processing size {size}: {str(e)}")
+            logger.error(f"Error type: {type(e)}")
+            if hasattr(e, "error"):
+                logger.error(f"Underlying error: {e.error}")
+
+    # Convert results to DataFrame
+    eigenvalue_df = pd.DataFrame(eigenvalue_data)
+    logger.info("\nEigenvalue computation results:")
+    logger.info(eigenvalue_df.to_string())
+
+    # Calculate statistics
+    eigenvalue_stats = eigenvalue_df.groupby("size").agg(
+        compute_time_mean=("compute_time", "mean"),
+        compute_time_std=("compute_time", "std"),
+        error_mean_mean=("error_mean", "mean"),
+        error_std_mean=("error_std", "mean"),
+    ).reset_index()
+
+    logger.info("\nAggregate statistics:")
+    logger.info(eigenvalue_stats.to_string())
+
+    # Save results
+    eigenvalue_stats.to_csv(
+        os.path.join(PLOTS_DIR, "eigenvalue_results.csv"),
+        index=False,
+    )
+    logger.info(f"Results saved to {PLOTS_DIR}/eigenvalue_results.csv")
+
+def test_cuda_lu():
+    # Define the input sizes and iteration counts
+    INPUT_SIZES = [10, 100, 500, 1000, 5000, 10000]
+    ITERATIONS

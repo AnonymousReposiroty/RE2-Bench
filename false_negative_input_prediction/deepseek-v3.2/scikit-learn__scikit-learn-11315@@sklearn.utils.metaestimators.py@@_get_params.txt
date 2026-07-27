@@ -1,0 +1,169 @@
+<<FUNCTION_NAME>>
+
+_get_params
+
+<<CODE>>
+
+from abc import ABCMeta, abstractmethod
+from operator import attrgetter
+from functools import update_wrapper
+import numpy as np
+from ..utils import safe_indexing
+from ..externals import six
+from ..base import BaseEstimator
+
+__all__ = ['if_delegate_has_method']
+
+class _BaseComposition(six.with_metaclass(ABCMeta, BaseEstimator)):
+    """Handles parameter management for classifiers composed of named estimators.
+    """
+    @abstractmethod
+    def __init__(self):
+        pass
+
+    def _get_params(self, attr, deep=True):
+        out = super(_BaseComposition, self).get_params(deep=deep)
+        if not deep:
+            return out
+        estimators = getattr(self, attr)
+        out.update(estimators)
+        for name, estimator in estimators:
+            if hasattr(estimator, 'get_params'):
+                for key, value in six.iteritems(
+                        estimator.get_params(deep=True)):
+                    out['%s__%s' % (name, key)] = value
+        return out
+
+    def _set_params(self, attr, **params):
+        # Ensure strict ordering of parameter setting:
+        # 1. All steps
+        if attr in params:
+            setattr(self, attr, params.pop(attr))
+        # 2. Step replacement
+        names, _ = zip(*getattr(self, attr))
+        for name in list(six.iterkeys(params)):
+            if '__' not in name and name in names:
+                self._replace_estimator(attr, name, params.pop(name))
+        # 3. Step parameters and other initialisation arguments
+        super(_BaseComposition, self).set_params(**params)
+        return self
+
+    def _replace_estimator(self, attr, name, new_val):
+        # assumes `name` is a valid estimator name
+        new_estimators = list(getattr(self, attr))
+        for i, (estimator_name, _) in enumerate(new_estimators):
+            if estimator_name == name:
+                new_estimators[i] = (name, new_val)
+                break
+        setattr(self, attr, new_estimators)
+
+    def _validate_names(self, names):
+        if len(set(names)) != len(names):
+            raise ValueError('Names provided are not unique: '
+                             '{0!r}'.format(list(names)))
+        invalid_names = set(names).intersection(self.get_params(deep=False))
+        if invalid_names:
+            raise ValueError('Estimator names conflict with constructor '
+                             'arguments: {0!r}'.format(sorted(invalid_names)))
+        invalid_names = [name for name in names if '__' in name]
+        if invalid_names:
+            raise ValueError('Estimator names must not contain __: got '
+                             '{0!r}'.format(invalid_names))
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'transformers': None, 'remainder': 'passthrough', 'n_jobs': 1, 'transformer_weights': None, '_remainder': ['remainder', 'passthrough', None], 'transformers_': None}, 'args': {'attr': '_transformers'}, 'kwargs': {'deep': False}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+{'n_jobs': 1, 'remainder': 'passthrough', 'transformer_weights': None, 'transformers': None}
+
+<<LLM_RESPONSE>>
+
+Let's reason through this step by step.  
+
+The `_get_params` method in `_BaseComposition`:
+
+1. First calls `super(_BaseComposition, self).get_params(deep=deep)`. That will call `BaseEstimator.get_params`.  
+2. Then if `deep=True`, it gets the estimators via `getattr(self, attr)`, and for each `(name, estimator)` adds entries like `name__param` to `out`.
+
+Given the output:  
+
+```json
+{
+    "n_jobs": 1,
+    "remainder": "passthrough",
+    "transformer_weights": null,
+    "transformers": null
+}
+```
+
+We notice:  
+- No estimator-specific parameters appear (like `transformer1__param`), meaning either `attr` points to an empty list of estimators, or `deep=False`.  
+- But `deep=True` would still show `transformers: null` from base `get_params`, then `attr` estimators might add nothing if empty.  
+- The keys `n_jobs`, `remainder`, `transformer_weights`, `transformers` match known attributes of `ColumnTransformer`.  
+
+In `ColumnTransformer`, `_transformers` property returns `[(name, trans) for name, trans, _ in self.transformers]`.  
+
+The output has `transformers: null`, meaning `self.transformers` is likely `None` or empty.  
+
+`attr` in `_get_params` is probably `'transformers'`.  
+If `self.transformers` is `None`, then `getattr(self, 'transformers')` is `None`, so in `_get_params`, `estimators = getattr(self, attr)` is `None`, and the loop `for name, estimator in estimators:` won't run.  
+
+So `deep=True` would still include deep parameters from estimators inside transformers if they existed, but here there are none.  
+
+The output suggests `transformer_weights: null`, `remainder: "passthrough"`, `n_jobs: 1`, `transformers: null`.  
+
+That means:  
+- `self.transformers = None`  
+- `self.remainder = "passthrough"`  
+- `self.n_jobs = 1`  
+- `self.transformer_weights = None`  
+- `self._remainder` maybe same as `remainder`? Probably `"passthrough"` as well.  
+- `self.transformers_` probably doesn't exist yet (`None`).  
+
+Also `attr` should be `"transformers"` because that's the attribute name used in `ColumnTransformer._get_params`.  
+
+`deep` must be `True` because we see `transformers: null` from `BaseEstimator.get_params` deep copy, but no extra nested keys from estimators (since none).  
+
+Wait, if `deep=False`, then `_get_params` returns just `super(...).get_params(deep=False)`, no estimators added. That matches too: the output keys are exactly `self`'s direct params from `BaseEstimator.get_params(deep=False)`.
+
+Let's test: if `deep=False`, then `super(...).get_params(deep=False)` returns `{ 'n_jobs': 1, 'remainder': 'passthrough', 'transformer_weights': None, 'transformers': None }` directly from `self` attributes. No extra loop for estimators.
+
+So likely `deep=False`.  
+
+Thus:  
+- `self.transformers = None`  
+- `self.remainder = "passthrough"`  
+- `self.n_jobs = 1`  
+- `self.transformer_weights = None`  
+- `self._remainder = "passthrough"`  
+- `self.transformers_ = None`  
+- `args: {"attr": "transformers"}`  
+- `kwargs: {"deep": false}`  
+
+[THOUGHT]
+The output contains only the direct parameters of the object, without any nested estimator parameters, which indicates `deep=False`. Also, the `attr` parameter is likely `"transformers"` because `_get_params` uses `attr` to get the estimator list, but in `ColumnTransformer`, `_get_params` calls `self._get_params('transformers', deep=deep)`. Given `self.transformers` is `None` and `self.transformers_` is `None`, `attr="transformers"` works fine. The `_remainder` attribute likely matches `remainder`.  
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "transformers": null,
+        "remainder": "passthrough",
+        "n_jobs": 1,
+        "transformer_weights": null,
+        "_remainder": "passthrough",
+        "transformers_": null
+    },
+    "args": {
+        "attr": "transformers"
+    },
+    "kwargs": {
+        "deep": false
+    }
+}
+```
+[/INPUT]

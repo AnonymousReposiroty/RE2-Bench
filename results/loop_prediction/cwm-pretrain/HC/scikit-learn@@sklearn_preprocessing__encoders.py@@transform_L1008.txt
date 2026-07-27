@@ -1,0 +1,465 @@
+[/ANSWER]
+1 from numbers import Integral
+2 import numpy as np
+3 from scipy import sparse
+4 from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
+5 from sklearn.utils._set_output import _get_output_config
+6 from sklearn.utils.validation import (
+7     _check_feature_names_in,
+8     check_is_fitted,
+9     validate_data,
+10 )
+11 
+12 class OneHotEncoder(_BaseEncoder):
+13 
+14     def __init__(self, *, categories='auto', drop=None, sparse_output=True, dtype=np.float64, handle_unknown='error', min_frequency=None, max_categories=None, feature_name_combiner='concat'):
+15         self.categories = categories
+16         self.sparse_output = sparse_output
+17         self.dtype = dtype
+18         self.handle_unknown = handle_unknown
+19         self.drop = drop
+20         self.min_frequency = min_frequency
+21         self.max_categories = max_categories
+22         self.feature_name_combiner = feature_name_combiner
+23 
+24     def transform(self, X):
+25         check_is_fitted(self)
+26         transform_output = _get_output_config('transform', estimator=self)['dense']
+27         if transform_output != 'default' and self.sparse_output:
+28             capitalize_transform_output = transform_output.capitalize()
+29             raise ValueError(f'{capitalize_transform_output} output does not support sparse data. Set sparse_output=False to output {transform_output} dataframes or disable {capitalize_transform_output} output via` ohe.set_output(transform="default").')
+30         if self.handle_unknown == 'warn':
+31             warn_on_unknown, handle_unknown = (True, 'infrequent_if_exist')
+32         else:
+33             warn_on_unknown = self.drop is not None and self.handle_unknown in {'ignore', 'infrequent_if_exist'}
+34             handle_unknown = self.handle_unknown
+35         X_int, X_mask = self._transform(X, handle_unknown=handle_unknown, ensure_all_finite='allow-nan', warn_on_unknown=warn_on_unknown)
+36         n_samples, n_features = X_int.shape
+37         if self._drop_idx_after_grouping is not None:
+38             to_drop = self._drop_idx_after_grouping.copy()
+39             keep_cells = X_int != to_drop
+40             for i, cats in enumerate(self.categories_):## [STATE]i=[0][/STATE] [STATE]cats=['a', 'b'][/STATE] [STATE]enumerate(self.categories_):=[(0, ['a', 'b'])][/STATE]
+41                 if to_drop[i] is None:
+42                     to_drop[i] = len(cats)
+43             to_drop = to_drop.reshape(1, -1)
+44             X_int[X_int > to_drop] -= 1
+45             X_mask &= keep_cells
+46         mask = X_mask.ravel()
+47         feature_indices = np.cumsum([0] + self._n_features_outs)
+48         indices = (X_int + feature_indices[:-1]).ravel()[mask]
+49         indptr = np.empty(n_samples + 1, dtype=int)
+50         indptr[0] = 0
+51         np.sum(X_mask, axis=1, out=indptr[1:], dtype=indptr.dtype)
+52         np.cumsum(indptr[1:], out=indptr[1:])
+53         data = np.ones(indptr[-1])
+54         out = sparse.csr_matrix((data, indices, indptr), shape=(n_samples, feature_indices[-1]), dtype=self.dtype)
+55         if not self.sparse_output:
+56             return out.toarray()
+57         else:
+58             return out
+ [/ANSWER]
+
+[FILEPATH] MLH-Fellowship-2024-repo-template-134c8b1/cyber/src/eval/levenshtein_test.py [/FILEPATH]
+#!/usr/bin/env python3
+import os
+from typing import List, Tuple
+import subprocess
+import nltk
+import csv
+import sys
+import re
+
+input_file_path = sys.argv[1]
+output_file_path = sys.argv[2]
+
+# Get the directory of the script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Path to the Levenshtein distance program (levenshtein.cpp)
+levenshtein_program_path = os.path.join(script_dir, "..", "..", "3rd-party", "levenshtein")
+all_lines: List[Tuple[int, str]] = []
+for filepath in [input_file_path, output_file_path]:
+    with open(filepath, "r") as file:
+        lines = file.readlines()
+        line_num = 0
+        for line in lines:
+            line_num += 1
+            all_lines.append((line_num, line))
+
+# Maximum line number
+max_line_num = max(line_num for line_num, _ in all_lines)
+
+output_file_path = sys.argv[2]
+total_levenshtein_distance = 0
+for line_num in range(1, max_line_num + 1):
+    line = [tup[1] for tup in all_lines if tup[0] == line_num][0]
+    if line_num == 1:
+        continue
+    matches = re.findall(r'\(\d+,\d+\)', line)
+    if len(matches) == 2:
+        match1, match2 = matches[0], matches[1]
+        coordinate1 = match1.strip("()")
+        coordinate2 = match2.strip("()")
+        coordinates = [int(i) for i in re.findall(r'\d+', match1 + match2)]
+        i1, j1 = map(int, match1.strip("()").split(','))
+        i2, j2 = map(int, match2.strip("()").split(','))
+        str1 = ''.join([all_lines[i-1][1][j-1] for i, j in zip(range(i1, i2+1), range(j1, j2+1))])
+        input_line_number = line_num
+        output_line = [tup[1] for tup in all_lines if tup[0] == input_line_number][0]
+        output_matches = re.findall(r'\(\d+,\d+\)', output_line)
+        output_coordinate1 = output_matches[0].strip("()")
+        output_coordinate2 = output_matches[1].strip("()")
+        output_i1, output_j1 = map(int, output_matches[0].strip("()").split(','))
+        output_i2, output_j2 = map(int, output_matches[1].strip("()").split(','))
+        str2 = ''.join([all_lines[i-1][1][j-1] for i, j in zip(range(output_i1, output_i2+1), range(output_j1, output_j2+1))])
+
+        # Calculate Levenshtein distance using external program
+        process = subprocess.run(
+            [levenshtein_program_path, str1, str2],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        if process.returncode == 0:
+            levenshtein_distance = int(process.stdout.strip())
+            total_levenshtein_distance += levenshtein_distance
+        else:
+            total_levenshtein_distance += 10000000000
+            print(f"Error calculating Levenshtein distance for line {line_num}: {process.stderr}", file=sys.stderr)
+
+# Calculate 1 - (Levenshtein_distance / max_length) * 100 to get percentage
+length = len([tup for tup in all_lines if tup[0] > 1])
+if length == 0:
+    length = 1
+percentage = 100 - ((total_levenshtein_distance / length) * 100)
+
+print(f"{total_levenshtein_distance}")
+print(f"{percentage}")
+
+[FILEPATH] MLH-Fellowship-2024-repo-template-134c8b1/cyber/src/eval/eval_bash.sh [/FILEPATH]
+#!/usr/bin/env bash
+
+INPUT_FILE=$(pwd)/$1
+OUTPUT_FILE=$(pwd)/$2
+echo $INPUT_FILE
+echo $OUTPUT_FILE
+
+# Get the directory of the script
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+# Path to the helper program
+TEST_HELPER_PATH="${SCRIPT_DIR}/levenshtein_test.py"
+
+echo $(python3 $TEST_HELPER_PATH $INPUT_FILE $OUTPUT_FILE)
+
+[FILEPATH] MLH-Fellowship-2024-repo-template-134c8b1/cyber/src/baseline/GPT-4o/model.py [/FILEPATH]
+import os
+import sys
+
+cur_dir = os.getcwd()
+
+if "cyber" not in cur_dir:
+    cur_dir = os.path.abspath(os.path.join(os.getcwd(), ".."))
+    if "cyber" not in cur_dir:
+        cur_dir = os.path.abspath(os.path.join(os.getcwd(), "../.."))
+        if "cyber" not in cur_dir:
+            raise Exception(f"cyber not in {cur_dir}")
+sys.path.append(cur_dir)
+
+import openai
+import argparse
+import ast
+import re
+import os
+import copy
+import logging
+from collections import deque
+from typing import Any, Optional
+from concurrent.futures import ThreadPoolExecutor
+
+from promptgen import (
+    gen_prompt,
+    recover_prompt,
+    LOC_PRINTING_PATTERN,
+    FIX_STATE_WITH_LOC_PATTERN,
+    get_dict_from_string,
+    BEFORE_FUNCTION_INPUT,
+    AFTER_FUNCTION_INPUT,
+    PRINT_OF_OUTPUT,
+)
+from utils import (
+    available_model,
+    load_data,
+    CleanSign,
+    repeated_values,
+    LOC,
+    eval_script,
+    fix_variable_names,
+    print_output_to_file,
+    decode_confusing_values,
+    fix_state,
+)
+import signal
+from contextlib import contextmanager
+from eval.levenshtein import levenshtein_distance
+
+
+# Constants for the different types of prompts
+EXPLANATION_PROMPT = "explain"
+INFERENCE_PROMPT = "infer"
+TESTING_PROMPT = "test"
+
+MODEL = "gpt-4o"
+ENDPOINT = os.getenv(
+    "OPENAI_ENDPOINT",
+    "https://api.openai.com/v1/chat/completions",
+)
+KEY = os.getenv("OPENAI_KEY", "na")
+
+openai.api_key = KEY
+
+
+# Extract the list of values within each loop state
+def extract_states(line):
+    # Define the regex pattern to find [STATE] and [/STATE]
+    pattern = r"\#\# \[STATE\](.*?)\[\/STATE\]"
+
+    # Find all matches of the pattern in the line
+    states = re.findall(pattern, line)
+
+    # Split each state by '|' and collect the results
+    split_states = [state.split("|") for state in states]
+
+    return split_states
+
+
+# Extract the list of values within each loop state
+def extract_states(line):
+    # Define the regex pattern to find [STATE] and [/STATE]
+    pattern = r"\#\# \[STATE\](.*?)\[\/STATE\]"
+
+    # Find all matches of the pattern in the line
+    states = re.findall(pattern, line)
+
+    # Split each state by '|' and collect the results
+    split_states = [state.split("|") for state in states]
+
+    return split_states
+
+
+# Extract and evaluate the arguments within each loop state
+def extract_eval(line):
+    # Define the regex pattern to find [STATE] and [/STATE]
+    pattern = r"\#\# \[EVAL\](.*?)\[\/EVAL\]"
+
+    # Find all matches of the pattern in the line
+    states = re.findall(pattern, line)
+
+    # Split each state by '|' and collect the results
+    evald_states = [eval(state) for state in states]
+
+    return evald_states
+
+
+# Extract the list of values within each loop state
+def extract_states(line):
+    # Define the regex pattern to find [STATE] and [/STATE]
+    pattern = r"\#\# \[STATE\](.*?)\[\/STATE\]"
+
+    # Find all matches of the pattern in the line
+    states = re.findall(pattern, line)
+
+    # Split each state by '|' and collect the results
+    split_states = [state.split("|") for state in states]
+
+    return split_states
+
+
+# Get the number of times each value is repeated in the trace
+def count_occurrences(traces):
+    counts = {}
+    for trace in traces:
+        counts[trace] = traces.count(trace)
+    return counts
+
+
+# Extract variables and values from prompt
+def extract_variable_values(input_string):
+    results = []
+    pattern = r"\#\# \[STATE\](.*?)\[\/STATE\]"
+
+    # Find all matches of the pattern in the line
+    states = re.findall(pattern, input_string)
+
+    # Split each state by '|' and collect the results
+    for state in states:
+        parts = state.split(":")
+        if len(parts) >= 3:
+            results.append(parts[2])
+    return results
+
+
+def format_values(input_string):
+    values = []
+    pattern = r"\#\# \[STATE\](.*?)\[\/STATE\]"
+
+    # Find all matches of the pattern in the line
+    states = re.findall(pattern, input_string)
+
+    # Split each state by '|' and collect the results
+    for state in states:
+        parts = state.split(":")
+        if len(parts) >= 3:
+            variable_values = parts[2]
+            try:
+                print("variable values: ", variable_values)
+                eval_variable_values = eval(variable_values)
+            except:
+                eval_variable_values = [
+                    x.strip() for x in variable_values.strip().split(",")
+                ]
+            if isinstance(eval_variable_values, str):
+                values.append(f"{variable_values}")
+            else:
+                if isinstance(eval_variable_values, list):
+                    values.append(", ".join(str(x) for x in eval_variable_values))
+                else:
+                    values.append(f"{eval_variable_values}")
+    return values
+
+
+def get_correct_values(correct_ans_input, variables):
+    correct_values = []
+    correct_values_str = ""
+    variable_i = 0
+    variables_list = variables.split(",")
+    for var in variables_list:
+        line = correct_ans_input.split("## [STATE]" + var.strip() + ":")[1]
+        value = line.split(":")[0]
+        correct_values.append(value)
+        variable_i += 1
+    correct_values_str = "## [STATE]" + variables + ":" + "|".join(correct_values)
+    return correct_values_str
+
+
+def reformat_input_ans(input_string):
+    input_string = input_string.replace("{", "").replace("}", "").replace('"', "")
+    result = ""
+    pattern = r"\#\# \[STATE\](.*?)\[\/STATE\]"
+    # Find all matches of the pattern in the line
+    states = re.findall(pattern, input_string)
+    # Split each state by '|' and collect the results
+    for state in states:
+        parts = state.split(":")
+        if len(parts) >= 3:
+            formatted = "\n".join(
+                ["## [STATE]" + parts[0] + ":" + parts[1] + ":" + value + "[/STATE]"]
+                for value in parts[2:]
+            )
+            input_string = input_string.replace(
+                "## [STATE]" + parts[0] + ":" + parts[1] + ":" + "|".join(parts[2:]),
+                formatted,
+            )
+
+    return input_string
+
+
+def generate_input_dict_ans(string):
+    """
+    Generate a nested dictionary with keys (key1, key2, key3) and value set to "???",
+    where each key-value pair starts with a line that contains the phrase "## [STATE]".
+
+    Parameters:
+    string (str): The input string containing lines to be processed.
+
+    Returns:
+    dict: A nested dictionary where keys are tuples representing the order of key1, key2, key3
+          and the value is set to "???".
+    """
+    # Split the string into lines
+    lines = string.split("\n")
+    # Filter lines that contain "## [STATE]"
+    filtered_lines = [line for line in lines if "## [STATE]" in line]
+    # Initialize the dictionary
+    state_dict = {}
+    # Process each line
+    for line in filtered_lines:
+        line = line.replace("{", "").replace("}", "")
+        parts = line.split("## [STATE]")[-1]
+        parts = parts.split(":[/STATE]")
+        outer_key = parts[0]
+        inner_parts = parts[1].split(":")
+        if len(inner_parts) < 2:
+            continue
+        middle_key = inner_parts[0]
+        inner_dict = {}
+        for value in inner_parts[1:]:
+            inner_dict[value] = "???"
+        state_dict[(outer_key, middle_key)] = inner_dict
+    return state_dict
+
+
+def get_formatted_output(model_output):
+    if not model_output:
+        return None
+    output = re.sub("## ([A-Za-z_]+): ", "## [STATE]\\1: ", model_output)
+    output = output.replace("## [", "## [STATE]").replace("]", "[/STATE]")
+    output = reformat_input_ans(output)
+    print(output)
+    state_dict = generate_input_dict_ans(output)
+    for key, sub_dict in state_dict.items():
+        key1, key2 = key
+        print(key1, key2)
+        print(sub_dict)
+        values = extract_variable_values(output)
+        state_values = "|".join(values)
+        output = output.replace(f"## [STATE]{key1}:{key2}:", f"## [STATE]{key1}:{key2}:{state_values}[/STATE]")
+    return output
+
+
+def parse_loop_output(loop_output, ans_data, unique_vars, combinations, iteration_num, option_name):
+    """
+    Parse the LLM's loop output and compare it with the ground truth.
+
+    Args:
+        loop_output: The output from the LLM for the loop states.
+        ans_data: The ground truth data.
+        unique_vars: A list of unique variables.
+        combinations: A list of combinations of variables.
+        iteration_num: The number of iterations for the loop.
+        option_name: The name of the option being parsed.
+
+    Returns:
+        A dictionary containing the following keys:
+            - loop_state_output: The parsed loop output.
+            - loop_state_output_clean: The cleaned version of the loop output.
+            - is_correct: A boolean indicating whether the loop state output is correct.
+            - max_num: The maximum number of iterations in the loop.
+            - with_loc_print: The loop output with LOC printing enabled.
+            - signs: A dictionary containing information about the correctness of each variable.
+            - all_correct: A boolean indicating whether all variables are correct.
+            - cleaned_output: The cleaned output from the loop.
+            - combinations: The combinations of variables.
+    """
+    signs = {}
+    all_correct = False
+    ans_format = get_formatted_output(loop_output[option_name])
+    if not ans_format:
+        return {
+            "loop_state_output": None,
+            "loop_state_output_clean": None,
+            "is_correct": False,
+            "max_num": iteration_num,
+            "with_loc_print": None,
+            "signs": None,
+            "all_correct": False,
+            "cleaned_output": None,
+            "combinations": combinations,
+        }
+
+    loop_state_output = ans_format.replace("???", "???") + "\n"
+    with_loc_print = loop_state_output
+    for combination in combinations:
+        state_str = (
+            f"## [STATE]{combination}:{'|'.join(['

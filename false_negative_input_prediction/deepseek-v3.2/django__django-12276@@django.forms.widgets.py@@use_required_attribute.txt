@@ -1,0 +1,218 @@
+<<FUNCTION_NAME>>
+
+use_required_attribute
+
+<<CODE>>
+
+import copy
+import datetime
+import warnings
+from collections import defaultdict
+from itertools import chain
+from django.conf import settings
+from django.forms.utils import to_current_timezone
+from django.templatetags.static import static
+from django.utils import datetime_safe, formats
+from django.utils.datastructures import OrderedSet
+from django.utils.dates import MONTHS
+from django.utils.formats import get_format
+from django.utils.html import format_html, html_safe
+from django.utils.regex_helper import _lazy_re_compile
+from django.utils.safestring import mark_safe
+from django.utils.topological_sort import (
+    CyclicDependencyError, stable_topological_sort,
+)
+from django.utils.translation import gettext_lazy as _
+from .renderers import get_default_renderer
+
+__all__ = (
+    'Media', 'MediaDefiningClass', 'Widget', 'TextInput', 'NumberInput',
+    'EmailInput', 'URLInput', 'PasswordInput', 'HiddenInput',
+    'MultipleHiddenInput', 'FileInput', 'ClearableFileInput', 'Textarea',
+    'DateInput', 'DateTimeInput', 'TimeInput', 'CheckboxInput', 'Select',
+    'NullBooleanSelect', 'SelectMultiple', 'RadioSelect',
+    'CheckboxSelectMultiple', 'MultiWidget', 'SplitDateTimeWidget',
+    'SplitHiddenDateTimeWidget', 'SelectDateWidget',
+)
+MEDIA_TYPES = ('css', 'js')
+FILE_INPUT_CONTRADICTION = object()
+
+class FileInput(Input):
+    input_type = 'file'
+    needs_multipart_form = True
+    template_name = 'django/forms/widgets/file.html'
+    def use_required_attribute(self, initial):
+        return super().use_required_attribute(initial) and not initial
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'attrs': {}}, 'args': {'initial': None}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+True
+
+<<LLM_RESPONSE>>
+
+Let’s break this down.  
+
+The function `use_required_attribute` is:  
+
+```python
+def use_required_attribute(self, initial):
+    return super().use_required_attribute(initial) and (not initial)
+```  
+
+The `super()` call refers to `Input.use_required_attribute`.  
+From Django source code, the `Input` class’s `use_required_attribute` returns `True` if the widget is not `required=False` and if the field is required. But in the given structure, `self` only has an `attrs` dict with no `required` key inside, so `self.attrs` is `{}`. In Django, if `required` is not in `attrs`, it defaults to `True` for `required` attribute rendering, but `use_required_attribute` in `Input` returns `True` unless `self.attrs.get('required', True)` is `False`. Let’s check:  
+
+Actually, `Input` is a subclass of `Widget`.  
+In Django 3.2, `Widget.use_required_attribute` returns `True` only if `'required'` is not in `self.attrs` or `self.attrs['required']` is `True`.  
+
+From source:  
+
+```python
+# django/forms/widgets.py
+class Widget:
+    ...
+    def use_required_attribute(self, initial):
+        return not self.is_hidden and (self.attrs.get('required', True) or initial)
+```
+
+Wait — that’s different. Let’s check actual Django 3.2 source:  
+Actually, here’s the real code (`django/forms/widgets.py`, `Widget.use_required_attribute`):
+
+```python
+def use_required_attribute(self, initial):
+    return not self.is_hidden and (self.attrs.get('required') is True or initial)
+```
+
+No, that’s not it either. Let's recall:  
+
+I know `Input` inherits from `Widget`.  
+In Django 3.0–4.0, `Widget.use_required_attribute` is:  
+
+```python
+def use_required_attribute(self, initial):
+    return not self.is_hidden and self.attrs.get('required') is True
+```
+
+But that would ignore `initial`? That seems wrong. Let’s actually look it up from known behavior: The `FileInput` overrides because `initial` means a file already exists, so `required` shouldn’t be used in HTML validation.  
+
+The parent’s (`Input`’s) `use_required_attribute` is not overridden in `Input` (in real Django, `Input` doesn’t override it), so it uses `Widget.use_required_attribute`.  
+From Django 4.0 source:
+
+```python
+# Widget class
+def use_required_attribute(self, initial):
+    return not self.is_hidden and self.attrs.get('required') is True
+```
+
+Yes! So `Widget.use_required_attribute` returns `True` only if `required=True` is in `attrs` (explicitly). If `required` is not in `attrs`, `self.attrs.get('required')` is `None`, so it returns `False`.  
+
+But in our case, `self.attrs = {}`, so `self.attrs.get('required')` is `None`, so `Widget.use_required_attribute(initial)` returns `False`.  
+
+Then `FileInput.use_required_attribute` is:  
+
+```python
+super().use_required_attribute(initial) and (not initial)
+```
+
+We have `super(...)` = `False` (since `required` not in attrs).  
+`False and (not initial)` = `False`.  
+
+But the output is `True`. That means `super().use_required_attribute(initial)` must be `True`.  
+
+Thus `self.attrs.get('required')` must be `True`.  
+
+So `self.attrs` should be `{"required": True}`.  
+
+Also, the `and (not initial)` means `initial` must be `False` or falsy, otherwise `True and (not initial)` would be `False`.  
+
+But wait: Given `self.attrs = {}` in the structure, that’s fixed — maybe `self` in the actual call had `attrs = {"required": True}`? The structure says `self.attrs` is `{}` as a placeholder; we can change it. In the structure:  
+
+```
+{
+    "self": {
+        "attrs": {}
+    },
+    "args": {
+        "initial": XXX
+    },
+    "kwargs": {}
+}
+```
+
+It says `self.attrs` is `{}` as a placeholder `XXX`? No, it says `self.attrs` is `{}` literally — but the `XXX` is only for `initial`.  
+
+Hold on: reading the structure carefully:  
+
+```
+[STRUCTURE]
+{
+    "self": {
+        "attrs": {}
+    },
+    "args": {
+        "initial": XXX
+    },
+    "kwargs": {}
+}
+[\STRUCTURE]
+```
+
+It says `attrs` is `{}` fixed. That means the parent’s `use_required_attribute` returns `False` (because `required` not in attrs ⇒ `self.attrs.get('required')` is `None` ⇒ returns `False`). Then `False and (not initial)` = `False` for any `initial`. We can’t get `True`.  
+
+But maybe I recalled wrong: `Widget.use_required_attribute` in Django actually returns `True` if `required` is **not** in attrs? Let’s verify:  
+
+From actual Django 3.2 source:  
+
+```python
+def use_required_attribute(self, initial):
+    return not self.is_hidden and self.attrs.get('required', True)
+```
+
+Ah! Yes! That’s correct. The default is `True`. So if `required` not in attrs, `self.attrs.get('required', True)` returns `True`. Then `Widget.use_required_attribute` returns `True` (if not hidden).  
+
+So with `self.attrs = {}` and `self.is_hidden = False`, `super().use_required_attribute(initial)` is `True`.  
+
+Then `FileInput.use_required_attribute` returns `True and (not initial)`. So for output `True`, we need `(not initial) == True`, i.e., `initial` is `False` or falsy.  
+
+Thus `initial = False` or `initial = None` etc.  
+
+Given output is `True`, pick `initial = False`.  
+
+But also `self.is_hidden` matters. `FileInput` is not hidden (`input_type='file'`), so `not self.is_hidden` is `True`.  
+
+Therefore, with `self.attrs = {}`, `initial = False` gives output `True`.  
+
+Let’s test logic:  
+1. `super().use_required_attribute(initial)`:  
+   - `self.is_hidden`? No.  
+   - `self.attrs.get('required', True)` = `True`.  
+   So returns `True`.  
+2. `True and (not initial)` ⇒ `not initial` must be `True`, so `initial = False`.  
+
+Yes.  
+
+Thus final input:  
+
+```
+[THOUGHT]
+1. self.attrs = {} means required attribute is not set, so self.attrs.get('required', True) returns True.
+2. Widget.use_required_attribute returns True (since widget not hidden).
+3. Then FileInput returns True and (not initial).
+4. For output to be True, not initial must be True ⇒ initial must be False.
+[/THOUGHT]
+[INPUT]
+{
+    "self": {
+        "attrs": {}
+    },
+    "args": {
+        "initial": false
+    },
+    "kwargs": {}
+}
+[/INPUT]
+```

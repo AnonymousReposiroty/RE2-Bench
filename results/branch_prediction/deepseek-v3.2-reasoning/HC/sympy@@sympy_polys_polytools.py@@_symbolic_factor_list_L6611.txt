@@ -1,0 +1,107 @@
+[THOUGHT]
+We analyze the execution of `_symbolic_factor_list` with the given input: expr = "cos(phi)" (a sympy cosine expression), opt = {"fraction": true}, method = "factor".
+
+1. The function starts with `coeff, factors = S.One, []`.
+2. `Mul.make_args(expr)` returns a tuple containing just `cos(phi)`, so `args = [cos(phi)]`.
+3. We iterate over `args` (only one element: `arg = cos(phi)`):
+   - At line 27, check `arg.is_Number or (isinstance(arg, Expr) and pure_complex(arg))`. `cos(phi)` is not a number nor a pure complex, so the condition is false → branch not taken ('N').
+   - At line 30, check `arg.is_Pow and arg.base != S.Exp1`. `cos(phi)` is not a Pow, so false → branch not taken ('N').
+   - Since the above conditions are false, we go to the else branch at line 38 → branch taken ('Y').
+   - Inside the else: `base, exp = arg, S.One`.
+   - At line 42, `_poly_from_expr(base, opt)` is called. Since `cos(phi)` is not a polynomial, `PolificationFailed` is raised.
+   - We catch the exception at line 43 and append `(exc.expr, exp)` to `factors`.
+   - The rest of the else block (lines 49-70) is skipped because of the exception, so the branch points at lines 49, 50, 57, and 59 are never encountered (no evaluations).
+4. After the loop, at line 71, check `method == 'sqf'`. Since `method` is "factor", the condition is false → branch not taken ('N').
+
+Thus, we have:
+- Line 27: encountered once, not taken → ['N']
+- Line 30: encountered once, not taken → ['N']
+- Line 32: not encountered → []
+- Line 38: encountered once, taken → ['Y']
+- Line 49: not encountered → []
+- Line 50: not encountered → []
+- Line 57: not encountered → []
+- Line 59: not encountered → []
+- Line 71: encountered once, not taken → ['N']
+[/THOUGHT]
+
+[ANSWER]
+1 from functools import wraps, reduce
+2 from operator import mul
+3 from collections import Counter, defaultdict
+4 from sympy.core import (
+5     S, Expr, Add, Tuple
+6 )
+7 from sympy.core.evalf import (
+8     pure_complex, evalf, fastlog, _evalf_with_bounded_error, quad_to_mpmath)
+9 from sympy.core.mul import Mul, _keep_coeff
+10 from sympy.polys.polyerrors import (
+11     OperationNotSupported, DomainError,
+12     CoercionFailed, UnificationFailed,
+13     GeneratorsNeeded, PolynomialError,
+14     MultivariatePolynomialError,
+15     ExactQuotientFailed,
+16     PolificationFailed,
+17     ComputationFailed,
+18     GeneratorsError,
+19 )
+20 
+21 def _symbolic_factor_list(expr, opt, method):
+22     coeff, factors = S.One, []
+23 
+24     args = [i._eval_factor() if hasattr(i, '_eval_factor') else i
+25         for i in Mul.make_args(expr)]
+26     for arg in args:
+27         if arg.is_Number or (isinstance(arg, Expr) and pure_complex(arg)): ## [BRANCH]taken=[N][/BRANCH]
+28             coeff *= arg
+29             continue
+30         elif arg.is_Pow and arg.base != S.Exp1: ## [BRANCH]taken=[N][/BRANCH]
+31             base, exp = arg.args
+32             if base.is_Number and exp.is_Number: ## [BRANCH]taken=[][/BRANCH]
+33                 coeff *= arg
+34                 continue
+35             if base.is_Number:
+36                 factors.append((base, exp))
+37                 continue
+38         else: ## [BRANCH]taken=[Y][/BRANCH]
+39             base, exp = arg, S.One
+40 
+41         try:
+42             poly, _ = _poly_from_expr(base, opt)
+43         except PolificationFailed as exc:
+44             factors.append((exc.expr, exp))
+45         else:
+46             func = getattr(poly, method + '_list')
+47 
+48             _coeff, _factors = func()
+49             if _coeff is not S.One: ## [BRANCH]taken=[][/BRANCH]
+50                 if exp.is_Integer: ## [BRANCH]taken=[][/BRANCH]
+51                     coeff *= _coeff**exp
+52                 elif _coeff.is_positive:
+53                     factors.append((_coeff, exp))
+54                 else:
+55                     _factors.append((_coeff, S.One))
+56 
+57             if exp is S.One: ## [BRANCH]taken=[][/BRANCH]
+58                 factors.extend(_factors)
+59             elif exp.is_integer: ## [BRANCH]taken=[][/BRANCH]
+60                 factors.extend([(f, k*exp) for f, k in _factors])
+61             else:
+62                 other = []
+63 
+64                 for f, k in _factors:
+65                     if f.as_expr().is_positive:
+66                         factors.append((f, k*exp))
+67                     else:
+68                         other.append((f, k))
+69 
+70                 factors.append((_factors_product(other), exp))
+71     if method == 'sqf': ## [BRANCH]taken=[N][/BRANCH]
+72         factors = [(reduce(mul, (f for f, _ in factors if _ == k)), k)
+73                    for k in {i for _, i in factors}]
+74     rv = defaultdict(int)
+75     for k, v in factors:
+76         rv[k] += v
+77     return coeff, list(rv.items())
+78 
+[/ANSWER]

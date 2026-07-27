@@ -1,0 +1,648 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from functools import wraps, reduce
+from operator import mul
+from collections import Counter, defaultdict
+from sympy.core import S, Expr, Add, Tuple
+from sympy.core.evalf import pure_complex, evalf, fastlog, _evalf_with_bounded_error, quad_to_mpmath
+from sympy.core.mul import Mul, _keep_coeff
+from sympy.polys.polyerrors import OperationNotSupported, DomainError, CoercionFailed, UnificationFailed, GeneratorsNeeded, PolynomialError, MultivariatePolynomialError, ExactQuotientFailed, PolificationFailed, ComputationFailed, GeneratorsError
+
+def _symbolic_factor_list(expr, opt, method):
+    coeff, factors = (S.One, [])
+    args = [i._eval_factor() if hasattr(i, '_eval_factor') else i for i in Mul.make_args(expr)]
+    for arg in args:
+        if arg.is_Number or (isinstance(arg, Expr) and pure_complex(arg)):
+            coeff *= arg
+            continue
+        elif arg.is_Pow and arg.base != S.Exp1:
+            base, exp = arg.args
+            if base.is_Number and exp.is_Number:
+                coeff *= arg
+                continue
+            if base.is_Number:
+                factors.append((base, exp))
+                continue
+        else:
+            base, exp = (arg, S.One)
+        try:
+            poly, _ = _poly_from_expr(base, opt)
+        except PolificationFailed as exc:
+            factors.append((exc.expr, exp))
+        else:
+            func = getattr(poly, method + '_list')
+            _coeff, _factors = func()
+            if _coeff is not S.One:
+                if exp.is_Integer:
+                    coeff *= _coeff ** exp
+                elif _coeff.is_positive:
+                    factors.append((_coeff, exp))
+                else:
+                    _factors.append((_coeff, S.One))
+            if exp is S.One:
+                factors.extend(_factors)
+            elif exp.is_integer:
+                factors.extend([(f, k * exp) for f, k in _factors])
+            else:
+                other = []
+                for f, k in _factors:
+                    if f.as_expr().is_positive:
+                        factors.append((f, k * exp))
+                    else:
+                        other.append((f, k))
+                factors.append((_factors_product(other), exp))
+    if method == 'sqf':
+        factors = [(reduce(mul, (f for f, _ in factors if _ == k)), k) for k in {i for _, i in factors}]
+    rv = defaultdict(int)
+    for k, v in factors:
+        rv[k] += v
+    return (coeff, list(rv.items()))
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.assumptions.getit
+
+def getit(self):
+    try:
+        return self._assumptions[fact]
+    except KeyError:
+        if self._assumptions is self.default_assumptions:
+            self._assumptions = self.default_assumptions.copy()
+        return _ask(fact, self)
+
+sympy.sympy.core.basic.__hash__
+
+def __hash__(self) -> int:
+    # hash cannot be cached using cache_it because infinite recurrence
+    # occurs as hash is needed for setting cache dictionary keys
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+sympy.sympy.core.basic.__ne__
+
+def __ne__(self, other):
+    """``a != b``  -> Compare two symbolic trees and see whether they are different
+
+    this is the same as:
+
+    ``a.compare(b) != 0``
+
+    but faster
+    """
+    return not self == other
+
+sympy.sympy.core.basic.args
+
+@property
+def args(self) -> tuple[Basic, ...]:
+    """Returns a tuple of arguments of 'self'.
+
+    Examples
+    ========
+
+    >>> from sympy import cot
+    >>> from sympy.abc import x, y
+
+    >>> cot(x).args
+    (x,)
+
+    >>> cot(x).args[0]
+    x
+
+    >>> (x*y).args
+    (x, y)
+
+    >>> (x*y).args[1]
+    y
+
+    Notes
+    =====
+
+    Never use self._args, always use self.args.
+    Only use _args in __new__ when creating a new function.
+    Do not override .args() from Basic (so that it is easy to
+    change the interface in the future if needed).
+    """
+    return self._args
+
+sympy.sympy.core.decorators._func
+
+@wraps(func)
+def _func(self, other):
+    # XXX: The check for _op_priority here should be removed. It is
+    # needed to stop mutable matrices from being sympified to
+    # immutable matrices which breaks things in quantum...
+    if not hasattr(other, '_op_priority'):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return retval
+    if not isinstance(other, expectedcls):
+        return retval
+    return func(self, other)
+
+sympy.sympy.core.decorators.__sympifyit_wrapper
+
+@wraps(func)
+def __sympifyit_wrapper(a, b):
+    try:
+        # If an external class has _op_priority, it knows how to deal
+        # with SymPy objects. Otherwise, it must be converted.
+        if not hasattr(b, '_op_priority'):
+            b = sympify(b, strict=True)
+        return func(a, b)
+    except SympifyError:
+        return retval
+
+sympy.sympy.core.evalf.pure_complex
+
+def pure_complex(v: Expr, or_real=False) -> tuple[Number, Number] | None:
+    """Return a and b if v matches a + I*b where b is not zero and
+    a and b are Numbers, else None. If `or_real` is True then 0 will
+    be returned for `b` if `v` is a real number.
+
+    Examples
+    ========
+
+    >>> from sympy.core.evalf import pure_complex
+    >>> from sympy import sqrt, I, S
+    >>> a, b, surd = S(2), S(3), sqrt(2)
+    >>> pure_complex(a)
+    >>> pure_complex(a, or_real=True)
+    (2, 0)
+    >>> pure_complex(surd)
+    >>> pure_complex(a + b*I)
+    (2, 3)
+    >>> pure_complex(I)
+    (0, 1)
+    """
+    h, t = v.as_coeff_Add()
+    if t:
+        c, i = t.as_coeff_Mul()
+        if i is S.ImaginaryUnit:
+            return h, c
+    elif or_real:
+        return h, S.Zero
+    return None
+
+sympy.sympy.core.expr.as_expr
+
+def as_expr(self, *gens):
+    """
+    Convert a polynomial to a SymPy expression.
+
+    Examples
+    ========
+
+    >>> from sympy import sin
+    >>> from sympy.abc import x, y
+
+    >>> f = (x**2 + x*y).as_poly(x, y)
+    >>> f.as_expr()
+    x**2 + x*y
+
+    >>> sin(x).as_expr()
+    sin(x)
+
+    """
+    return self
+
+sympy.sympy.core.expr.__pow__
+
+def __pow__(self, other, mod=None) -> Expr:
+    power = self._pow(other)
+    if mod is None:
+        return power
+    else:
+        try:
+            return power % mod
+        except TypeError:
+            return NotImplemented
+
+sympy.sympy.core.numbers.__ne__
+
+def __ne__(self, other):
+    return not self == other
+
+sympy.sympy.core.numbers.__hash__
+
+def __hash__(self):
+    return hash(self.p)
+
+sympy.sympy.core.numbers.__add__
+
+def __add__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p + other)
+        elif isinstance(other, Integer):
+            return Integer(self.p + other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.q + other.p, other.q, 1)
+        return Rational.__add__(self, other)
+    else:
+        return Add(self, other)
+
+sympy.sympy.core.numbers.__radd__
+
+def __radd__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(other + self.p)
+        elif isinstance(other, Rational):
+            return Rational._new(other.p + self.p*other.q, other.q, 1)
+        return Rational.__radd__(self, other)
+    return Rational.__radd__(self, other)
+
+sympy.sympy.core.numbers.__mul__
+
+def __mul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p*other)
+        elif isinstance(other, Integer):
+            return Integer(self.p*other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.p, other.q, igcd(self.p, other.q))
+        return Rational.__mul__(self, other)
+    return Rational.__mul__(self, other)
+
+sympy.sympy.core.numbers.__rmul__
+
+def __rmul__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(other*self.p)
+        elif isinstance(other, Rational):
+            return Rational._new(other.p*self.p, other.q, igcd(self.p, other.q))
+        return Rational.__rmul__(self, other)
+    return Rational.__rmul__(self, other)
+
+sympy.sympy.core.numbers.__pow__
+
+def __pow__(self, other, mod=None):
+    if mod is not None:
+        try:
+            other_int = as_int(other)
+            mod_int = as_int(mod)
+        except ValueError:
+            pass
+        else:
+            return Integer(pow(self.p, other_int, mod_int))
+
+    return super().__pow__(other, mod)
+
+sympy.sympy.core.operations.make_args
+
+@classmethod
+def make_args(cls: type[Basic], expr: Basic) -> tuple[Basic, ...]:
+    """
+    Return a sequence of elements `args` such that cls(*args) == expr
+
+    Examples
+    ========
+
+    >>> from sympy import Symbol, Mul, Add
+    >>> x, y = map(Symbol, 'xy')
+
+    >>> Mul.make_args(x*y)
+    (x, y)
+    >>> Add.make_args(x*y)
+    (x*y,)
+    >>> set(Add.make_args(x*y + y)) == set([y, x*y])
+    True
+
+    """
+    if isinstance(expr, cls):
+        return expr.args
+    else:
+        return (sympify(expr),)
+
+sympy.sympy.core.power.base
+
+@property
+def base(self) -> Expr:
+    return self.args[0]
+
+sympy.sympy.polys.polytools.as_expr
+
+def as_expr(f, *gens):
+    """
+    Convert a Poly instance to an Expr instance.
+
+    Examples
+    ========
+
+    >>> from sympy import Poly
+    >>> from sympy.abc import x, y
+
+    >>> f = Poly(x**2 + 2*x*y**2 - y, x, y)
+
+    >>> f.as_expr()
+    x**2 + 2*x*y**2 - y
+    >>> f.as_expr({x: 5})
+    10*y**2 - y + 25
+    >>> f.as_expr(5, 6)
+    379
+
+    """
+    if not gens:
+        return f.expr
+
+    if len(gens) == 1 and isinstance(gens[0], dict):
+        mapping = gens[0]
+        gens = list(f.gens)
+
+        for gen, value in mapping.items():
+            try:
+                index = gens.index(gen)
+            except ValueError:
+                raise GeneratorsError(
+                    "%s doesn't have %s as generator" % (f, gen))
+            else:
+                gens[index] = value
+
+    return basic_from_dict(f.rep.to_sympy_dict(), *gens)
+
+sympy.sympy.polys.polytools.sqf_list
+
+def sqf_list(f, all=False):
+    """
+    Returns a list of square-free factors of ``f``.
+
+    Examples
+    ========
+
+    >>> from sympy import Poly
+    >>> from sympy.abc import x
+
+    >>> f = 2*x**5 + 16*x**4 + 50*x**3 + 76*x**2 + 56*x + 16
+
+    >>> Poly(f).sqf_list()
+    (2, [(Poly(x + 1, x, domain='ZZ'), 2),
+         (Poly(x + 2, x, domain='ZZ'), 3)])
+
+    >>> Poly(f).sqf_list(all=True)
+    (2, [(Poly(1, x, domain='ZZ'), 1),
+         (Poly(x + 1, x, domain='ZZ'), 2),
+         (Poly(x + 2, x, domain='ZZ'), 3)])
+
+    """
+    if hasattr(f.rep, 'sqf_list'):
+        coeff, factors = f.rep.sqf_list(all)
+    else:  # pragma: no cover
+        raise OperationNotSupported(f, 'sqf_list')
+
+    return f.rep.dom.to_sympy(coeff), [(f.per(g), k) for g, k in factors]
+
+sympy.sympy.polys.polytools.factor_list
+
+def factor_list(f) -> tuple[Expr, list[tuple[Poly, int]]]:
+    """
+    Returns a list of irreducible factors of ``f``.
+
+    Examples
+    ========
+
+    >>> from sympy import Poly
+    >>> from sympy.abc import x, y
+
+    >>> f = 2*x**5 + 2*x**4*y + 4*x**3 + 4*x**2*y + 2*x + 2*y
+
+    >>> Poly(f).factor_list()
+    (2, [(Poly(x + y, x, y, domain='ZZ'), 1),
+         (Poly(x**2 + 1, x, y, domain='ZZ'), 2)])
+
+    """
+    if hasattr(f.rep, 'factor_list'):
+        try:
+            coeff, factors = f.rep.factor_list()
+        except DomainError:
+            if f.degree() == 0:
+                return f.as_expr(), []
+            else:
+                return S.One, [(f, 1)]
+    else:  # pragma: no cover
+        raise OperationNotSupported(f, 'factor_list')
+
+    return f.rep.dom.to_sympy(coeff), [(f.per(g), k) for g, k in factors]
+
+sympy.sympy.polys.polytools.__hash__
+
+def __hash__(self):
+    return super().__hash__()
+
+sympy.sympy.polys.polytools._poly_from_expr
+
+def _poly_from_expr(expr, opt):
+    """Construct a polynomial from an expression. """
+    orig, expr = expr, sympify(expr)
+
+    if not isinstance(expr, Basic):
+        raise PolificationFailed(opt, orig, expr)
+    elif expr.is_Poly:
+        poly = expr.__class__._from_poly(expr, opt)
+
+        opt.gens = poly.gens
+        opt.domain = poly.domain
+
+        if opt.polys is None:
+            opt.polys = True
+
+        return poly, opt
+    elif opt.expand:
+        expr = expr.expand()
+
+    rep, opt = _dict_from_expr(expr, opt)
+    if not opt.gens:
+        raise PolificationFailed(opt, orig, expr)
+
+    monoms, coeffs = list(zip(*list(rep.items())))
+    domain = opt.domain
+
+    if domain is None:
+        opt.domain, coeffs = construct_domain(coeffs, opt=opt)
+    else:
+        coeffs = list(map(domain.from_sympy, coeffs))
+
+    rep = dict(list(zip(monoms, coeffs)))
+    poly = Poly._from_dict(rep, opt)
+
+    if opt.polys is None:
+        opt.polys = False
+
+    return poly, opt
+
+sympy.sympy.polys.polytools._factors_product
+
+def _factors_product(factors):
+    """Multiply a list of ``(expr, exp)`` pairs. """
+    return Mul(*[f.as_expr()**k for f, k in factors])
+
+sympy.sympy.polys.polytools.<listcomp>
+
+    factors = [(reduce(mul, (f for f, _ in factors if _ == k)), k)
+               for k in {i for _, i in factors}]
+#collect duplicates
+
+
+sympy.sympy.polys.polytools.<setcomp>
+
+               for k in {i for _, i in factors}]
+#collect duplicates
+
+
+
+[/PYTHON]
+What will be the output of `_symbolic_factor_list`, given the following input:
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "expr": "cos(phi)",
+        "opt": {
+            "fraction": true
+        },
+        "method": "factor"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[THOUGHT]

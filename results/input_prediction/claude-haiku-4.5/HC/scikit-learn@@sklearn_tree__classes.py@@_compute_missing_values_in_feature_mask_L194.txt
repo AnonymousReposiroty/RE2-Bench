@@ -1,0 +1,116 @@
+[THOUGHT]
+Let me trace through the `_compute_missing_values_in_feature_mask` method to understand when it returns `None`.
+
+The method has this structure:
+```python
+def _compute_missing_values_in_feature_mask(self, X, estimator_name=None):
+    estimator_name = estimator_name or self.__class__.__name__
+    common_kwargs = dict(estimator_name=estimator_name, input_name='X')
+    
+    # First check: if not support_missing_values(X), call assert_all_finite and return None
+    if not self._support_missing_values(X):
+        assert_all_finite(X, **common_kwargs)
+        return None
+    
+    # Second check: if overall_sum is not finite, call _assert_all_finite_element_wise and return None implicitly
+    with np.errstate(over='ignore'):
+        overall_sum = np.sum(X)
+    if not np.isfinite(overall_sum):
+        _assert_all_finite_element_wise(X, xp=np, allow_nan=True, **common_kwargs)
+    
+    # Third check: if overall_sum is NaN, compute and return missing_values_in_feature_mask
+    if not np.isnan(overall_sum):
+        return None
+    
+    missing_values_in_feature_mask = _any_isnan_axis0(X)
+    return missing_values_in_feature_mask
+```
+
+Given output is `None`, there are three paths that return `None`:
+
+1. **Path 1**: `not self._support_missing_values(X)` is True
+   - This means either X is sparse, or allow_nan is False, or monotonic_cst is not None
+   - The method returns None after calling assert_all_finite
+
+2. **Path 2**: `not np.isfinite(overall_sum)` is True
+   - This means the sum has NaN or inf
+   - The method calls _assert_all_finite_element_wise but then... let me check. After that call, it would either raise an error or continue. If it continues (because allow_nan=True in the call), it goes to the next check.
+
+3. **Path 3**: `not np.isnan(overall_sum)` is True
+   - This means overall_sum is NOT NaN (it's a finite number)
+   - The method returns None
+
+The simplest path to return None is **Path 1**: if `_support_missing_values(X)` returns False.
+
+For `_support_missing_values(X)` to return False:
+```python
+def _support_missing_values(self, X):
+    return (
+        not issparse(X)
+        and self.__sklearn_tags__().input_tags.allow_nan
+        and self.monotonic_cst is None
+    )
+```
+
+This returns False if any of these is true:
+- issparse(X) is True (X is sparse)
+- allow_nan is False (input tags don't allow NaN)
+- monotonic_cst is not None
+
+The simplest case: use a dense array (not sparse) and set monotonic_cst to None (which would make the condition True), but that wouldn't work. Let me reconsider.
+
+Actually, the simplest approach is to use a sparse matrix. If X is sparse, then `issparse(X)` is True, so the whole AND expression returns False.
+
+Or alternatively, we could use a finite dense array (X with all finite values). Then:
+- `issparse(X)` = False ✓
+- `self.__sklearn_tags__().input_tags.allow_nan` = True (assume default) ✓
+- `self.monotonic_cst` = None ✓
+So `_support_missing_values(X)` returns True, and we DON'T return None in the first check.
+
+Then with a finite array, `np.sum(X)` would be finite, so `not np.isfinite(overall_sum)` is False, we skip that.
+
+Finally, `np.isnan(overall_sum)` would be False (since it's finite), so `not np.isnan(overall_sum)` is True, and we return None.
+
+This seems like the most natural case: a dense array with all finite values and no missing values.
+
+Let me construct the input:
+- X: a simple finite numpy array like `np.array([[1.0, 2.0], [3.0, 4.0]])`
+- estimator_name: None (or any string, doesn't matter for output)
+- monotonic_cst: None
+- n_features_in_: some integer (required for fit estimators)
+
+For the self object, I need to ensure:
+- monotonic_cst = None (so _support_missing_values doesn't fail on this)
+- The estimator should have tags that allow NaN by default
+
+I'll use a simple setup with a 2D array of finite values.
+
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "criterion": "gini",
+        "splitter": "best",
+        "max_depth": null,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "min_weight_fraction_leaf": 0.0,
+        "max_features": null,
+        "max_leaf_nodes": null,
+        "random_state": null,
+        "min_impurity_decrease": 0.0,
+        "class_weight": null,
+        "ccp_alpha": 0.0,
+        "monotonic_cst": null,
+        "n_features_in_": 2
+    },
+    "args": {
+        "X": [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+        "estimator_name": null
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

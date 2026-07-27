@@ -1,0 +1,139 @@
+# [THOUGHT]
+
+Let me trace through the `polytope_integrate` function execution with the given input:
+
+**Input parameters:**
+- `poly`: Polygon(Point(0, 0), Point(0, 1), Point(1, 1), Point(1, 0)) - a 2D polygon
+- `expr`: [1, "x", "y", "x*y", "x**2*y", "x*y**2"] - a list of expressions
+- `clockwise`: False (default)
+- `max_degree`: 3
+
+**Execution trace:**
+
+Line 14: `if clockwise:` - clockwise is False → **N**. Lines 15-19 are skipped (inside this block).
+
+Line 21: `if isinstance(poly, Polygon):` - poly is a Polygon → **Y**. Executes lines 22-23, skips lines 24-40.
+
+Line 24: `elif len(poly[0]) == 2:` - Not evaluated because line 21 is True → **N**
+
+Line 38: `else:` - Not executed because line 21 is True → **N**
+
+Line 44: `if expr is None:` - Inside skipped else block (line 38) → not encountered
+
+Line 48: `if max_degree is not None:` - max_degree is 3 → **Y**
+
+Line 50: `if expr is not None:` - expr is not None → **Y**
+
+Lines 52-58 Loop (6 iterations for each expression):
+- Line 54: For e=1, decompose(1) returns a dict with single entry where key is 0 (falsy), so condition is **Y**. For e="x" through e="x*y**2", the key is non-falsy, so condition is **N** (5 times).
+- Line 56: elif - only evaluated when line 54 is N. For all non-constant expressions, Poly(e).total_degree() ≤ 3, so **Y** (5 times).
+
+Result: line 54: ['Y', 'N', 'N', 'N', 'N', 'N'], line 56: ['Y', 'Y', 'Y', 'Y', 'Y']
+
+Line 60: `if not isinstance(expr, list) and expr is not None:` - expr is a list → **N**
+
+Line 63: `if len(hp_params[0][0]) == 3:` - For a 2D polygon, this length is 2 → **N**
+
+Line 66: `else:` - Since line 63 is N → **Y**
+
+Lines 72-84 Loop (6 iterations for each poly in expr):
+- Line 74: `if poly not in result:` - result starts empty and accumulates; each poly is new → **Y** (6 times)
+- Line 75: `if poly.is_zero:` - None of the expressions (1, x, y, x*y, x**2*y, x*y**2) are zero → **N** (6 times)
+
+Lines 15, 17, 35, 44 are inside skipped conditional blocks → not encountered
+
+# [ANSWER]
+```python
+1   from functools import cmp_to_key
+2   from sympy.abc import x, y, z
+3   from sympy.core import S, diff, Expr, Symbol
+4   from sympy.core.sympify import _sympify
+5   from sympy.geometry import Segment2D, Polygon, Point, Point2D
+6   from sympy.polys.polytools import LC, gcd_list, degree_list, Poly
+7   from sympy.simplify.simplify import nsimplify
+8   from sympy.plotting.plot import Plot, List2DSeries
+9   from sympy.plotting.plot import plot3d, plot
+10
+11
+12
+13 def polytope_integrate(poly, expr=None, *, clockwise=False, max_degree=None):
+14     if clockwise: ## [BRANCH]taken=[N][/BRANCH]
+15         if isinstance(poly, Polygon): ## [BRANCH]taken=[  ][/BRANCH]
+16             poly = Polygon(*point_sort(poly.vertices), evaluate=False)
+17         else: ## [BRANCH]taken=[  ][/BRANCH]
+18             raise TypeError("clockwise=True works for only 2-Polytope"
+19                             "V-representation input")
+20
+21     if isinstance(poly, Polygon): ## [BRANCH]taken=[Y][/BRANCH]
+22         hp_params = hyperplane_parameters(poly)
+23         facets = poly.sides
+24     elif len(poly[0]) == 2: ## [BRANCH]taken=[N][/BRANCH]
+25         plen = len(poly)
+26         if len(poly[0][0]) == 2:
+27             intersections = [intersection(poly[(i - 1) % plen], poly[i],
+28                                           "plane2D")
+29                                            for i in range(0, plen)]
+30             hp_params = poly
+31             lints = len(intersections)
+32             facets = [Segment2D(intersections[i],
+33                                 intersections[(i + 1) % lints])
+34                       for i in range(0, lints)]
+35         else: ## [BRANCH]taken=[  ][/BRANCH]
+36             raise NotImplementedError("Integration for H-representation 3D"
+37                                       "case not implemented yet.")
+38     else: ## [BRANCH]taken=[N][/BRANCH]
+39         vertices = poly[0]
+40         facets = poly[1:]
+41         hp_params = hyperplane_parameters(facets, vertices)
+42
+43         if max_degree is None:
+44             if expr is None: ## [BRANCH]taken=[  ][/BRANCH]
+45                 raise TypeError('Input expression must be a valid SymPy expression')
+46             return main_integrate3d(expr, facets, vertices, hp_params)
+47
+48     if max_degree is not None: ## [BRANCH]taken=[Y][/BRANCH]
+49         result = {}
+50         if expr is not None: ## [BRANCH]taken=[Y][/BRANCH]
+51             f_expr = []
+52             for e in expr:
+53                 _ = decompose(e)
+54                 if len(_) == 1 and not _.popitem()[0]: ## [BRANCH]taken=[Y, N, N, N, N, N][/BRANCH]
+55                     f_expr.append(e)
+56                 elif Poly(e).total_degree() <= max_degree: ## [BRANCH]taken=[Y, Y, Y, Y, Y][/BRANCH]
+57                     f_expr.append(e)
+58             expr = f_expr
+59
+60         if not isinstance(expr, list) and expr is not None: ## [BRANCH]taken=[N][/BRANCH]
+61             raise TypeError('Input polynomials must be list of expressions')
+62
+63         if len(hp_params[0][0]) == 3: ## [BRANCH]taken=[N][/BRANCH]
+64             result_dict = main_integrate3d(0, facets, vertices, hp_params,
+65                                            max_degree)
+66         else: ## [BRANCH]taken=[Y][/BRANCH]
+67             result_dict = main_integrate(0, facets, hp_params, max_degree)
+68
+69         if expr is None:
+70             return result_dict
+71
+72         for poly in expr:
+73             poly = _sympify(poly)
+74             if poly not in result: ## [BRANCH]taken=[Y, Y, Y, Y, Y, Y][/BRANCH]
+75                 if poly.is_zero: ## [BRANCH]taken=[N, N, N, N, N, N][/BRANCH]
+76                     result[S.Zero] = S.Zero
+77                     continue
+78                 integral_value = S.Zero
+79                 monoms = decompose(poly, separate=True)
+80                 for monom in monoms:
+81                     monom = nsimplify(monom)
+82                     coeff, m = strip(monom)
+83                     integral_value += result_dict[m] * coeff
+84                 result[poly] = integral_value
+85         return result
+86
+87         if expr is None:
+88             raise TypeError('Input expression must be a valid SymPy expression')
+89
+90         return main_integrate(expr, facets, hp_params)
+```
+
+[/ANSWER]

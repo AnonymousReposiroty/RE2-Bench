@@ -1,0 +1,556 @@
+<think>
+The code takes two integers as input, then divides the first integer by the second integer using integer division, adds 1 to the result, and multiplies it by the second integer. The output is a single integer.
+
+For the given input, the first integer is 14 and the second integer is 15. The output of the code should be (14 // 15 + 1) * 15, which is 15.
+
+I will enclose my output in the specified tags.</think>
+
+[OUTPUT]
+```
+{
+    "output": "15"
+}
+```
+[/OUTPUT]
+
+[FILEPATH] homework1/vllm_mt_bench_safe/src/eval/agent_dto.py [/FILEPATH]
+import json
+
+from typing import List, Optional
+from pydantic import BaseModel, Field, ValidationError
+
+
+class Model(BaseModel):
+    model_name: str = Field(...)
+    model_class: str = Field("base", description="default is base")
+    total_token: int = Field(0, description="default is 0")
+    cost: float = Field(0.0, description="default is 0")
+    model_files: Optional[List] = None
+
+
+class Message(BaseModel):
+    role: str = Field(...)
+    content: str = Field(...)
+    total_token: int = Field(0, description="default is 0")
+    cost: float = Field(0.0, description="default is 0")
+
+
+class Conversation(BaseModel):
+    agent_id: str = Field(...)
+    model: Model = Field(...)
+    messages: List[Message] = Field(default_factory=list)
+    o1_prompt: bool = Field(False, description="default is False")
+    enable_time: bool = Field(False, description="default is False")
+
+    def reset(self) -> None:
+        self.messages = []
+
+    def to_dict(self) -> dict:
+        return {
+            "agent_id": self.agent_id,
+            "model": self.model.model_dump() if self.model else None,
+            "messages": [message.model_dump() for message in self.messages],
+            "o1_prompt": self.o1_prompt,
+            "enable_time": self.enable_time,
+        }
+
+
+# JSON格式字符串对应的数据模型
+class ConversationsList(BaseModel):
+    conversations: List[Conversation] = Field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "conversations": [conversation.to_dict() for conversation in self.conversations]
+        }
+
+    # 将字符串转为ConversationsList对象,比如
+    # from_json('[{"agent_id":"c_kkV10sNPOpMeVkgLopCM0z6HF"},"c_kkV10sNPOpMeVkgLopCM0z6HF",...]')
+    # from_json('[{...},{...},...]')
+    # from_json('{...}')
+    @staticmethod
+    def from_json(json_str: str) -> "ConversationsList":
+        try:
+            data = json.loads(json_str)
+            if isinstance(data, list):
+                # 列表数据
+                return ConversationsList(conversations=[Conversation(**item) for item in data])
+            elif isinstance(data, dict):
+                # 单个数据
+                return ConversationsList(conversations=[Conversation(**data)])
+        except (json.JSONDecodeError, ValidationError) as e:
+            raise ValueError(f"Error parsing JSON string: {e}")
+        except Exception as e:
+            raise ValueError(f"Error parsing JSON string: {e}")
+
+    @staticmethod
+    def from_json_with_agent_id(json_str: str, agent_id: str) -> "ConversationsList":
+        conversations = ConversationsList.from_json(json_str)
+        for conversation in conversations.conversations:
+            conversation.agent_id = agent_id
+        return conversations
+
+    # 将ConversationsList对象转为JSON格式字符串
+    @staticmethod
+    def to_json(json_str: str) -> str:
+        return ConversationsList.from_json(json_str).to_dict()
+
+
+if __name__ == "__main__":
+    # 示例用法
+    json_data = """{"agent_id":"c_kkV10sNPOpMeVkgLopCM0z6HF"}"""
+    conversations_list = ConversationsList.from_json(json_data)
+    print(conversations_list.to_dict())
+
+[FILEPATH] homework1/vllm_mt_bench_safe/src/eval/mtbench_run.py [/FILEPATH]
+import argparse
+import concurrent.futures
+import json
+import os
+import re
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import pandas as pd
+from agent_dto import ConversationsList
+from flask import Flask, jsonify, request
+
+from eval_qwen import (
+    AskAnswerInput,
+    AskQueryInput,
+    BenchData,
+    EvaluatableModel,
+    MultiChoiceInput,
+    MultiChoiceQueryInput,
+    Run,
+    create_logging,
+    get_model,
+    make_case,
+    make_case_dict,
+    pre_record,
+    process_query,
+    record_question,
+    setup_logger,
+)
+from vllm import LLM
+
+API_PORT = 25111
+MAX_CONCURRENT_REQUESTS = 4
+SHOULD_RETRY = True
+
+
+app = Flask(__name__)
+current_thread_count = 0
+max_workers = MAX_CONCURRENT_REQUESTS
+running = False
+
+
+# 定义一个装饰器来限制并发数
+def limit_concurrent_requests(f):
+    global current_thread_count
+
+    def wrapper(*args, **kwargs):
+        global current_thread_count
+        # 等待当前并发线程数低于最大值
+        while current_thread_count >= max_workers:
+            time.sleep(0.1)  # 等待100毫秒
+        current_thread_count += 1
+        try:
+            return f(*args, **kwargs)
+        finally:
+            current_thread_count -= 1
+
+    return wrapper
+
+
+def qwen_api_process_query(request):
+    try:
+        thread_id = request.args.get("thread_id")
+        if not thread_id:
+            return jsonify({"error": "thread_id is required"}), 400
+
+        if SHOULD_RETRY:
+            retries = 3
+        else:
+            retries = 1
+        for attempt in range(retries):
+            try:
+                model = get_model()
+                if model is None:
+                    return jsonify({"error": "model is not initialized"}), 500
+
+                if "api_info" in request.json:
+                    logger.info(
+                        f"request api_info: {json.dumps(request.json['api_info'], ensure_ascii=False)}"
+                    )
+                request_data = request.json.get("request_data")
+                if not request_data:
+                    return jsonify({"error": "request_data is required"}), 400
+
+                logger.info(f"request_data: {request_data}")
+                logger.info(f"thread_id: {thread_id}")
+
+                # 获取对话记录
+                json_str = pre_record(thread_id)
+                logger.info(f"json_str: {json_str}")
+                conversations = ConversationsList.from_json(json_str)
+
+                # 更新对话记录
+                json_str = record_question(
+                    thread_id, request_data["question_id"], request_data["query"]
+                )
+                logger.info(f"json_str: {json_str}")
+                conversations = ConversationsList.from_json(json_str)
+
+                # 调用大模型
+                response = model.chat(model, conversations)
+                response_data = response
+
+                # 保存回答和打分信息
+                json_str = run.record_answer(
+                    thread_id, response_data
+                )  # 确保存在字符串转换
+                logger.info(f"json_str: {json_str}")
+                conversations = ConversationsList.from_json(json_str)
+                conversations = ConversationsList.from_json(
+                    run.record_human_intervention(
+                        thread_id,
+                        request_data["question_id"],
+                        request_data["manual_judgment"] if "manual_judgment" in request_data else None,
+                    )  # 确保存在字符串转换
+                )
+
+                logger.info(
+                    f"response_data: {json.dumps(response_data, ensure_ascii=False)}"
+                )
+                return jsonify({"response_data": response_data})
+            except Exception as e:
+                logger.error(
+                    f"Error processing query {request_data.get('query')} in thread {thread_id} (attempt {attempt + 1}): {e}\n{traceback.format_exc()}"
+                )
+                if attempt < retries - 1:
+                    time.sleep(1)
+                else:
+                    raise
+
+    except Exception as e:
+        logger.error(
+            f"Error processing query in thread {thread_id}: {e}\n{traceback.format_exc()}"
+        )
+        return jsonify({"error": str(e)}), 500
+
+
+def qwen_api_start_model(model_path):
+    global running
+    if running:
+        logger.info("Model is already running")
+        return jsonify({"message": "Model is already running"}), 200
+    else:
+        running = True
+
+    model = get_model()
+    if model is None:
+        try:
+            model = LLM(model=model_path, dtype="float16", max_model_len=32000)
+            # LLM(model="qwen/Qwen1.5-72B-Chat", dtype="float16")
+        except Exception as e:
+            running = False
+            logger.error(f"Error starting model: {e}\n{traceback.format_exc()}")
+            return jsonify({"error": str(e)}), 500
+    else:
+        logger.info("Model is already initialized")
+
+
+def api_record_question():
+    try:
+        request_data = request.json
+        json_str = run.record_question(request_data)
+        return jsonify({"json_str": json_str})
+    except Exception as e:
+        logger.error(f"Error recording question: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+
+def api_record_answer():
+    try:
+        request_data = request.json
+        json_str = run.record_answer(request_data)
+        return jsonify({"json_str": json_str})
+    except Exception as e:
+        logger.error(f"Error recording answer: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+
+def api_record_human_intervention():
+    try:
+        request_data = request.json
+        json_str = run.record_human_intervention(request_data)
+        return jsonify({"json_str": json_str})
+    except Exception as e:
+        logger.error(
+            f"Error recording human intervention: {e}\n{traceback.format_exc()}"
+        )
+        return jsonify({"error": str(e)}), 500
+
+
+def api_record_score():
+    try:
+        request_data = request.json
+        json_str = run.record_score(request_data)
+        return jsonify({"json_str": json_str})
+    except Exception as e:
+        logger.error(f"Error recording score: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+
+def api_record_full_process():
+    try:
+        request_data = request.json
+        json_str = run.record_full_process(request_data)
+        return jsonify({"json_str": json_str})
+    except Exception as e:
+        logger.error(f"Error recording full process: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/process_query", methods=["POST"])
+@limit_concurrent_requests
+def api_process_query():
+    return qwen_api_process_query(request)
+
+
+@app.route("/start_model", methods=["POST"])
+def api_start_model():
+    request_data = request.json
+    model_path = request_data.get("model_path")
+    return qwen_api_start_model(model_path)
+
+
+@app.route("/record_question", methods=["POST"])
+def api_record_question_route():
+    return api_record_question()
+
+
+@app.route("/record_answer", methods=["POST"])
+def api_record_answer_route():
+    return api_record_answer()
+
+
+@app.route("/record_human_intervention", methods=["POST"])
+def api_record_human_intervention_route():
+    return api_record_human_intervention()
+
+
+@app.route("/record_score", methods=["POST"])
+def api_record_score_route():
+    return api_record_score()
+
+
+@app.route("/record_full_process", methods=["POST"])
+def api_record_full_process_route():
+    return api_record_full_process()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="API服务启动")
+    parser.add_argument("--save-dir", type=str, default="qwen_safe_api", help="保存日志文件的目录")
+    parser.add_argument("--port", type=int, default=25111, help="API服务端口")
+    parser.add_argument("--max-workers", type=int, default=4, help="最大并发工作线程数")
+    parser.add_argument(
+        "--running", action="store_true", help="是否在启动时就开始运行"
+    )
+    parser.add_argument(
+        "--qwen-model",
+        type=str,
+        default=None,
+        help="当没有指定json时,模型存放的地址",
+    )
+    args = parser.parse_args()
+    logger = setup_logger(args.save_dir)
+    logger.info(f"args: {args}")
+    run = Run(args.save_dir)
+    max_workers = args.max_workers
+    running = args.running
+    if args.qwen_model:
+        logger.info(f"qwen_model: {args.qwen_model}")
+        qwen_model = get_model()
+        if qwen_model is None:
+            try:
+                qwen_model = LLM(
+                    model=args.qwen_model, dtype="float16", max_model_len=32000
+                )
+                # LLM(model="qwen/Qwen1.5-72B-Chat", dtype="float16")
+            except Exception as e:
+                running = False
+                logger.error(f"Error starting model: {e}\n{traceback.format_exc()}")
+        else:
+            logger.info("Model is already initialized")
+    # if args.qwen_model:
+    #     logger.info(f"qwen_model: {args.qwen_model}")
+    #     qwen_model = LLM(model=args.qwen_model, dtype="float16")
+    #     model = get_model()
+    #     if model is None:
+    #         try:
+    #             model = qwen_model
+    #         except Exception as e:
+    #             running = False
+    #             logger.error(f"Error starting model: {e}\n{traceback.format_exc()}")
+    #     else:
+    #         logger.info("Model is already initialized")
+
+    app.run(host="0.0.0.0", port=args.port, debug=False)
+
+[FILEPATH] homework1/vllm_mt_bench_safe/src/eval/util.py [/FILEPATH]
+import hashlib
+import html
+import json
+import pathlib
+import time
+import traceback
+import uuid
+from pathlib import Path
+from typing import Optional
+
+import requests
+import tiktoken
+
+
+def json_to_multiline(string: str) -> str:
+    json_obj = json.loads(string)
+    lines = ["{\n"]
+
+    def format_object(obj, indent):
+        items = []
+        for k, v in obj.items():
+            if isinstance(v, dict):
+                v = format_object(v, indent + 4)
+            elif isinstance(v, list):
+                v = format_array(v, indent + 4)
+            elif isinstance(v, str):
+                v = json.dumps(v)
+            else:
+                v = json.dumps(v)
+            items.append(f'{" " * indent}"{k}": {v}')
+        return f"{',\n'.join(items)}\n"
+
+    def format_array(arr, indent):
+        items = [format_object(item, indent) if isinstance(item, dict) else json.dumps(item) for item in arr]
+        return f"[{',\n'.join(items)}\n]"
+
+    lines.extend(format_object(json_obj, 4).splitlines())
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def is_rich_text(text: str) -> bool:
+    if isinstance(text, str):
+        pass
+    elif isinstance(text, dict) and isinstance(text.get("content"), str):
+        text = text["content"]
+    else:
+        return False
+    return html.unescape(text) != text
+
+
+# assert is_rich_text("<div>test</div>") == True
+# assert is_rich_text("test") == False
+# assert is_rich_text("t \t est") == False
+# assert is_rich_text({"content": "<div>test</div>"}) == True
+# assert is_rich_text({"content": "test"}) == False
+# assert is_rich_text({"content": "t \t est"}) == False
+# assert is_rich_text({"not_content": "t \t est"}) == False
+# assert is_rich_text({"content": ["t \t est"]}) == False
+
+
+def generate_hash() -> str:
+    return hashlib.md5(str(uuid.uuid4()).encode("utf-8")).hexdigest()
+
+
+def get_current_datetime() -> str:
+    # 返回当前的datetime字符串
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+
+# 判断当前机器能不能ping通指定url
+def is_reachable(url: str) -> bool:
+    try:
+        response = requests.get(url)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def contains_forbidden_patterns(text: str) -> bool:
+    """检测是否包含禁用模式的文本"""
+
+    # Define the patterns you want to look for
+    patterns = [
+        r"/etc/shadow",
+        r"/root/.ssh/",
+        r"/etc/passwd",
+        r"/etc/.*",
+        r"/home/.*",
+        r"/var/.*",
+        r"/usr/.*",
+        r"/opt/.*",
+        r"/sys/.*",
+        r"/proc/.*",
+        r"/sbin/.*",
+        r"/bin/.*",
+        r"/boot/.*",
+        r"/lib/.*",
+        r"/lib64/.*",
+        r"/run/.*",
+        r"/tmp/.*",
+        r" vi .*",
+        r" vim .*",
+        r" nano .*",
+        r" emacs .*",
+        r" sudo .*",
+        r" su .*",
+        r" passwd .*",
+        r" groupadd .*",
+        r" useradd .*",
+        r" usermod .*",
+        r" chattr .*",
+        r" adduser .*",
+        r" deluser .*",
+        r" userdel .*",
+        r" groupdel .*",
+        r" groupmod .*",
+        r" setfacl .*",
+        r" getfacl .*",
+        r" chown .*",
+        r" chmod .*",
+        r" chgrp .*",
+        r" ln .*",
+        r" mkdir .*",
+        r" touch .*",
+        r" rm .*",
+        r" cp .*",
+        r" mv .*",
+        r" cat .*",
+        r" grep .*",
+        r" find .*",
+        r" locate .*",
+        r" which .*",
+        r" df .*",
+        r" du .*",
+        r" free .*",
+        r" top .*",
+        r" ps .*",
+        r" netstat .*",
+        r" ifconfig .*",
+        r" ip .*",
+        r" dig .*",
+        r" nslookup .*",
+        r" traceroute .*",
+        r" ping .*",
+        r" curl .*",
+        r" wget .*",
+        r" scp .*",
+        r" ftp .*",
+        r" sftp .*",
+        r" rs

@@ -1,0 +1,135 @@
+[THOUGHT]
+We need to trace the loop at line 94: `for y_i in unique_y:`. The input provides:
+- `X`: 120×2 array (from the string, appears to be 120 rows, 2 columns - first column values around 2.3-4.2, second column values around 1.0-6.7). Actually counting: The X array string shows 3 blocks separated by blank lines? Let's examine: The first block has 40 lines (0-39), second block has 40 lines (40-79), third block has 40 lines (80-119). So total 120 samples.
+- `y`: array of length 120 with values 0 (first 40), 1 (next 40), 2 (last 40).
+- `classes`: array([0, 1, 2]).
+- `_refit`: true, so `self.classes_ = None` at line 58.
+- `first_call` will be True because `self.classes_` is None after line 58? Actually `_check_partial_fit_first_call(self, classes)` with classes provided as array([0,1,2]) and self.classes_ is None (since we set to None), so first_call will be True. That means we initialize `self.classes_` with the provided classes, and set up theta_, var_, class_count_, class_prior_.
+- `unique_y` = xp_y.unique_values(y). Since y is numpy array (from input string), `unique_y` will be array([0,1,2]) in some order (likely sorted). So `unique_y` = [0,1,2].
+
+Loop iteration over `unique_y`:
+- Iteration 1: y_i = 0
+- Iteration 2: y_i = 1
+- Iteration 3: y_i = 2
+
+Also, `unique_y` itself is constant across iterations (it's the array [0,1,2]), but the state asks for `unique_y=??`. Since the variable `unique_y` is not reassigned inside the loop, its value stays the same each iteration. According to instructions: "If the value of a variable stays the same through K iterations, repeat its value for K times as its state." So for 3 iterations, `unique_y` state should be [[0,1,2], [0,1,2], [0,1,2]].
+
+Thus:
+- `y_i` = [0, 1, 2]
+- `unique_y` = [[0,1,2], [0,1,2], [0,1,2]]
+
+[/THOUGHT]
+
+[ANSWER]
+1 from numbers import Integral, Real
+2 import numpy as np
+3 import sklearn.externals.array_api_extra as xpx
+4 from sklearn.utils._array_api import (
+5     _average,
+6     _convert_to_numpy,
+7     _find_matching_floating_dtype,
+8     _isin,
+9     _logsumexp,
+10     get_namespace,
+11     get_namespace_and_device,
+12     size,
+13 )
+14 from sklearn.utils._param_validation import Interval
+15 from sklearn.utils.multiclass import _check_partial_fit_first_call
+16 from sklearn.utils.validation import (
+17     _check_n_features,
+18     _check_sample_weight,
+19     check_is_fitted,
+20     check_non_negative,
+21     validate_data,
+22 )
+23 
+24 class GaussianNB(_BaseNB):
+25     _parameter_constraints: dict = {'priors': ['array-like', None], 'var_smoothing': [Interval(Real, 0, None, closed='left')]}
+26 
+27     def __init__(self, *, priors=None, var_smoothing=1e-09):
+28         self.priors = priors
+29         self.var_smoothing = var_smoothing
+30 
+31     @staticmethod
+32     def _update_mean_variance(n_past, mu, var, X, sample_weight=None):
+33         xp, _ = get_namespace(X)
+34         if X.shape[0] == 0:
+35             return (mu, var)
+36         if sample_weight is not None:
+37             n_new = float(xp.sum(sample_weight))
+38             if np.isclose(n_new, 0.0):
+39                 return (mu, var)
+40             new_mu = _average(X, axis=0, weights=sample_weight, xp=xp)
+41             new_var = _average((X - new_mu) ** 2, axis=0, weights=sample_weight, xp=xp)
+42         else:
+43             n_new = X.shape[0]
+44             new_var = xp.var(X, axis=0)
+45             new_mu = xp.mean(X, axis=0)
+46         if n_past == 0:
+47             return (new_mu, new_var)
+48         n_total = float(n_past + n_new)
+49         total_mu = (n_new * new_mu + n_past * mu) / n_total
+50         old_ssd = n_past * var
+51         new_ssd = n_new * new_var
+52         total_ssd = old_ssd + new_ssd + n_new * n_past / n_total * (mu - new_mu) ** 2
+53         total_var = total_ssd / n_total
+54         return (total_mu, total_var)
+55 
+56     def _partial_fit(self, X, y, classes=None, _refit=False, sample_weight=None):
+57         if _refit:
+58             self.classes_ = None
+59         first_call = _check_partial_fit_first_call(self, classes)
+60         X, y = validate_data(self, X, y, reset=first_call)
+61         xp, _, device_ = get_namespace_and_device(X)
+62         float_dtype = _find_matching_floating_dtype(X, xp=xp)
+63         if sample_weight is not None:
+64             sample_weight = _check_sample_weight(sample_weight, X, dtype=float_dtype)
+65         xp_y, _ = get_namespace(y)
+66         self.epsilon_ = self.var_smoothing * xp.max(xp.var(X, axis=0))
+67         if first_call:
+68             n_features = X.shape[1]
+69             n_classes = self.classes_.shape[0]
+70             self.theta_ = xp.zeros((n_classes, n_features), dtype=float_dtype, device=device_)
+71             self.var_ = xp.zeros((n_classes, n_features), dtype=float_dtype, device=device_)
+72             self.class_count_ = xp.zeros(n_classes, dtype=float_dtype, device=device_)
+73             if self.priors is not None:
+74                 priors = xp.asarray(self.priors, dtype=float_dtype, device=device_)
+75                 if priors.shape[0] != n_classes:
+76                     raise ValueError('Number of priors must match number of classes.')
+77                 if not xpx.isclose(xp.sum(priors), 1.0):
+78                     raise ValueError('The sum of the priors should be 1.')
+79                 if xp.any(priors < 0):
+80                     raise ValueError('Priors must be non-negative.')
+81                 self.class_prior_ = priors
+82             else:
+83                 self.class_prior_ = xp.zeros(self.classes_.shape[0], dtype=float_dtype, device=device_)
+84         else:
+85             if X.shape[1] != self.theta_.shape[1]:
+86                 msg = 'Number of features %d does not match previous data %d.'
+87                 raise ValueError(msg % (X.shape[1], self.theta_.shape[1]))
+88             self.var_[:, :] -= self.epsilon_
+89         classes = self.classes_
+90         unique_y = xp_y.unique_values(y)
+91         unique_y_in_classes = _isin(unique_y, classes, xp=xp_y)
+92         if not xp_y.all(unique_y_in_classes):
+93             raise ValueError('The target label(s) %s in y do not exist in the initial classes %s' % (unique_y[~unique_y_in_classes], classes))
+94         for y_i in unique_y:## [STATE]y_i=[0,1,2][/STATE] [STATE]unique_y=[[0,1,2],[0,1,2],[0,1,2]][/STATE]
+95             i = int(xp_y.searchsorted(classes, y_i))
+96             y_i_mask = xp.asarray(y == y_i, device=device_)
+97             X_i = X[y_i_mask]
+98             if sample_weight is not None:
+99                 sw_i = sample_weight[y_i_mask]
+100                 N_i = xp.sum(sw_i)
+101             else:
+102                 sw_i = None
+103                 N_i = X_i.shape[0]
+104             new_theta, new_sigma = self._update_mean_variance(self.class_count_[i], self.theta_[i, :], self.var_[i, :], X_i, sw_i)
+105             self.theta_[i, :] = new_theta
+106             self.var_[i, :] = new_sigma
+107             self.class_count_[i] += N_i
+108         self.var_[:, :] += self.epsilon_
+109         if self.priors is None:
+110             self.class_prior_ = self.class_count_ / xp.sum(self.class_count_)
+111         return self
+[/ANSWER]

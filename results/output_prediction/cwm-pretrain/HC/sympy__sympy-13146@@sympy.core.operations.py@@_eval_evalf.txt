@@ -1,0 +1,419 @@
+[/OUTPUT]
+
+[FILEPATH] lime/LimeIdxPred/dataset/gsm8k-example-42_1226e7c8-8a97-4eeb-9fb4-3793f3fe371a/example_42_simplified.py [/FILEPATH]
+---
+promptId: example_42_simplified
+name: 📝 what is the closest city
+description: |- 
+  You are given a function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>. 
+author: Raymond Li, adaption of the dataset from the PredictiFuzz project https://github.com/RediSearch/predictifuzz
+
+tags: 
+  - format-prediction
+  - type-choice
+
+---
+# Prompt
+You are given a function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+import json
+import pickle
+import numpy as np
+import faiss
+from argparse import Namespace
+
+from data import WeatherData
+from model.utils import tensorize_hps
+
+class KNN(object):
+    def __init__(self):
+        self.data = None
+        self.index = None
+        self.d = 4
+
+    def train(self, data):
+        self.data = data
+        weather = np.asarray(data.weather)
+        self.index = faiss.IndexFlatL2(self.d)
+        self.index.add(weather)
+
+    def predict(self, weather: list, k: int = 1):
+        idxs, _ = self.index.search(np.asarray([weather]), k)
+        idxs = idxs.flatten()
+        cities = [self.data.city_at(i) for i in idxs]
+        return cities
+
+    def find_closest(self, weather):
+        """
+        Find the closest weather sample in the index
+        """
+        return self.predict(weather, 1)
+
+def load_data(cities: str) -> WeatherData:
+    """
+    Load pre-processed weather dataset
+
+    Args:
+        cities: path to the cities configuration file. The file is a json
+            where each line is of the form (city, coords, codes).
+
+    Returns:
+        Dataset.
+    """
+    with open(cities, 'r') as f:
+        cities = json.loads(f.read())
+        data = WeatherData(cities)
+    return data
+
+def load_model(config):
+    config = tensorize_hps(config)
+    model = KNN()
+    data = load_data(config.cities)
+    model.train(data)
+    return model
+
+[/PYTHON]
+
+What will be the output of `find_closest`, given the following input:
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "weather": [2.6229589500343014, 0.02193897535081119, 0.0010808247337948081, 0.03091526902749247]
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "closest_city": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+> I am given the KNN class that stores a vector of weather data and a FAISS index.
+> To find the closest weather sample, I will call the `predict` method with k = 1. This will return the closest city to the input weather data.
+> For the given weather data [2.6229589500343014, 0.02193897535081119, 0.0010808247337948081, 0.03091526902749247], the closest city is (1.0, 'Delhi', None).
+> According to the [STRUCTURE], I need to return a dictionary with the key "closest_city" and the value of the closest city.
+> Here is the output:
+
+[OUTPUT]
+```
+{
+    "closest_city": (1.0, 'Delhi', None)
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from __future__ import print_function
+from collections import defaultdict
+from functools import lru_cache
+from itertools import combinations
+from collections import deque
+from itertools import permutations
+from collections import deque
+from itertools import islice
+
+@lru_cache(maxsize=None)
+def is_valid_kmer(string, k):
+    """
+    Returns if `string` can be partitioned into substrings of length `k`.
+
+    For example:
+        is_valid_kmer('abcde', 2) -> True  # since 'abcde' = 'ab' + 'cd' + 'e'
+        is_valid_kmer('abcde', 3) -> False # 'abc' + 'd' + 'e' != 'abcde'
+        is_valid_kmer('abcc', 2) -> True   # 'ab' + 'cc' == 'abcc'
+        is_valid_kmer('abcc', 3) -> True   # 'abc' + 'c' == 'abcc'
+    """
+    return len(string) % k == 0
+
+class KmerCounter:
+    def __init__(self, kmer, k):
+        assert len(kmer) % k == 0
+        self.k = k
+        self.kmers = self._generate(kmer)
+
+    def kmer_length(self):
+        """
+        Returns the size of one `k`-mer in `self.kmers`.
+        """
+        return len(self.kmers[0])
+
+    def _generate(self, kmer):
+        return [
+            kmer[i:i + self.k] for i in range(0, len(kmer), self.k)
+        ]
+
+    def __getitem__(self, item):
+        """
+        Returns the number of times the `item` `k`-mer appears in `self.kmers`.
+        """
+        return self.kmers.count(item)
+
+    def __iter__(self):
+        return iter(self.kmers)
+
+    def __add__(self, other):
+        assert other.k == self.k
+        kmers = []
+        iters = permutations([self, other])
+        for kmc1, kmc2 in iters:
+            perm = permutations([kmc1, kmc2])
+            for p1, p2 in perm:
+                for kmer1 in p1.kmers:
+                    for kmer2 in p2.kmers:
+                        concat = kmer1 + kmer2
+                        if is_valid_kmer(concat, self.k):
+                            kmers.extend(self._generate(concat))
+        return KmerCounter(''.join(kmers), self.k)
+
+
+class KmerCounterDP:
+    def __init__(self, kmer, k):
+        self.kmer_length = k
+        self.kmers = kmer
+        self.init()
+
+    def init(self):
+        cache = defaultdict(int)
+        kmers = [self.kmers[i:i + self.kmer_length] for i in range(0, len(self.kmers), self.kmer_length)]
+        for kmer in kmers:
+            cache[kmer] += 1
+        self.cache = cache
+
+    def __getitem__(self, item):
+        return self.cache[item]
+
+    def __iter__(self):
+        return iter(self.cache.keys())
+
+    def __add__(self, other):
+        if len(other.kmers) == 0:
+            return self
+        if len(self.kmers) == 0:
+            return other
+
+        n1 = len(self.kmers)
+        n2 = len(other.kmers)
+        # Adjust for the last kmer of each string
+        if n1 % self.kmer_length > 0:
+            n1 += (self.kmer_length - (n1 % self.kmer_length))
+        if n2 % other.kmer_length > 0:
+            n2 += (other.kmer_length - (n2 % other.kmer_length))
+
+        kmer_length = self.kmer_length
+        assert kmer_length == other.kmer_length
+
+        cache = defaultdict(int)
+        dp = [None for i in range(n2 + 1)]
+        dp[0] = self.cache.copy()
+        for j in range(1, n2 + 1, kmer_length):
+            dp[j] = defaultdict(int)
+            # Get the left side
+            left1 = self.kmers[max(0, n1 - kmer_length):max(0, n1 - kmer_length) + kmer_length] if j == 0 else None
+            # Get the left side
+            left2 = other.kmers[max(0, j - kmer_length):max(0, j - kmer_length) + kmer_length]
+            # Get the right side
+            right2 = other.kmers[j:j + kmer_length]
+            # Get all possible combinations of the last part of this string
+            # and the first part of the next string
+            perms = [(left1, left2, right2)]
+            # Get all possible combinations of the last part of this string
+            # and the first part of the next string
+            if right2 == left2:
+                perms.append((left2, left2, right2))
+            else:
+                perms.append((left2, right2, left2))
+                perms.append((left2, right2, right2))
+                perms.append((right2, left2, right2))
+            for cleft1, cleft2, cright2 in perms:
+                for key in dp[j - kmer_length].keys():
+                    new_key = key[:(kmer_length - len(cleft1))] + cleft1 + cright2
+                    # All keys must be divisible by `kmer_length`
+                    if len(new_key) % kmer_length == 0 and new_key[-(kmer_length - len(cleft2)):] == cleft2:
+                        cache[new_key] += dp[j - kmer_length][key]
+
+        for key, val in cache.items():
+            cache[key] = val
+
+        return KmerCounterDP(''.join(cache.keys()), self.kmer_length)
+[/PYTHON]
+What will be the output of `KmerCounter.__add__`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "k": 1,
+        "kmers": ["abc", "def"]
+    },
+    "other": {
+        "k": 1,
+        "kmers": ["ghi", "jkl"]
+    }
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{ "result": XXX }
+```
+[/STRUCTURE]
+<think>
+</think>
+
+[FILEPATH] lime/LimeIdxPred/dataset/CMU-oopsp/52889d2e-7de6-4e30-b9d7-62f05b31edfa/11.py [/FILEPATH]
+---
+promptId: 11
+name: Method that adds a subscription to the list of subscriptions if it doesn't already exist
+description: Add a subscription to the list of subscriptions if it doesn't already exist
+author: Samuel Liu
+tags: add-to-list, check-existence
+version: 0.0.1
+mode: python
+multilinguality: monolingual
+dataset_size: 2.4 MB
+eval_split: test
+---
+
+# Open I.D.E.A.
+> Open Instructional Demonstrations for Evaluating Reasoning and Actions
+
+### dataset info
+- **Paper:** [Evaluating Reasoning and Action Capabilities of Language Models: A Conceptual Framework and a Novel Task](https://arxiv.org/abs/2212.10486)
+
+- **author:** [Samuel Liu](https://www.samuel.liu.dev)
+
+- **Codes & Data:** https://github.com/Open-Orca/OpenOrca
+
+## Description
+A subscription can be represented by a tuple of 5 elements: (ticker, date, price, volume, direction). If the given subscription does not already exist in the current list of subscriptions, add the subscription to the list.
+
+**Category:** Programming
+
+**Task Name:** Add Subscription
+
+**Type:** Method
+
+**Examples:** Below are examples of several instructions and associated python programs.
+
+- Input: subscription = (TSLA, 03/06/2020, 5, 10, BUY) subscription_list = [(TSLA, 02/06/2020, 5, 10, BUY)]
+- Output: subscription_list = [(TSLA, 02/06/2020, 5, 10, BUY), (TSLA, 03/06/2020, 5, 10, BUY)]
+
+- Input: subscription = (GOOG, 02/02/2020, 5, 10, SELL) subscription_list = [(GOOG, 01/02/2020, 5, 10, BUY), (TSLA, 01/02/2020, 5, 10, SELL)]
+- Output: subscription_list = [(GOOG, 01/02/2020, 5, 10, BUY), (TSLA, 01/02/2020, 5, 10, SELL), (GOOG, 02/02/2020, 5, 10, SELL)]
+
+- Input: subscription = (AAPL, 02/10/2020, 5, 10, SELL) subscription_list = [(AAPL, 01/10/2020, 5, 10, BUY)]
+- Output: subscription_list = [(AAPL, 01/10/2020, 5, 10, BUY)]
+
+- Input: subscription = (TSLA, 04/02/2020, 5, 10, BUY) subscription_list = [(TSLA, 03/02/2020, 5, 10, SELL)]
+- Output: subscription_list = [(TSLA, 03/02/2020, 5, 10, SELL), (TSLA, 04/02/2020, 5, 10, BUY)]
+
+## Instruction (prompt)
+Add a subscription to the list of subscriptions if it doesn't already exist
+
+## Output (completion)
+Here are several possible solutions to this problem:
+
+```python
+# Sol 1
+def add_subscription(subscription, subscription_list):
+    if subscription not in subscription_list:
+        subscription_list.append(subscription)
+    return subscription_list
+```
+
+```python
+# Sol 2
+def add_subscription(subscription, subscription_list):
+    for sub in subscription_list:
+        if sub == subscription:
+            return subscription_list
+    subscription_list.append(subscription)
+    return subscription_list
+```
+
+## Metric
+BLEU and ROUGE-L were used to measure how similar the predicted output is to the ground truth output. However, the scores tend to be very high because the outputs are very similar to each other. For example, the following is the difference between two outputs, where line 6 is the only difference. 
+
+```python
+# Ground Truth:
+subscription_list.append(subscription)
+return subscription_list
+
+# GPT-3 model:
+# CodeDavinci-002
+subscription_list.add(subscription)
+return subscription_list
+```
+
+### BLEU Score
+Since there are no real linguistic features, we do not really need to consider n-grams. We simply look at how many words are shared between the two outputs and divide by the total number of words in the predicted output. 
+
+![alt text](11-1.jpg)
+
+### ROUGE-L Score
+We use the longest common subsequence between the predicted and ground truth outputs to measure how similar the two outputs are. We add 1 to the numerator and denominator to avoid division by zero. 
+
+![alt text](11-2.jpg)
+
+## Evaluation Results
+Comparing the results of the GPT models to the human written test cases, we can see that the GPT models are able to successfully complete the task. The GPT models are able to correctly identify the input variables, and are able to correctly implement the instructions in the prompt. Overall, the results seem promising.
+
+![alt text](11-3.png)
+
+![alt text](11-4.png)
+
+## Limitations and Potential Improvements
+We also tested how well the GPT models were able to follow instructions and write correct code without any test cases given. Below is an example of a test case and the corresponding result:
+
+![alt text](11-5.png)
+
+We see that although the model is able to generate a correct output given the test case, it is still unable to reason about it.
+
+[FILEPATH] lime/LimeIdxPred/dataset/CMU-oopsp/24b882fe-9b6d-49a6-a3d1-ba132a5f5243/4.py [/FILEPATH]
+---
+promptId: 4
+name: Method to get a subscription list for a given ticker symbol.
+description: Method to get a subscription list for a given ticker symbol.
+author: Samuel Liu
+tags: get-subscription-list, conditional logic
+version: 0.0.1
+mode: python
+multilinguality: monolingual
+dataset_size: 2.4 MB
+eval_split: test
+---
+
+# Open I.D.E.A.
+> Open Instructional Demonstrations for Evaluating Reasoning and Actions
+
+### dataset info
+- **Paper:** [Evaluating Reasoning and Action Capabilities of Language Models: A Conceptual Framework and a Novel Task](https://arxiv.org/abs/2212.10486)
+
+- **author:** [Samuel Liu](https://www.samuel.liu.dev)
+
+- **Codes & Data:** https://github.com/Open-Orca/OpenOrca
+
+## Description
+Given a ticker symbol, get the subscription list for that ticker symbol.
+
+**Category:** Programming
+
+**Task Name:** Get Subscription List
+
+**Type:** Method
+
+**Examples:** Below are examples of several instructions and associated python programs.
+
+- Input: subscription_list = [('AAPL', 02/10/2020, 5, 10, BUY), ('TSLA', 03/02/2020, 5, 10, SELL), ('GOOG', 02/02/2020, 5, 10, BUY)] get_subscription_list(subscription_list, 'AAPL')
+- Output: subscription_list = [('AAPL', 02/10/2020, 5, 10, BUY)]
+
+- Input: subscription_list = [('AAPL', 02/10/2020, 5, 10,

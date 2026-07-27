@@ -1,0 +1,166 @@
+[THOUGHT]
+We need to trace the `while` loop in line 52: `while np.sum(support_) > n_features_to_select`.  
+First, determine the values of variables before entering the loop.
+
+Given input:
+- `X` is a sparse matrix with shape (150, 10) → `n_features = 10`
+- `n_features_to_select = 4` (integral)
+- `step = 0.1` (0 < step < 1)
+- `step_score = None`
+
+Calculations before loop:
+Line 32: `n_features = 10`  
+Lines 33–40: Since `n_features_to_select = 4` (Integral), `n_features_to_select = 4`.  
+Lines 41–44: `self.step = 0.1`, so `step = int(max(1, 0.1 * 10)) = int(max(1, 1)) = 1`.  
+Line 45: `support_ = np.ones(10, dtype=bool)` → all True initially.  
+Line 46: `ranking_ = np.ones(10, dtype=int)` → all 1 initially.
+
+Now the loop condition: `np.sum(support_) > n_features_to_select`.  
+Initially `np.sum(support_) = 10`, `n_features_to_select = 4`, condition is `10 > 4` → True.
+
+We will loop until `np.sum(support_) == 4`. Each iteration removes `min(step, np.sum(support_) - n_features_to_select)` features.
+
+Let’s trace step by step:
+
+**Iteration 1:**  
+- `features = np.arange(10)[support_]` = `[0,1,2,3,4,5,6,7,8,9]`  
+- `estimator.fit` called  
+- `importances` computed  
+- `ranks` = indices of importances sorted ascending (less important first)  
+- `threshold = min(step, np.sum(support_) - n_features_to_select) = min(1, 10 - 4) = 1`  
+- Remove the least important feature: `support_[features[ranks][0]] = False`  
+- `ranking_[np.logical_not(support_)] += 1` → ranking of removed feature becomes 2  
+
+Now `np.sum(support_) = 9`.
+
+**Iteration 2:**  
+`threshold = min(1, 9 - 4) = 1` → remove 1 feature again.  
+`ranking_[np.logical_not(support_)] += 1` → ranking of new removed feature(s) increases by 1 from previous ranking? Wait:  
+Actually `ranking_[np.logical_not(support_)]` means for all currently unsupported features, increment ranking by 1. At iteration 2, the unsupported set includes the one removed in iteration 1, so its ranking becomes 3, and the new removed feature gets ranking 2? Let's check code: `ranking_[np.logical_not(support_)] += 1` is executed after setting new support_ to False for some features. At that point, `np.logical_not(support_)` includes all features removed so far, so all get +1. That means ranking accumulates: first removed feature gets +1 each iteration after it's removed.  
+
+Let's track concretely:
+
+Init: ranking_ = [1,1,1,1,1,1,1,1,1,1]
+
+Iteration 1:
+- Suppose ranks = [5, ...] (feature 5 least important)
+- support_[5] = False → support_[5] = False
+- np.logical_not(support_) = [5]
+- ranking_[[5]] += 1 → ranking_ = [1,1,1,1,1,2,1,1,1,1]
+
+Iteration 2:
+- Suppose ranks = [3, ...] (feature 3 least important now)
+- support_[3] = False → support_ indices False: 5,3
+- np.logical_not(support_) = [3,5]
+- ranking_[[3,5]] += 1 → ranking_ = [1,1,1,3,1,3,1,1,1,1]
+
+Actually careful: ranking_[3] was 1, now 2? Wait, no: ranking_[3] was 1, then add 1 → 2. ranking_[5] was 2, now 3. So ranking_ = [1,1,1,2,1,3,1,1,1,1].
+
+This means ranking counts how many times the feature survived being removed? Not exactly; ranking starts at 1 for all, then each time a feature is removed (or already removed) its ranking increments by 1 each iteration after removal. So ranking_ for removed features will be >1, and increase as iterations proceed.
+
+We don't need exact ranking values; we need `n_features_to_select` state inside the while loop header? The state annotation is `[STATE]n_features_to_select=??[/STATE]`.  
+`n_features_to_select` is set before loop and never changed inside loop, so it's constant across iterations. Its value is 4.
+
+Thus the `while` loop executes as long as `np.sum(support_) > 4`. Initially 10, then 9,8,7,6,5, then exit when 4. That’s 6 iterations.
+
+`n_features_to_select` stays 4 each iteration.
+
+So state for `n_features_to_select` is: `[4, 4, 4, 4, 4, 4]` (one for each loop iteration).
+
+Check: loop condition checked each time at line 52. We can simulate:  
+Iteration 1: sum(support_) = 10 → True  
+Iteration 2: sum(support_) = 9 → True  
+Iteration 3: sum(support_) = 8 → True  
+Iteration 4: sum(support_) = 7 → True  
+Iteration 5: sum(support_) = 6 → True  
+Iteration 6: sum(support_) = 5 → True  
+After iteration 6: sum(support_) = 4 → condition False → exit.
+
+So 6 iterations total.
+
+Therefore, `n_features_to_select = [4, 4, 4, 4, 4, 4]`.
+
+[/THOUGHT]
+
+[ANSWER]
+1 import warnings
+2 from numbers import Integral
+3 import numpy as np
+4 from sklearn.base import (
+5     BaseEstimator,
+6     MetaEstimatorMixin,
+7     _fit_context,
+8     clone,
+9     is_classifier,
+10 )
+11 from sklearn.feature_selection._base import SelectorMixin, _get_feature_importances
+12 from sklearn.utils._param_validation import HasMethods, Interval, RealNotInt
+13 from sklearn.utils.validation import (
+14     _check_method_params,
+15     _estimator_has,
+16     check_is_fitted,
+17     validate_data,
+18 )
+19 
+20 class RFE(SelectorMixin, MetaEstimatorMixin, BaseEstimator):
+21     _parameter_constraints: dict = {'estimator': [HasMethods(['fit'])], 'n_features_to_select': [None, Interval(RealNotInt, 0, 1, closed='right'), Interval(Integral, 0, None, closed='neither')], 'step': [Interval(Integral, 0, None, closed='neither'), Interval(RealNotInt, 0, 1, closed='neither')], 'verbose': ['verbose'], 'importance_getter': [str, callable]}
+22 
+23     def __init__(self, estimator, *, n_features_to_select=None, step=1, verbose=0, importance_getter='auto'):
+24         self.estimator = estimator
+25         self.n_features_to_select = n_features_to_select
+26         self.step = step
+27         self.importance_getter = importance_getter
+28         self.verbose = verbose
+29 
+30     def _fit(self, X, y, step_score=None, **fit_params):
+31         X, y = validate_data(self, X, y, accept_sparse='csc', ensure_min_features=2, ensure_all_finite=False, multi_output=True)
+32         n_features = X.shape[1]
+33         if self.n_features_to_select is None:
+34             n_features_to_select = n_features // 2
+35         elif isinstance(self.n_features_to_select, Integral):
+36             n_features_to_select = self.n_features_to_select
+37             if n_features_to_select > n_features:
+38                 warnings.warn(f'Found n_features_to_select={n_features_to_select!r} > n_features={n_features!r}. There will be no feature selection and all features will be kept.', UserWarning)
+39         else:
+40             n_features_to_select = int(n_features * self.n_features_to_select)
+41         if 0.0 < self.step < 1.0:
+42             step = int(max(1, self.step * n_features))
+43         else:
+44             step = int(self.step)
+45         support_ = np.ones(n_features, dtype=bool)
+46         ranking_ = np.ones(n_features, dtype=int)
+47         if step_score:
+48             self.step_n_features_ = []
+49             self.step_scores_ = []
+50             self.step_support_ = []
+51             self.step_ranking_ = []
+52         while np.sum(support_) > n_features_to_select:## [STATE]n_features_to_select=[4,4,4,4,4,4][/STATE]
+53             features = np.arange(n_features)[support_]
+54             estimator = clone(self.estimator)
+55             if self.verbose > 0:
+56                 print('Fitting estimator with %d features.' % np.sum(support_))
+57             estimator.fit(X[:, features], y, **fit_params)
+58             if step_score:
+59                 self.step_n_features_.append(len(features))
+60                 self.step_scores_.append(step_score(estimator, features))
+61                 self.step_support_.append(list(support_))
+62                 self.step_ranking_.append(list(ranking_))
+63             importances = _get_feature_importances(estimator, self.importance_getter, transform_func='square')
+64             ranks = np.argsort(importances)
+65             ranks = np.ravel(ranks)
+66             threshold = min(step, np.sum(support_) - n_features_to_select)
+67             support_[features[ranks][:threshold]] = False
+68             ranking_[np.logical_not(support_)] += 1
+69         features = np.arange(n_features)[support_]
+70         self.estimator_ = clone(self.estimator)
+71         self.estimator_.fit(X[:, features], y, **fit_params)
+72         if step_score:
+73             self.step_n_features_.append(len(features))
+74             self.step_scores_.append(step_score(self.estimator_, features))
+75             self.step_support_.append(support_)
+76             self.step_ranking_.append(ranking_)
+77         self.n_features_ = support_.sum()
+78         self.support_ = support_
+79         self.ranking_ = ranking_
+80         return self
+[/ANSWER]

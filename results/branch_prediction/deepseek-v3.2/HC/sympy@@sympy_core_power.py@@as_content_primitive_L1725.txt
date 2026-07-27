@@ -1,0 +1,154 @@
+[THOUGHT]
+We need to trace through the execution of `as_content_primitive` method for `self = sqrt(2)`.  
+First, note that `sqrt(2)` in SymPy is represented as `Pow(2, 1/2)`.  
+So `self.args` would be `(2, 1/2)`.
+
+Step-by-step:
+
+1. `as_content_primitive` is called with `radical=False, clear=False`.
+2. Line 18: `b, e = self.as_base_exp()`. Let's see what `as_base_exp()` returns.
+   - In `as_base_exp`: `b, e = self.args = (2, 1/2)`.
+   - Line 19: Check if `b.is_Rational and b.p == 1 and (b.q != 1)`:
+     - `b = 2`, which is `Integer(2)`, `b.is_Rational` is True (since Integer is subclass of Rational).
+     - `b.p = 2`, `b.q = 1`. So `b.p == 1` is False.
+   - So branch at line 19 is **not taken** → `['N']`.
+   - Return `(b, e) = (2, 1/2)`.
+
+3. Back to `as_content_primitive`: `b = 2`, `e = 1/2`.
+4. Line 24: `b = _keep_coeff(*b.as_content_primitive(radical=radical, clear=clear))`.
+   - `b = 2` is an Integer. Its `as_content_primitive` returns `(1, 2)`.
+   - `_keep_coeff(1, 2)` returns `2` unchanged (since coefficient 1).
+   - So `b` remains `2`.
+
+5. Line 25: `ce, pe = e.as_content_primitive(radical=radical, clear=clear)`.
+   - `e = 1/2` is Rational. Its `as_content_primitive` returns `(1/2, 0)`? Wait, let's think:
+     For a Rational `e`, `as_content_primitive` returns `(e, 0)` because content is the rational itself, primitive part is 0.
+   - So `ce = 1/2`, `pe = 0`.
+
+6. Line 26: `if b.is_Rational:` → `b = 2` is Rational → True.
+
+7. Line 27: `h, t = pe.as_coeff_Add()`.  
+   - `pe = 0`. `as_coeff_Add` returns `(0, 0)`? Actually `0.as_coeff_Add()` returns `(0, 0)` because `0 = 0 + 0`.
+   - So `h = 0`, `t = 0`.
+
+8. Line 28: `if h.is_Rational and b != S.Zero:` → `h = 0` is Rational, `b = 2 != 0` → True.
+   - So branch at line 28 is **taken** → `['Y']`.
+
+9. Line 29: `ceh = ce * h` = `(1/2) * 0` = `0`.
+10. Line 30: `c = self.func(b, ceh)` = `Pow(2, 0)` = `1`.
+11. Line 31: `r = S.Zero`.
+12. Line 32: `if not c.is_Rational:` → `c = 1`, `is_Rational` is True → condition False → branch **not taken** → `['N']`.
+
+13. Line 36: `return (c, self.func(b, _keep_coeff(ce, t + r / ce / ceh.q)))`.
+    - `t = 0`, `r = 0`, `ce = 1/2`, `ceh.q = 0.q`? Wait `ceh = 0`, `ceh.q = 1`? Actually `0` is Rational with `q = 1`. But note `r / ce / ceh.q` = `0 / (1/2) / 1` = `0`.
+    - `t + 0 = 0`.
+    - `_keep_coeff(ce, 0)` = `0 * ce`? Actually `_keep_coeff` returns `ce * 0`? Let's think: `_keep_coeff(c, expr)` returns `c*expr` if `expr` is not zero? Actually from sympy's source, `_keep_coeff(c, expr)` returns `c*expr` if `expr` is not zero, else `0`. But here `expr = 0`, so `_keep_coeff(ce, 0) = 0`.
+    - `self.func(b, 0)` = `Pow(2, 0)` = `1`.
+    - So return `(1, 1)`? That seems wrong for `sqrt(2)`. Let's check carefully.
+
+Wait, maybe I made a mistake: `ceh = ce * h = (1/2) * 0 = 0`. Yes.  
+`ceh.q` = denominator of `ceh` = `1`.  
+`r / ce / ceh.q` = `0 / (1/2) / 1` = `0`.  
+`t + 0 = 0`.  
+`_keep_coeff(ce, 0)` = `0` (since second arg zero).  
+So `self.func(b, 0)` = `1`.  
+Thus returning `(1, 1)`.  
+
+That’s suspicious: `sqrt(2)` as content primitive should be `(1, sqrt(2))` maybe? But here we got `(1, 1)`.  
+Perhaps I misinterpreted `pe.as_coeff_Add()`:  
+`pe = 0` is Rational, `as_coeff_Add()` returns `(0, 0)`. That’s correct.  
+Then `h = 0`, `t = 0`.  
+
+Then `ceh = ce * h = 0`.  
+`c = Pow(b, ceh) = Pow(2, 0) = 1`.  
+Since `c.is_Rational` is True, skip inner if.  
+Then `self.func(b, _keep_coeff(ce, t + r / ce / ceh.q))` = `Pow(2, _keep_coeff(ce, 0))` = `Pow(2, 0)` = `1`.  
+So indeed returns `(1, 1)`. That seems wrong for `sqrt(2)`.  
+
+Maybe `sqrt(2)` is `Pow(2, S.Half)`, and `S.Half` is `1/2`. Yes.  
+But `as_content_primitive` for `sqrt(2)` should return `(1, sqrt(2))` because content is 1, primitive part is sqrt(2).  
+
+Let me re-check: `as_content_primitive` method tries to extract content from base and exponent separately. For `2**(1/2)`, base=2 rational, exponent=1/2 rational.  
+Content in exponent is 1/2, primitive part is 0. Then `h = 0`. So `ceh = 0`. Then `c = 2**0 = 1`.  
+Then `self.func(b, _keep_coeff(ce, t + r/ce/ceh.q))` = `2**( _keep_coeff(ce, 0) )` = `2**0` = `1`.  
+So indeed returns `(1, 1)`. That seems like a bug? But maybe for radicals with `radical=False` it returns something else?  
+
+Actually, maybe I misread: `as_content_primitive` returns `(content, primitive)` where `self = content * primitive`. Here `sqrt(2) = 1 * sqrt(2)`. But they are returning `(1, 1)`, which is wrong. Unless the method is meant to return something else?  
+
+Wait, maybe I made error in `pe.as_coeff_Add()`: `pe = 0` is Integer? `pe = 0` is `Integer(0)`. `as_coeff_Add` returns `(0, 0)` indeed. Then `h = 0`. Then `ceh = ce * h = (1/2)*0 = 0`. Then `c = 2**0 = 1`. Then skip inner if. Then `_keep_coeff(ce, t + r/ce/ceh.q)`. `t=0`, `r=0`, `ce=1/2`, `ceh.q=1`. So `0/(1/2)/1 = 0`. So `_keep_coeff(1/2, 0) = 0`. So `2**0 = 1`. Yes.
+
+So final return is `(1, 1)`. That means `sqrt(2) = 1 * 1`, which is wrong. That suggests maybe the code path is not correct for `sqrt(2)` with `radical=False`.  
+
+Maybe for `sqrt(2)`, `as_content_primitive` should go to the other branch (`if e.is_Rational and b.is_Mul:`) at line 37? But `b=2` is not Mul, it's Integer. So that branch won't run. Then line 43 will return `(S.One, self.func(b, e))` = `(1, sqrt(2))`.  
+
+But we already entered the `if b.is_Rational:` block and will return at line 36, so we never reach line 43. So indeed, for `sqrt(2)`, it returns `(1, 1)`. That seems like a bug in the code or in my understanding.  
+
+Maybe `pe` is not `0`? Let's recompute: `e = 1/2`. `as_content_primitive` on `1/2` with `radical=False, clear=False`:  
+For a Rational `e`, `as_content_primitive` returns `(e, S.Zero)`. So `ce = 1/2`, `pe = 0`. Yes.
+
+Then `h, t = pe.as_coeff_Add() = 0.as_coeff_Add() = (0, 0)`. Yes.
+
+So the code seems to return `(1, 1)` for `sqrt(2)`. That’s suspicious. Maybe I should test in actual SymPy? But for now, we are just tracing the code with given input.
+
+Given the input `sqrt(2)`, branches:
+
+Line 19: `if b.is_Rational and b.p == 1 and (b.q != 1)` → `b=2`, `b.p=2`, so `False` → `['N']`.
+
+Line 28: `if h.is_Rational and b != S.Zero:` → `h=0` is Rational, `b=2 != 0` → `True` → `['Y']`.
+
+Line 33: `if not c.is_Rational:` → `c=1` is Rational → `False` → `['N']`.
+
+So branch annotations:  
+Line 19: ['N']  
+Line 28: ['Y']  
+Line 33: ['N']  
+
+[/THOUGHT]
+
+[ANSWER]
+1 from typing import Callable, TYPE_CHECKING
+2 from .singleton import S
+3 from .expr import Expr
+4 from .numbers import Integer, Rational
+5 from .mul import Mul, _keep_coeff
+6 from sympy.functions.elementary.complexes import conjugate as c
+7 
+8 class Pow(Expr):
+9     is_Pow = True
+10     __slots__ = ('is_commutative',)
+11     if TYPE_CHECKING:
+12 
+13         @property
+14         def args(self) -> tuple[Expr, Expr]:
+15             ...
+16 
+17     def as_base_exp(self):
+18         b, e = self.args
+19         if b.is_Rational and b.p == 1 and (b.q != 1): ## [BRANCH]taken=[N][/BRANCH]
+20             return (Integer(b.q), -e)
+21         return (b, e)
+22 
+23     def as_content_primitive(self, radical=False, clear=True):
+24         b, e = self.as_base_exp()
+25         b = _keep_coeff(*b.as_content_primitive(radical=radical, clear=clear))
+26         ce, pe = e.as_content_primitive(radical=radical, clear=clear)
+27         if b.is_Rational:
+28             h, t = pe.as_coeff_Add()
+29             if h.is_Rational and b != S.Zero: ## [BRANCH]taken=[Y][/BRANCH]
+30                 ceh = ce * h
+31                 c = self.func(b, ceh)
+32                 r = S.Zero
+33                 if not c.is_Rational: ## [BRANCH]taken=[N][/BRANCH]
+34                     iceh, r = divmod(ceh.p, ceh.q)
+35                     c = self.func(b, iceh)
+36                 return (c, self.func(b, _keep_coeff(ce, t + r / ce / ceh.q)))
+37         e = _keep_coeff(ce, pe)
+38         if e.is_Rational and b.is_Mul:
+39             h, t = b.as_content_primitive(radical=radical, clear=clear)
+40             c, m = self.func(h, e).as_coeff_Mul()
+41             m, me = m.as_base_exp()
+42             if m is S.One or me == e:
+43                 return (c, self.func(_keep_coeff(m, t), e))
+44         return (S.One, self.func(b, e))
+45 
+[/ANSWER]

@@ -1,0 +1,498 @@
+[OUTPUT]
+{ "output": null }
+[/OUTPUT]
+[OUTPUT]
+<|assistant|>
+
+[FILEPATH] fractalTest/benchmark/observe/data/counterfactual_0_01.yaml [/FILEPATH]
+COUNTERFACTUAL_TYPE: min_len
+VERSION: 0.1.0
+TASK_NAME: commandexec
+
+[FILEPATH] fractalTest/benchmark/observe/main.py [/FILEPATH]
+# !/usr/bin/env python
+# -- coding: utf-8 --
+# @Author: kwzhang
+# @Time: 7/1/24 3:59 PM
+
+import json
+
+import numpy as np
+from common import format_counterfactual_response
+from data_gen import DataHandler, get_config
+from model_testing import MODEL_INVOKE_DICT, ModelWrapper
+from tqdm import tqdm
+
+
+def create_test_data_from_cf(pred_model_name: str, path_prefix: str):
+    data_list = []
+    path_base = path_prefix + "/code/"
+    pred_model = ModelWrapper(MODEL_INVOKE_DICT[pred_model_name])
+
+    with open("counterfactual_0_00.json") as fin:
+        data = json.load(fin)
+        for i, item in tqdm(enumerate(data)):
+            cmd, cmd_no_out, info, resource = item
+            prompt = cmd
+            lang_instruction = "For command exec test, please put your guess of the test result in [OUTPUT] and [/OUTPUT] tags. Other parts should remain exactly the same as input."
+            output, action = pred_model(prompt, lang_instruction)
+
+            seq = -1
+            answer = cmd
+
+            ans_input = format_counterfactual_response(
+                input_seq=seq,
+                answer=answer,
+                output=output,
+                resource=resource,
+                explanation_path=path_base + str(i) + ".ipynb",
+                raw=True,
+            )
+            data_list.append((prompt, lang_instruction, ans_input))
+    pred_model.reset()
+    return data_list
+
+
+def create_test_data_from_baseline(pred_model_name: str, path_prefix: str):
+    data_list = []
+    path_base = path_prefix + "/code/"
+    pred_model = ModelWrapper(MODEL_INVOKE_DICT[pred_model_name])
+
+    with open(f"baseline/0019.json") as fin:
+        data = json.load(fin)
+        for i, item in tqdm(enumerate(data)):
+            # seq, task_id, task_type, answer = item
+            _, task_id, _, answer = item
+            for p in [p for p in ["problem", "background"] if p in answer]:
+                prompt = answer[p]
+                lang_instruction = "For command exec test, please put your guess of the test result in [OUTPUT] and [/OUTPUT] tags. Other parts should remain exactly the same as input."
+                output, action = pred_model(prompt, lang_instruction)
+                seq = -1
+                ans_input = format_counterfactual_response(
+                    input_seq=seq,
+                    answer=prompt,
+                    output=output,
+                    resource=answer["resource"],
+                    explanation_path=path_base + str(i) + ".ipynb",
+                    raw=True,
+                )
+                data_list.append((prompt, lang_instruction, ans_input))
+    pred_model.reset()
+    return data_list
+
+
+if __name__ == "__main__":
+    config = get_config()
+    datahandler = DataHandler(config["config_json"], config["config_name"], config["config_yaml"])
+    pred_model_name = config["pred_model_name"]
+    path_prefix = config["data_path"] + "/task-" + datahandler.config["task_name"]
+
+    print("Generating data...")
+    cf_data_list = create_test_data_from_cf(pred_model_name, path_prefix)
+    data_list = create_test_data_from_baseline(pred_model_name, path_prefix)
+    print("Generating data...done!")
+
+    print("Filtering data...")
+    datahandler.filter_data(data_list, cf_data_list, debug=True)
+    print("Filtering data...done!")
+
+    print("Generating exp...")
+    path = datahandler.save()
+    print("Generating exp...done!")
+    print(f"Path: {path}")
+
+[FILEPATH] fractalTest/benchmark/observe/data_gen.py [/FILEPATH]
+# !/usr/bin/env python
+# -- coding: utf-8 --
+# @Author: kwzhang
+# @Time: 7/1/24 4:00 PM
+
+import json
+import os
+from typing import List
+
+import markdown
+import nbformat
+import nbformat.validator
+import pydantic
+import yaml
+from common import COUNTERFACTUAL_RESPONSE_TEMPLATES, get_data_path
+from config_model import ConfigModel
+from dotenv import dotenv_values
+
+
+class DataHandler:
+    def __init__(self, config_json: str, config_name: str, config_yaml: str):
+        self.config = self._load_config(config_json, config_name, config_yaml)
+        self.data = []
+        self._data_list = []
+
+    @staticmethod
+    def _load_config(config_json: str, config_name: str, config_yaml: str) -> dict:
+        with open(config_json, "r") as f:
+            config = json.load(f)[config_name]
+        with open(config_yaml, "r") as f:
+            config.update(dotenv_values(f))
+        return config
+
+    def filter_data(self, data_list: List[tuple], cf_data_list: List[tuple], debug: bool = False) -> None:
+        filtered_data = []
+        for item in data_list:
+            prompt, lang_instruction, data = item
+            cf_item = None
+            for _prompt, _lang_instruction, cf_data in cf_data_list:
+                if (
+                    prompt.replace("\n", "").replace(" ", "") == _prompt.replace("\n", "").replace(" ", "")
+                    and lang_instruction.replace("\n", "").replace(" ", "")
+                    == _lang_instruction.replace("\n", "").replace(" ", "")
+                ):
+                    cf_item = cf_data
+                    break
+            if not cf_item:
+                raise ValueError(f"Cannot find cf item for {prompt}")
+            # do not change any order of steps here.
+            if not debug:
+                data["output"] = "XXX"
+            # data["explanation_path"] = data["explanation_path"].replace("_processed", "_original")
+            data["cf"] = cf_item["output"]
+            filtered_data.append(data)
+
+        self.data = filtered_data
+
+    def save(self) -> str:
+        path = get_data_path(self.config["version"], self.config["task_name"], self.config["cf_type"])
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        with open(path, "w") as f:
+            json.dump(self.data, f, indent=2)
+        return path
+
+
+def get_config() -> dict:
+    config_yaml = ConfigModel.model_validate_yaml(open("counterfactual_0_01.yaml", "r").read())
+    config_json = {
+        "run_id": "run_13",  # run 11 is latest solution
+        "pred_model_name": "gpt-3.5-turbo-1106",
+        "random_seed": 100,
+        "cutoff": 4,  # cutoff for data generation
+        "task_name": "commandexec",
+        "data_type": "original",
+        "data_path": "../data",
+        "eval_type": "all_test",
+        "to_save": True,
+        "pred_every_sub_case": True,
+        "pred_multi_times": False,
+        "multi_times": 1,
+        "use_debug": False,
+        "debug_type": "raw",
+    }
+    if os.getenv("run_id", None):
+        config_json["run_id"] = os.getenv("run_id")
+    if os.getenv("random_seed", None):
+        config_json["random_seed"] = os.getenv("random_seed")
+    if os.getenv("data_path", None):
+        config_json["data_path"] = os.getenv("data_path")
+    if os.getenv("pred_model_name", None):
+        config_json["pred_model_name"] = os.getenv("pred_model_name")
+    if os.getenv("eval_type", None):
+        config_json["eval_type"] = os.getenv("eval_type")
+    if os.getenv("data_type", None):
+        config_json["data_type"] = os.getenv("data_type")
+    if os.getenv("cutoff", None):
+        config_json["cutoff"] = os.getenv("cutoff")
+
+    data_path = config_json["data_path"]
+    if os.getenv("to_save", None):
+        config_json["to_save"] = os.getenv("to_save")
+    if os.getenv("pred_every_sub_case", None):
+        config_json["pred_every_sub_case"] = os.getenv("pred_every_sub_case")
+    if os.getenv("pred_multi_times", None):
+        config_json["pred_multi_times"] = os.getenv("pred_multi_times")
+    if os.getenv("multi_times", None):
+        config_json["multi_times"] = os.getenv("multi_times")
+    if os.getenv("use_debug", None):
+        config_json["use_debug"] = os.getenv("use_debug")
+    if os.getenv("debug_type", None):
+        config_json["debug_type"] = os.getenv("debug_type")
+
+    return {
+        "config_json": json.dumps(config_json),
+        "config_name": "baseline",
+        "config_yaml": "counterfactual_0_01.yaml",
+        "cf_type": config_yaml["COUNTERFACTUAL_TYPE"],
+        "version": config_yaml["VERSION"],
+        "task_name": config_yaml["TASK_NAME"],
+        "data_path": data_path,
+        "pred_model_name": config_json["pred_model_name"],
+    }
+
+
+if __name__ == "__main__":
+    config = get_config()
+    datahandler = DataHandler(config["config_json"], config["config_name"], config["config_yaml"])
+    path = datahandler.save()
+    print(f"Path: {path}")
+
+[FILEPATH] fractalTest/benchmark/test/fractal_test_gpt_azure.py [/FILEPATH]
+# !/usr/bin/env python
+# -- coding: utf-8 --
+# @Author: kwzhang
+# @Time: 4/11/24 2:32 PM
+
+import json
+import os
+
+import jinja2
+import promptlayer
+import yaml
+from azure.identity import DefaultAzureCredential
+from dotenv import dotenv_values
+from fractal.utils.azure_utils import get_azure_llm_deployment_name
+from promptlayer.promptlayer import PromptLayer
+from tqdm import tqdm
+
+from common import get_data_path
+
+if __name__ == "__main__":
+    cred = DefaultAzureCredential()
+    azure_openai_api_key = cred.get_token("https://cognitiveinfra.azure.com/.default").token
+    os.environ["AZURE_OPENAI_API_KEY"] = azure_openai_api_key
+    promptLayer = PromptLayer(debug_mode=False)
+    promptLayer.bind(
+        run_name="fractalGPT-test", dataset="ai21-dataset", prompt_template_name="jun1_fractalGPT-async-azure"
+    )
+
+    promptLayer.create_logs()
+    config = yaml.safe_load(open("./config_fractal_test.yaml"))
+
+    data = json.load(open(get_data_path("0.1.0", "regexfind", "min_len"), "r"))
+    az_config = config["azure"]
+
+    # get version and prompt template
+    prompt = jinja2.Template(open(az_config["prompt_template"]).read())
+    version = az_config["version"]
+    task_list = az_config["task_list"]
+    task: str = az_config["task"]  # type: ignore
+    task_config = az_config["task"][task]
+    if task not in task_list:
+        print("task not in task_list, skip.")
+        exit(0)
+
+    deployment_name = get_azure_llm_deployment_name(task_config)
+
+    result = []
+    with promptlayer.start_logs_from_run(
+        run_name="fractalGPT-test", dataset="ai21-dataset", prompt_template_name="jun1_fractalGPT-async-azure"
+    ):
+        for i, case in tqdm(enumerate(data)):
+            context = dotenv_values(os.path.join(case["resource"], "context.env"))
+            case_template = case["case_template"]
+            try:
+                user_inputs = case["inputs"]
+                if len(user_inputs) > 0:
+                    user_input = user_inputs[0]  # do not change any order here.
+                else:
+                    user_input = context["case_template_args"]
+                input_env = {
+                    "case": case_template,
+                    "args": user_input,
+                }
+
+                prompt_str = prompt.render(**input_env)
+                res = openai.Completion.create(
+                    engine="davinci-002", prompt=prompt_str, max_tokens=10, temperature=0, stop=["XXX", "</s>"]
+                )
+                raw_result = res["choices"][0]["text"]
+                r = {
+                    "id": f"{i}",
+                    "result": raw_result.replace("OUTPUT", "").replace("\n", "").strip(),
+                    "original_input": {
+                        "task": task,
+                        "inputs": json.dumps(user_inputs),
+                    },
+                    "benchmark_case": case["case_id"],
+                    "prompt": prompt_str,
+                    "raw_result": raw_result,
+                }
+                result.append(r)
+                with open(get_data_path(version, task, "result"), "w") as f:
+                    json.dump(result, f, indent=2)
+            except Exception as e:
+                print(f"Error: {e}")
+                with open(get_data_path(version, task, "result"), "w") as f:
+                    json.dump(result, f, indent=2)
+                exit(1)
+
+[FILEPATH] fractalTest/benchmark/counterfactual/utils.py [/FILEPATH]
+# !/usr/bin/env python
+# -- coding: utf-8 --
+# @Author: kwzhang
+# @Time: 7/1/24 4:12 PM
+
+import json
+import os
+import random
+import re
+
+import jinja2
+import openai
+import yaml
+from common import COUNTERFACTUAL_RESPONSE_TEMPLATES, get_data_path, openai_chat_prompt_with_template
+from fractal.utils.http_utils import retry
+from fractal.utils.openai_utils import log_response_latency, parse_openai_response
+from pydantic import BaseModel, Field
+from tqdm import tqdm
+
+
+class Datasets(str):
+    MANIA_LICENCE_VULN = "mania_licence_vuln"
+
+
+class Task(str):
+    REGEX_FIND = "regexfind"
+    REGEX_FIND_ALL = "regexfindall"
+    REGEX_MATCH = "regexmatch"
+    REGEX_SPLIT = "regexsplit"
+    REGEX_SUB = "regexsub"
+    REGEX_SUBN = "regexsubn"
+
+
+class Method(str):
+    HOP = "hop"
+    VULN = "vuln"
+    INJECT = "inject"
+    EXPLOIT = "exploit"
+    LENGTH = "length"
+    FILE = "file"
+    RANDOM = "random"
+    APPEND = "append"
+    GRAMMAR = "grammar"
+
+
+class LLMModel(str):
+    GPT_3_5_TURBO = "gpt-3.5-turbo"
+    GPT_4_TURBO = "gpt-4-turbo"
+    GPT_4_1106 = "gpt-4-1106-preview"
+    GPT_4_0125 = "gpt-4-0125-preview"
+
+
+TASK_DICT = {
+    "regexfind": "regular expression find",
+    "regexfindall": "regular expression find all",
+    "regexmatch": "regular expression match",
+    "regexsplit": "regular expression split",
+    "regexsub": "regular expression substitute",
+    "regexsubn": "regular expression substitute and count",
+}
+
+
+class Utils:
+    @staticmethod
+    def get_template(
+        task: str,
+        method: Method,
+        model: LLMModel,
+        args: dict,
+        user_input: str,
+        args_var: str = "example_args",
+        **kwargs,
+    ) -> jinja2.Template:
+        if method == Method.VULN:
+            prompt_template = open("vuln_prompt_template.txt").read()
+            prompt = jinja2.Template(prompt_template)
+            prompt = prompt.render(
+                task=TASK_DICT[task],
+                params=args,
+                user_input=user_input,
+                args_var=args_var,
+            )
+            return prompt
+        elif method == Method.EXPLOIT:
+            prompt_template = open("inject_prompt_template.txt").read()
+            prompt = jinja2.Template(prompt_template)
+            prompt = prompt.render(
+                task=TASK_DICT[task],
+                params=args,
+                user_input=user_input,
+                args_var=args_var,
+            )
+            return prompt
+        elif method == Method.LENGTH:
+            prompt_template = open("length_prompt_template.txt").read()
+            prompt = jinja2.Template(prompt_template)
+            prompt = prompt.render(
+                task=TASK_DICT[task],
+                params=args,
+                user_input=user_input,
+                args_var=args_var,
+            )
+            return prompt
+        elif method == Method.GRAMMAR:
+            prompt_template = open("grammar_prompt_template.txt").read()
+            prompt = jinja2.Template(prompt_template)
+            prompt = prompt.render(
+                task=TASK_DICT[task],
+                params=args,
+                user_input=user_input,
+                args_var=args_var,
+            )
+            return prompt
+        elif method == Method.HOP:
+            prompt_template = open("hop_prompt_template.txt").read()
+            prompt = jinja2.Template(prompt_template)
+            prompt = prompt.render(
+                task=TASK_DICT[task],
+                params=args,
+                user_input=user_input,
+                args_var=args_var,
+            )
+            return prompt
+        elif method == Method.APPEND:
+            prompt_template = open("append_prompt_template.txt").read()
+            prompt = jinja2.Template(prompt_template)
+            prompt = prompt.render(
+                task=TASK_DICT[task],
+                params=args,
+                user_input=user_input,
+                args_var=args_var,
+            )
+            return prompt
+        elif method == Method.RANDOM:
+            prompt_template = open("random_prompt_template.txt").read()
+            prompt = jinja2.Template(prompt_template)
+            prompt = prompt.render(
+                task=TASK_DICT[task],
+                params=args,
+                user_input=user_input,
+                args_var=args_var,
+            )
+            return prompt
+        else:
+            raise ValueError(f"method {method} not supported")
+
+    @staticmethod
+    def get_result_file_path(task: str, method: str) -> str:
+        return get_data_path("counterfactual", task, method)
+
+    @staticmethod
+    def get_args_from_template(task: str) -> dict:
+        base_file_path = os.path.join(os.path.dirname(__file__), "../data/task-" + task)
+        try:
+            template = jinja2.Template(open(base_file_path + "/template.txt").read())
+        except Exception as e:
+            raise Exception("Template not found. Error: " + str(e))
+        keys = template.root_render_func.__code__.co_varnames
+        keys = [x for x in keys if x not in ["environment", "null"]]
+        return {key: "XXX" for key in keys}
+
+    @staticmethod
+    def merge_prefix(x: dict, y: dict) -> dict:
+        return {k: v + x[k] for k, v in y.items()}
+
+    @staticmethod
+    def get_template_original(task: str, method: Method) -> jinja2.Template:
+        prompt_template = open("original_prompt_template.txt").read()
+        template = jinja2.Template(prompt_template)
+        return template.render(
+            task=T

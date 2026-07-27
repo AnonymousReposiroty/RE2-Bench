@@ -1,0 +1,116 @@
+from sympy.core.basic import Basic
+from sympy.core.sympify import sympify, _sympify
+from sympy.polys.constructor import construct_domain
+from sympy.polys.polyerrors import (
+    OperationNotSupported, DomainError,
+    CoercionFailed, UnificationFailed,
+    GeneratorsNeeded, PolynomialError,
+    MultivariatePolynomialError,
+    ExactQuotientFailed,
+    PolificationFailed,
+    ComputationFailed,
+    GeneratorsError,
+)
+from sympy.polys.polyutils import (
+    basic_from_dict,
+    _sort_gens,
+    _unify_gens,
+    _dict_reorder,
+    _dict_from_expr,
+    _parallel_dict_from_expr,
+)
+from sympy.functions.elementary.piecewise import Piecewise
+from sympy.functions.elementary.piecewise import Piecewise
+
+def _parallel_poly_from_expr(exprs, opt):
+    """Construct polynomials from expressions. """
+    if len(exprs) == 2:
+        f, g = exprs
+
+        if isinstance(f, Poly) and isinstance(g, Poly):
+            f = f.__class__._from_poly(f, opt)
+            g = g.__class__._from_poly(g, opt)
+
+            f, g = f.unify(g)
+
+            opt.gens = f.gens
+            opt.domain = f.domain
+
+            if opt.polys is None:
+                opt.polys = True
+
+            return [f, g], opt
+
+    origs, exprs = list(exprs), []
+    _exprs, _polys = [], []
+
+    failed = False
+
+    for i, expr in enumerate(origs):
+        expr = sympify(expr)
+
+        if isinstance(expr, Basic):
+            if expr.is_Poly:
+                _polys.append(i)
+            else:
+                _exprs.append(i)
+
+                if opt.expand:
+                    expr = expr.expand()
+        else:
+            failed = True
+
+        exprs.append(expr)
+
+    if failed:
+        raise PolificationFailed(opt, origs, exprs, True)
+
+    if _polys:
+        # XXX: this is a temporary solution
+        for i in _polys:
+            exprs[i] = exprs[i].as_expr()
+
+    reps, opt = _parallel_dict_from_expr(exprs, opt)
+    if not opt.gens:
+        raise PolificationFailed(opt, origs, exprs, True)
+
+    from sympy.functions.elementary.piecewise import Piecewise
+    for k in opt.gens:
+        if isinstance(k, Piecewise):
+            raise PolynomialError("Piecewise generators do not make sense")
+
+    coeffs_list, lengths = [], []
+
+    all_monoms = []
+    all_coeffs = []
+
+    for rep in reps:
+        monoms, coeffs = list(zip(*list(rep.items())))
+
+        coeffs_list.extend(coeffs)
+        all_monoms.append(monoms)
+
+        lengths.append(len(coeffs))
+
+    domain = opt.domain
+
+    if domain is None:
+        opt.domain, coeffs_list = construct_domain(coeffs_list, opt=opt)
+    else:
+        coeffs_list = list(map(domain.from_sympy, coeffs_list))
+
+    for k in lengths:
+        all_coeffs.append(coeffs_list[:k])
+        coeffs_list = coeffs_list[k:]
+
+    polys = []
+
+    for monoms, coeffs in zip(all_monoms, all_coeffs):
+        rep = dict(list(zip(monoms, coeffs)))
+        poly = Poly._from_dict(rep, opt)
+        polys.append(poly)
+
+    if opt.polys is None:
+        opt.polys = bool(_polys)
+
+    return polys, opt

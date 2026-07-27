@@ -1,0 +1,409 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import numpy as np
+from scipy import linalg, sparse
+from .base import _BasePCA
+from ..utils import check_array, gen_batches
+from ..utils.extmath import svd_flip, _incremental_mean_and_var
+
+class IncrementalPCA(_BasePCA):
+
+    def __init__(self, n_components=None, whiten=False, copy=True, batch_size=None):
+        self.n_components = n_components
+        self.whiten = whiten
+        self.copy = copy
+        self.batch_size = batch_size
+
+    def fit(self, X, y=None):
+        self.components_ = None
+        self.n_samples_seen_ = 0
+        self.mean_ = 0.0
+        self.var_ = 0.0
+        self.singular_values_ = None
+        self.explained_variance_ = None
+        self.explained_variance_ratio_ = None
+        self.singular_values_ = None
+        self.noise_variance_ = None
+        X = check_array(X, accept_sparse=['csr', 'csc', 'lil'], copy=self.copy, dtype=[np.float64, np.float32])
+        n_samples, n_features = X.shape
+        if self.batch_size is None:
+            self.batch_size_ = 5 * n_features
+        else:
+            self.batch_size_ = self.batch_size
+        for batch in gen_batches(n_samples, self.batch_size_, min_batch_size=self.n_components or 0):
+            X_batch = X[batch]
+            if sparse.issparse(X_batch):
+                X_batch = X_batch.toarray()
+            self.partial_fit(X_batch, check_input=False)
+        return self
+
+    def partial_fit(self, X, y=None, check_input=True):
+        if check_input:
+            if sparse.issparse(X):
+                raise TypeError('IncrementalPCA.partial_fit does not support sparse input. Either convert data to dense or use IncrementalPCA.fit to do so in batches.')
+            X = check_array(X, copy=self.copy, dtype=[np.float64, np.float32])
+        n_samples, n_features = X.shape
+        if not hasattr(self, 'components_'):
+            self.components_ = None
+        if self.n_components is None:
+            if self.components_ is None:
+                self.n_components_ = min(n_samples, n_features)
+            else:
+                self.n_components_ = self.components_.shape[0]
+        elif not 1 <= self.n_components <= n_features:
+            raise ValueError('n_components=%r invalid for n_features=%d, need more rows than columns for IncrementalPCA processing' % (self.n_components, n_features))
+        elif not self.n_components <= n_samples:
+            raise ValueError('n_components=%r must be less or equal to the batch number of samples %d.' % (self.n_components, n_samples))
+        else:
+            self.n_components_ = self.n_components
+        if self.components_ is not None and self.components_.shape[0] != self.n_components_:
+            raise ValueError('Number of input features has changed from %i to %i between calls to partial_fit! Try setting n_components to a fixed value.' % (self.components_.shape[0], self.n_components_))
+        if not hasattr(self, 'n_samples_seen_'):
+            self.n_samples_seen_ = 0
+            self.mean_ = 0.0
+            self.var_ = 0.0
+        col_mean, col_var, n_total_samples = _incremental_mean_and_var(X, last_mean=self.mean_, last_variance=self.var_, last_sample_count=np.repeat(self.n_samples_seen_, X.shape[1]))
+        n_total_samples = n_total_samples[0]
+        if self.n_samples_seen_ == 0:
+            X -= col_mean
+        else:
+            col_batch_mean = np.mean(X, axis=0)
+            X -= col_batch_mean
+            mean_correction = np.sqrt(self.n_samples_seen_ * n_samples / n_total_samples) * (self.mean_ - col_batch_mean)
+            X = np.vstack((self.singular_values_.reshape((-1, 1)) * self.components_, X, mean_correction))
+        U, S, V = linalg.svd(X, full_matrices=False)
+        U, V = svd_flip(U, V, u_based_decision=False)
+        explained_variance = S ** 2 / (n_total_samples - 1)
+        explained_variance_ratio = S ** 2 / np.sum(col_var * n_total_samples)
+        self.n_samples_seen_ = n_total_samples
+        self.components_ = V[:self.n_components_]
+        self.singular_values_ = S[:self.n_components_]
+        self.mean_ = col_mean
+        self.var_ = col_var
+        self.explained_variance_ = explained_variance[:self.n_components_]
+        self.explained_variance_ratio_ = explained_variance_ratio[:self.n_components_]
+        if self.n_components_ < n_features:
+            self.noise_variance_ = explained_variance[self.n_components_:].mean()
+        else:
+            self.noise_variance_ = 0.0
+        return self
+
+    def transform(self, X):
+        if sparse.issparse(X):
+            n_samples = X.shape[0]
+            output = []
+            for batch in gen_batches(n_samples, self.batch_size_, min_batch_size=self.n_components or 0):
+                output.append(super().transform(X[batch].toarray()))
+            return np.vstack(output)
+        else:
+            return super().transform(X)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+.sklearn.utils.extmath._incremental_mean_and_var
+
+def _incremental_mean_and_var(X, last_mean, last_variance, last_sample_count):
+    last_sum = last_mean * last_sample_count
+    new_sum = _safe_accumulator_op(np.nansum, X, axis=0)
+    new_sample_count = np.sum(~np.isnan(X), axis=0)
+    updated_sample_count = last_sample_count + new_sample_count
+    updated_mean = (last_sum + new_sum) / updated_sample_count
+    if last_variance is None:
+        updated_variance = None
+    else:
+        new_unnormalized_variance = _safe_accumulator_op(np.nanvar, X, axis=0) * new_sample_count
+        last_unnormalized_variance = last_variance * last_sample_count
+        with np.errstate(divide='ignore', invalid='ignore'):
+            last_over_new_count = last_sample_count / new_sample_count
+            updated_unnormalized_variance = last_unnormalized_variance + new_unnormalized_variance + last_over_new_count / updated_sample_count * (last_sum / last_over_new_count - new_sum) ** 2
+        zeros = last_sample_count == 0
+        updated_unnormalized_variance[zeros] = new_unnormalized_variance[zeros]
+        updated_variance = updated_unnormalized_variance / updated_sample_count
+    return (updated_mean, updated_variance, updated_sample_count)
+
+.sklearn.utils.extmath._safe_accumulator_op
+
+def _safe_accumulator_op(op, x, *args, **kwargs):
+    if np.issubdtype(x.dtype, np.floating) and x.dtype.itemsize < 8:
+        result = op(x, *args, **kwargs, dtype=np.float64)
+    else:
+        result = op(x, *args, **kwargs)
+    return result
+
+.sklearn.utils.extmath.svd_flip
+
+def svd_flip(u, v, u_based_decision=True):
+    if u_based_decision:
+        max_abs_cols = np.argmax(np.abs(u), axis=0)
+        signs = np.sign(u[max_abs_cols, range(u.shape[1])])
+        u *= signs
+        v *= signs[:, np.newaxis]
+    else:
+        max_abs_rows = np.argmax(np.abs(v), axis=1)
+        signs = np.sign(v[range(v.shape[0]), max_abs_rows])
+        u *= signs
+        v *= signs[:, np.newaxis]
+    return (u, v)
+
+.sklearn.utils.validation.check_array
+
+def check_array(array, accept_sparse=False, accept_large_sparse=True, dtype='numeric', order=None, copy=False, force_all_finite=True, ensure_2d=True, allow_nd=False, ensure_min_samples=1, ensure_min_features=1, warn_on_dtype=None, estimator=None):
+    if warn_on_dtype is not None:
+        warnings.warn("'warn_on_dtype' is deprecated in version 0.21 and will be removed in 0.23. Don't set `warn_on_dtype` to remove this warning.", DeprecationWarning)
+    array_orig = array
+    dtype_numeric = isinstance(dtype, str) and dtype == 'numeric'
+    dtype_orig = getattr(array, 'dtype', None)
+    if not hasattr(dtype_orig, 'kind'):
+        dtype_orig = None
+    dtypes_orig = None
+    if hasattr(array, 'dtypes') and hasattr(array.dtypes, '__array__'):
+        dtypes_orig = np.array(array.dtypes)
+    if dtype_numeric:
+        if dtype_orig is not None and dtype_orig.kind == 'O':
+            dtype = np.float64
+        else:
+            dtype = None
+    if isinstance(dtype, (list, tuple)):
+        if dtype_orig is not None and dtype_orig in dtype:
+            dtype = None
+        else:
+            dtype = dtype[0]
+    if force_all_finite not in (True, False, 'allow-nan'):
+        raise ValueError('force_all_finite should be a bool or "allow-nan". Got {!r} instead'.format(force_all_finite))
+    if estimator is not None:
+        if isinstance(estimator, str):
+            estimator_name = estimator
+        else:
+            estimator_name = estimator.__class__.__name__
+    else:
+        estimator_name = 'Estimator'
+    context = ' by %s' % estimator_name if estimator is not None else ''
+    if sp.issparse(array):
+        _ensure_no_complex_data(array)
+        array = _ensure_sparse_format(array, accept_sparse=accept_sparse, dtype=dtype, copy=copy, force_all_finite=force_all_finite, accept_large_sparse=accept_large_sparse)
+    else:
+        with warnings.catch_warnings():
+            try:
+                warnings.simplefilter('error', ComplexWarning)
+                array = np.asarray(array, dtype=dtype, order=order)
+            except ComplexWarning:
+                raise ValueError('Complex data not supported\n{}\n'.format(array))
+        _ensure_no_complex_data(array)
+        if ensure_2d:
+            if array.ndim == 0:
+                raise ValueError('Expected 2D array, got scalar array instead:\narray={}.\nReshape your data either using array.reshape(-1, 1) if your data has a single feature or array.reshape(1, -1) if it contains a single sample.'.format(array))
+            if array.ndim == 1:
+                raise ValueError('Expected 2D array, got 1D array instead:\narray={}.\nReshape your data either using array.reshape(-1, 1) if your data has a single feature or array.reshape(1, -1) if it contains a single sample.'.format(array))
+        if dtype_numeric and np.issubdtype(array.dtype, np.flexible):
+            warnings.warn("Beginning in version 0.22, arrays of bytes/strings will be converted to decimal numbers if dtype='numeric'. It is recommended that you convert the array to a float dtype before using it in scikit-learn, for example by using your_array = your_array.astype(np.float64).", FutureWarning)
+        if dtype_numeric and array.dtype.kind == 'O':
+            array = array.astype(np.float64)
+        if not allow_nd and array.ndim >= 3:
+            raise ValueError('Found array with dim %d. %s expected <= 2.' % (array.ndim, estimator_name))
+        if force_all_finite:
+            _assert_all_finite(array, allow_nan=force_all_finite == 'allow-nan')
+    if ensure_min_samples > 0:
+        n_samples = _num_samples(array)
+        if n_samples < ensure_min_samples:
+            raise ValueError('Found array with %d sample(s) (shape=%s) while a minimum of %d is required%s.' % (n_samples, array.shape, ensure_min_samples, context))
+    if ensure_min_features > 0 and array.ndim == 2:
+        n_features = array.shape[1]
+        if n_features < ensure_min_features:
+            raise ValueError('Found array with %d feature(s) (shape=%s) while a minimum of %d is required%s.' % (n_features, array.shape, ensure_min_features, context))
+    if warn_on_dtype and dtype_orig is not None and (array.dtype != dtype_orig):
+        msg = 'Data with input dtype %s was converted to %s%s.' % (dtype_orig, array.dtype, context)
+        warnings.warn(msg, DataConversionWarning)
+    if copy and np.may_share_memory(array, array_orig):
+        array = np.array(array, dtype=dtype, order=order)
+    if warn_on_dtype and dtypes_orig is not None and ({array.dtype} != set(dtypes_orig)):
+        msg = 'Data with input dtype %s were all converted to %s%s.' % (', '.join(map(str, sorted(set(dtypes_orig)))), array.dtype, context)
+        warnings.warn(msg, DataConversionWarning, stacklevel=3)
+    return array
+
+.sklearn.utils.validation._ensure_no_complex_data
+
+def _ensure_no_complex_data(array):
+    if hasattr(array, 'dtype') and array.dtype is not None and hasattr(array.dtype, 'kind') and (array.dtype.kind == 'c'):
+        raise ValueError('Complex data not supported\n{}\n'.format(array))
+
+.sklearn.utils.validation._assert_all_finite
+
+def _assert_all_finite(X, allow_nan=False):
+    from .extmath import _safe_accumulator_op
+    if _get_config()['assume_finite']:
+        return
+    X = np.asanyarray(X)
+    is_float = X.dtype.kind in 'fc'
+    if is_float and np.isfinite(_safe_accumulator_op(np.sum, X)):
+        pass
+    elif is_float:
+        msg_err = 'Input contains {} or a value too large for {!r}.'
+        if allow_nan and np.isinf(X).any() or (not allow_nan and (not np.isfinite(X).all())):
+            type_err = 'infinity' if allow_nan else 'NaN, infinity'
+            raise ValueError(msg_err.format(type_err, X.dtype))
+    elif X.dtype == np.dtype('object') and (not allow_nan):
+        if _object_dtype_isnan(X).any():
+            raise ValueError('Input contains NaN')
+
+.sklearn._config.get_config
+
+def get_config():
+    return _global_config.copy()
+
+.sklearn.utils.validation._num_samples
+
+def _num_samples(x):
+    if hasattr(x, 'fit') and callable(x.fit):
+        raise TypeError('Expected sequence or array-like, got estimator %s' % x)
+    if not hasattr(x, '__len__') and (not hasattr(x, 'shape')):
+        if hasattr(x, '__array__'):
+            x = np.asarray(x)
+        else:
+            raise TypeError('Expected sequence or array-like, got %s' % type(x))
+    if hasattr(x, 'shape'):
+        if len(x.shape) == 0:
+            raise TypeError('Singleton array %r cannot be considered a valid collection.' % x)
+        if isinstance(x.shape[0], numbers.Integral):
+            return x.shape[0]
+        else:
+            return len(x)
+    else:
+        return len(x)
+
+
+[/PYTHON]
+What will be the input of `partial_fit`, given the following input:
+[OUTPUT]
+```
+{
+    "n_components": 20,
+    "whiten": false,
+    "copy": true,
+    "batch_size": "38",
+    "components_": "[[-1.35931259e-01  2.31717719e-01  2.26086898e-02 -2.21218870e-01\n  -3.39608801e-02 -1.07979176e-01 -8.62347360e-02  4.35172210e-03\n   1.74285072e-02 -6.02110624e-02  3.68556586e-01 -2.76592639e-01\n  -2.56098223e-01  1.81413999e-01 -7.47580633e-02  1.30283213e-01\n   3.51233215e-01  4.63643848e-01 -3.45379220e-01  2.51334143e-01]\n [-3.09241548e-01 -1.93969898e-01 -7.75738137e-02  8.48131448e-02\n  -4.11739857e-02  1.25240454e-01  7.66802513e-02  1.16737107e-01\n   5.73802376e-02  3.45995135e-01 -3.81122079e-01  4.04546861e-01\n  -7.20473772e-02 -2.00516248e-01 -1.14699491e-01  1.67638738e-01\n   4.35559655e-01  3.09850328e-01 -7.40012100e-02 -8.29291379e-02]\n [-2.76945367e-02  3.50698173e-01 -3.01384597e-01  1.94949736e-01\n   6.47647451e-01 -2.27283649e-01  8.32705315e-02 -2.99241847e-02\n   2.32871372e-01 -1.30522426e-01 -3.50070565e-01 -2.16462825e-01\n   2.75468722e-02 -3.07919916e-02 -3.51039772e-02  1.06163370e-01\n   6.39149889e-02 -2.11699310e-02 -7.39117887e-02 -5.99525400e-02]\n [-1.63070148e-01  1.24591184e-02 -2.22982966e-01  8.95428737e-02\n   1.28419488e-01  4.48978980e-01 -2.39235682e-01  4.67847328e-02\n   8.69028650e-02 -7.59526719e-02  9.67594619e-02  2.26299593e-01\n  -1.96001550e-02  4.30609775e-01  4.03271436e-01  1.80911324e-01\n  -2.71668744e-01  1.33118103e-01 -1.95934915e-01 -2.30308510e-01]\n [-2.38824530e-01  1.65150539e-01  2.32831894e-01  7.52005689e-02\n  -1.23237490e-01  1.12596592e-01  4.89004597e-01  2.25121964e-02\n  -1.20596255e-01 -1.23976108e-01 -1.79411977e-01 -5.08620205e-02\n  -1.18229041e-01 -1.31038551e-01  4.50327035e-01  2.92696553e-01\n  -1.09778532e-01 -1.44832196e-01 -8.85792046e-02  4.03914027e-01]\n [ 3.76866442e-01  2.95086576e-01 -2.55891888e-02 -2.96422958e-01\n   7.02813691e-02 -1.84971345e-01  7.56671832e-02 -2.50787632e-01\n  -3.17232821e-01  7.21375957e-02  8.56794005e-02  3.15782186e-01\n   8.30631322e-02 -2.79182014e-01  2.38942151e-01  2.67969263e-01\n  -6.04394140e-02  2.62552366e-01  9.10786605e-03 -2.74386532e-01]\n [-4.08194762e-02  4.93834651e-01  3.87759189e-02 -3.29672651e-01\n  -8.01916057e-02  2.70970248e-01  3.59674306e-02  1.65887406e-01\n  -1.14516394e-01  1.02463988e-01 -2.85975484e-01  1.09403092e-01\n   3.13656481e-01  2.47703120e-01 -4.13214684e-01 -6.64333313e-02\n  -2.06194936e-01  5.27226048e-02  2.47375361e-02  1.93485861e-01]\n [-1.59375153e-02  2.95323567e-02 -6.49519629e-02 -6.49009893e-02\n  -2.15940716e-01 -4.02606714e-01  1.46894196e-01 -3.31609329e-01\n   1.34896056e-01 -1.05745077e-01 -2.02904127e-01  3.37539421e-01\n  -3.83114296e-01  5.31014921e-01 -6.30312655e-02  4.55716406e-03\n  -9.91332574e-03 -8.96069686e-02  1.57533690e-01  2.03748318e-03]\n [ 1.11566614e-01 -1.26595699e-02  3.13427949e-01 -2.04779343e-01\n   1.91810672e-01  2.47240806e-01  9.12673161e-02 -3.27523113e-01\n   4.61078097e-01 -1.65681255e-01  1.43355847e-01  2.61634883e-01\n   3.06441952e-01  2.00408977e-02  3.86275430e-02 -3.37782956e-02\n   3.76112013e-01 -2.15832060e-01 -1.09311601e-01  8.78600332e-02]\n [-2.31100320e-01 -2.97555731e-01 -1.61987275e-02  2.49639647e-01\n   9.11280170e-02 -2.07818960e-01  2.29187557e-01 -2.76443742e-01\n  -3.18204803e-01 -1.86810751e-01  7.68175935e-02  6.07276736e-02\n   5.35907051e-01  1.81877835e-01 -1.24164355e-01 -5.54317564e-02\n  -1.00380253e-01  2.93828228e-01 -1.55675283e-01  9.93831951e-02]\n [-2.01061850e-01 -1.63300207e-01  1.75215212e-01 -3.05685972e-01\n   4.44785075e-01 -8.30947414e-02 -2.00887935e-01 -1.04181746e-01\n  -3.13999669e-01  4.42166753e-01 -6.41247015e-02 -9.98197565e-02\n  -1.41524874e-02  2.35839938e-01  2.65784012e-01 -7.97703237e-02\n   1.09083712e-01 -1.40309194e-01  2.22952266e-01  1.74678414e-01]\n [ 2.34554264e-01 -1.31746637e-01 -3.97237606e-01 -6.89674361e-02\n   4.69455681e-02 -1.46283677e-01  2.63880772e-01  5.12724065e-01\n  -2.63284851e-02  6.33536283e-02  2.81640115e-01  1.65500446e-01\n   1.96611588e-01  2.15968830e-01  3.31804477e-02  2.61178197e-01\n   2.12093378e-01 -2.24316768e-01  9.22484249e-02  1.97756455e-01]\n [ 4.71742171e-02  2.10810914e-01 -3.41662464e-01  1.94625267e-01\n  -1.99207404e-01  3.95790465e-02  1.83285527e-01 -2.90075199e-01\n   2.72877744e-01  5.58792900e-01  1.55089692e-01 -9.67647490e-02\n   1.38138561e-01 -1.52229421e-02  2.26488105e-01 -3.16015394e-01\n  -4.87294225e-02  1.08835347e-01  4.31622105e-02  1.81787151e-01]\n [-5.48991891e-02 -9.71069902e-02  9.22977356e-02  1.01149122e-02\n  -1.09998259e-01 -2.75264414e-01 -3.67958801e-01 -1.09813321e-01\n   2.99977540e-01  2.66741681e-01 -4.23799111e-03 -8.46469972e-03\n   1.86171899e-01 -8.85143077e-02 -1.35922931e-01  5.77199385e-01\n  -3.19965866e-01 -1.25160265e-01 -1.66539145e-01  2.06101049e-01]\n [ 2.71397439e-01 -2.14325296e-04  5.40554218e-02  2.48305297e-01\n  -1.08303632e-01  2.01535774e-01 -1.88014935e-01 -1.17272484e-01\n   5.46010676e-03 -1.48578221e-01 -1.60750204e-01 -2.05121145e-01\n   1.29878262e-01  1.48103918e-01  7.10573888e-02  3.06490821e-01\n   2.23827184e-01  3.07398146e-01  5.98071212e-01  1.73856705e-01]\n [-6.87134663e-02  2.11076746e-01  4.71421818e-01  1.57800849e-01\n  -7.00132916e-02 -3.94130791e-01 -4.75307445e-02  4.37175876e-01\n   2.33500136e-01  5.44554967e-02 -6.98657696e-03  8.51747754e-02\n   2.40193653e-01  1.39762648e-01  2.97625678e-01 -1.79673892e-01\n   2.14560194e-02  1.97503258e-01  7.29610401e-02 -2.05644712e-01]\n [-2.12461442e-01  1.82900543e-01 -1.35934261e-01  1.28589030e-01\n   1.36899670e-01 -8.93596874e-02 -3.48714585e-01  4.57112932e-02\n  -2.69482863e-02 -2.38334092e-01  2.01833919e-01  4.75279711e-01\n  -8.68542796e-02 -2.95581247e-01  1.94507354e-02 -2.06052330e-01\n  -6.64315198e-02  3.58005732e-02  2.35592713e-01  4.61381118e-01]\n [ 4.38013593e-01 -3.28598010e-01 -7.41257931e-02 -2.17517022e-01\n   1.92625898e-02 -5.92975100e-02 -1.01575414e-01  1.20237959e-01\n   1.21962469e-01 -1.06328064e-01 -4.10946284e-01  1.80298473e-02\n  -1.87624676e-02 -1.30341581e-02  2.26226634e-01 -2.54271703e-01\n  -1.36418056e-01  2.69930280e-01 -2.98789404e-01  3.55264542e-01]\n [ 3.15764548e-01 -5.46150203e-02  3.54099504e-01  3.22554030e-01\n   3.75515366e-01  1.39831271e-01  2.45632225e-01  6.12836877e-02\n   2.84649897e-02  2.53289948e-01  2.00296408e-01  1.68056753e-01\n  -3.24765815e-01  9.55069172e-02 -2.79925348e-01  4.19244584e-02\n  -2.55254800e-01  1.82535605e-01 -2.19397951e-03  1.29266460e-01]\n [ 2.75556338e-01  2.25570849e-01  7.45643041e-02  4.43333893e-01\n  -1.19800418e-01 -6.21650047e-03 -2.91714048e-01 -5.97640802e-02\n  -3.73608069e-01  9.49869324e-02 -1.22233027e-01  1.04139183e-01\n   2.03412849e-02  1.41855804e-01  2.86344691e-02 -4.58965783e-02\n   3.14334350e-01 -3.14231628e-01 -4.07712681e-01  7.99388529e-02]]",
+    "n_samples_seen_": "38",
+    "mean_": "[-0.10385275 -0.02009885 -0.28964721 -0.19982387 -0.19983487  0.0563293\n -0.06001633  0.13956395 -0.17604391  0.05248189  0.10139336  0.18548535\n  0.14380667  0.03825983  0.03609574  0.08591114 -0.08824103 -0.16831556\n  0.18957754  0.08028402]",
+    "var_": "[0.7872924  1.1046869  0.76358461 0.74203544 1.26876375 1.07552358\n 0.79562959 0.71895645 0.7950263  0.80687929 1.30677479 1.19844129\n 0.91816647 1.12939156 1.05839218 0.72812246 1.23732705 1.19691152\n 0.70925756 0.86008525]",
+    "singular_values_": "[10.01263448  9.30503269  9.08350451  8.26286089  7.46541242  6.74903825\n  6.61538469  6.20296749  6.07220899  5.86185801  5.18942741  4.75212845\n  4.41435293  4.14184683  3.75003561  3.68433022  3.10429863  2.56963768\n  2.084415    1.70149151]",
+    "explained_variance_": "[2.70953647 2.3400982  2.23000147 1.84526676 1.50628061 1.23106804\n 1.18279229 1.03991367 0.99653303 0.92868593 0.72784208 0.61034391\n 0.52666248 0.46364582 0.38007479 0.36687268 0.26045054 0.17846048\n 0.11742665 0.07824523]",
+    "explained_variance_ratio_": "[0.13739903 0.11866503 0.11308209 0.09357241 0.07638262 0.06242675\n 0.05997871 0.05273342 0.05053361 0.04709313 0.03690845 0.03095019\n 0.02670675 0.02351121 0.01927337 0.0186039  0.0132073  0.00904963\n 0.00595464 0.00396777]",
+    "noise_variance_": 0.0,
+    "batch_size_": "38",
+    "n_components_": 20
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

@@ -1,0 +1,274 @@
+Let's break this down step-by-step.
+
+We are given:
+
+- `self` with:
+  - `n_components=2`
+  - `whiten=False`
+  - `copy=True`
+  - `batch_size=50`
+- `X` is a string representation of a 150×4 dataset (the classic Iris dataset).  
+  It's 150 rows, 4 columns.
+
+The `fit` method will:
+
+1. Initialize:
+   - `self.components_ = None`
+   - `self.n_samples_seen_ = 0`
+   - `self.mean_ = 0.0`
+   - `self.var_ = 0.0`
+   - `self.singular_values_ = None`, etc.
+
+2. Convert `X` to array using `check_array(X, accept_sparse=['csr','csc','lil'], copy=self.copy, dtype=[np.float64, np.float32])`.  
+   Input `X` is a string, so `check_array` will convert it to a numpy array (float64), ensuring it's 2D and numeric.  
+   Here, shape will be `(150, 4)`.
+
+3. `n_samples, n_features = 150, 4`.
+
+4. `batch_size` is given as 50, so `self.batch_size_ = 50`.
+
+5. Loop over batches using `gen_batches(n_samples, self.batch_size_, min_batch_size=self.n_components or 0)`:
+   - `batch_size_ = 50`
+   - `min_batch_size = n_components or 0` → `2`
+   - Batches:
+     - `slice(0, 50)`
+     - `slice(50, 100)`
+     - `slice(100, 150)`
+
+6. For each batch, extract `X_batch = X[batch]`, if sparse convert to dense, then call `self.partial_fit(X_batch, check_input=False)`.
+
+We need to simulate the incremental PCA fit to compute final outputs.
+
+---
+
+**First batch (samples 0–49)**
+
+`partial_fit` for first batch:
+
+- `n_samples = 50`, `n_features = 4`
+- `self.components_` is `None` initially.
+- `self.n_components` is `2` → check: `1 <= 2 <= 4` ✅, `2 <= 50` ✅, so `self.n_components_ = 2`
+- `self.components_` is `None`, so no mismatch in shape.
+- `self.n_samples_seen_` starts at `0`, `self.mean_ = 0.0`, `self.var_ = 0.0`.
+- `_incremental_mean_and_var(X, last_mean=0.0, last_variance=0.0, last_sample_count=[0,0,0,0])`:
+
+   Since `last_sample_count` is repeated per feature: `[0,0,0,0]`.
+   Formula:  
+   `new_sum = np.sum(X, axis=0)` for first 50 rows.  
+   `new_sample_count = [50,50,50,50]` (no NaN).
+   `updated_sample_count = last_sample_count + new_sample_count = [50,50,50,50]`.
+   `updated_mean = (0 + new_sum) / 50` → just `mean_batch1`.
+   `last_variance=0.0`, so `updated_variance = None`? Wait, in `_incremental_mean_and_var` code: if `last_variance is None`, updated_variance=None, but here `last_variance` passed as `0.0`, not `None`. In the function, `last_variance` is a scalar? Actually passed as `self.var_` initialized to `0.0`. That is `last_variance=0.0` (array of 0.0?). The function signature: `def _incremental_mean_and_var(X, last_mean, last_variance, last_sample_count)`. `last_variance` is scalar? Actually `self.var_` is `0.0`, which Python treats as scalar float. But in function, `last_variance * last_sample_count` will be scalar * array? That's fine. Let's see:  
+
+   In the code branch `else:` because `last_variance is not None`:  
+   `last_unnormalized_variance = last_variance * last_sample_count` → `0 * [0,0,0,0] = [0,0,0,0]`.  
+   `new_unnormalized_variance = np.nanvar(X, axis=0) * new_sample_count`.  
+
+   Then:
+   `last_over_new_count = last_sample_count / new_sample_count = [0,0,0,0] / 50 → [0,0,0,0]`.  
+   `updated_unnormalized_variance = last_unnormalized_variance + new_unnormalized_variance + last_over_new_count / updated_sample_count * (last_sum/last_over_new_count - new_sum)^2`.  
+   But `last_over_new_count` is 0, so last term 0.
+
+   So `updated_variance = new_unnormalized_variance / updated_sample_count = new_unnormalized_variance / 50`.  
+   But `np.nanvar(X, axis=0)` times 50 = `new_unnormalized_variance` → `updated_variance` = `np.nanvar(X, axis=0)`.
+
+   Let's compute with actual data later.
+
+- `self.n_samples_seen_ = 0` so `if self.n_samples_seen_ == 0: X -= col_mean`.
+   `X_batch` centered.
+
+- `U, S, V = linalg.svd(X, full_matrices=False)` → SVD of centered batch1.
+- `U, V = svd_flip(U, V, u_based_decision=False)`.
+- `explained_variance = S**2 / (n_total_samples - 1)` → `S**2 / (50 - 1)` for first batch? Wait: `n_total_samples = n_total_samples[0]` (scalar). It's 50.
+- `explained_variance_ratio = S**2 / np.sum(col_var * n_total_samples)` → `col_var` is `updated_variance` from above.
+- Store:
+  `self.n_samples_seen_ = 50`
+  `self.components_ = V[:2]` (first 2 principal axes)
+  `self.singular_values_ = S[:2]`
+  `self.mean_ = col_mean`
+  `self.var_ = col_var`
+  `self.explained_variance_ = explained_variance[:2]`
+  `self.explained_variance_ratio_ = explained_variance_ratio[:2]`
+  `self.noise_variance_ = explained_variance[2:].mean()` if `n_components_ < n_features` (2<4 → yes) else 0.
+
+---
+
+**Second batch (samples 50–99)**
+
+Now `self.n_samples_seen_ = 50`, `self.mean_` = mean of first 50, `self.var_` = var of first 50.
+
+Call `partial_fit` with `X_batch` = rows 50–99.
+
+- Compute updated `col_mean`, `col_var`, `n_total_samples` = 100 now.
+- `self.n_samples_seen_ != 0`, so use branch:
+
+  `col_batch_mean = np.mean(X_batch, axis=0)`
+  `X_batch -= col_batch_mean`
+  `mean_correction = sqrt(self.n_samples_seen_ * n_samples / n_total_samples) * (self.mean_ - col_batch_mean)`
+
+  `self.singular_values_.reshape((-1,1)) * self.components_` is `(2,4)` matrix.
+  `X_batch` is `(50,4)`.
+  `mean_correction` is `(1,4)`.
+
+  Stack vertically: `(2+50+1, 4) = (53, 4)` matrix.
+
+- SVD on this `(53,4)` → singular values `S` length 4.
+
+- Update `self.n_samples_seen_ = 100`
+- Update `components_`, `singular_values_`, `mean_`, `var_`, `explained_variance_`, `explained_variance_ratio_`, `noise_variance_` similarly.
+
+---
+
+**Third batch (samples 100–149)**
+
+Same steps with previous aggregated stats `self.n_samples_seen_ = 100`, `self.mean_`, `self.var_`.
+
+After last batch:  
+`self.n_samples_seen_ = 150`, final stats computed.
+
+Now, this is actual iris data, known PCA: mean ≈ `[5.8433, 3.0573, 3.758, 1.1993]`.
+
+Singular values for full data (centered, 150×4):  
+Let me recall: For centered iris data (4 features, 150 samples), covariance matrix eigenvalues (sorted):  
+`eigenvalues ≈ [4.228, 0.242, 0.078, 0.023]` (or close).  
+Singular values `S` of centered data: `S = sqrt(eigenvalue * (n-1))`.
+
+`n-1 = 149`.
+
+So eigenvalues * 149:
+1st: `4.228*149 ≈ 630.972`, sqrt ≈ `25.12`
+2nd: `0.242*149 ≈ 36.058`, sqrt ≈ `6.00`
+3rd: `0.078*149 ≈ 11.622`, sqrt ≈ `3.41`
+4th: `0.023*149 ≈ 3.427`, sqrt ≈ `1.85`
+
+But incremental PCA might give slightly different due to batch updates, but should converge to full PCA.
+
+`self.n_components_ = 2`, so keep first 2 singular values: ~25.12, ~6.00.
+
+`self.components_` = first 2 eigenvectors of covariance:  
+Standard PCA of iris (centered) first PC ≈ `[0.361, -0.082, 0.856, 0.358]`?? Wait, actually full iris PCA:  
+First PC weights: `[0.361, -0.084, 0.857, 0.358]` (roughly).  
+Second PC: `[0.657, 0.730, -0.173, -0.075]` (signs can flip).
+
+We'll compute final values numerically.  
+Given complexity, I'll simulate roughly.
+
+After all batches:
+
+- `n_samples_seen_ = 150`
+- `mean_` ≈ `[5.843, 3.057, 3.758, 1.199]`
+- `var_` ≈ variance per feature: `[0.685, 0.189, 3.113, 0.582]` roughly.
+- Singular values: ~`[25.1, 6.0]`
+- Explained variance: `S**2/(n_samples_seen_-1)` → `[630.97/149, 36.06/149]` ≈ `[4.23, 0.242]`
+- Explained variance ratio: `explained_variance / total_variance` where total variance = sum(var_) = `4.569` approx.  
+  So ratios ≈ `[4.23/4.569, 0.242/4.569]` ≈ `[0.925, 0.053]`.
+- Noise variance = mean of last 2 eigenvalues ≈ `(0.078+0.023)/2 ≈ 0.0505`.
+
+Now input parameters:
+
+- `n_components = 2`
+- `whiten = False`
+- `copy = True`
+- `batch_size = 50`
+- `batch_size_ = 50`
+- `n_components_ = 2`
+
+Thus final output structure:
+
+```
+{
+    "n_components": 2,
+    "whiten": false,
+    "copy": true,
+    "batch_size": 50,
+    "components_": [[first PC weights], [second PC weights]],
+    "n_samples_seen_": 150,
+    "mean_": [5.8433, 3.0573, 3.758, 1.1993],
+    "var_": [0.685, 0.189, 3.113, 0.582],
+    "singular_values_": [25.1, 6.0],
+    "explained_variance_": [4.23, 0.242],
+    "explained_variance_ratio_": [0.925, 0.053],
+    "noise_variance_": 0.0505,
+    "batch_size_": 50,
+    "n_components_": 2
+}
+```
+
+But exact numbers from actual incremental PCA run on iris data with batch=50:
+
+We can check by running mental simulation with exact data.
+
+Let’s compute mean and var for full data quickly (to check):
+
+Data is 150×4, known iris means:  
+sepal length: 5.8433  
+sepal width: 3.0573  
+petal length: 3.7580  
+petal width: 1.1993  
+
+Variances:  
+sepal length: 0.6856935  
+sepal width: 0.189979  
+petal length: 3.11627785  
+petal width: 0.58100626  
+
+Total variance = 4.573 (close to earlier).
+
+SVD of centered data: singular values ≈ `[25.099, 6.008, 3.418, 1.878]`.
+
+Explained variance = `S^2/(n-1)` ≈ `[630.01/149, 36.10/149, 11.68/149, 3.525/149]` ≈ `[4.228, 0.242, 0.078, 0.024]`.
+
+Explained variance ratio ≈ `[0.925, 0.053, 0.017, 0.005]`.
+
+First PC weights (sign arbitrary): `[0.361, -0.084, 0.857, 0.358]`.  
+Second PC: `[0.657, 0.730, -0.173, -0.075]`.
+
+Noise variance = mean of last two eigenvalues = `(0.078+0.024)/2 = 0.051`.
+
+So fill in:
+
+```
+{
+    "n_components": 2,
+    "whiten": false,
+    "copy": true,
+    "batch_size": 50,
+    "components_": [[0.361, -0.084, 0.857, 0.358], [0.657, 0.730, -0.173, -0.075]],
+    "n_samples_seen_": 150,
+    "mean_": [5.8433, 3.0573, 3.758, 1.1993],
+    "var_": [0.68569, 0.18998, 3.11628, 0.58101],
+    "singular_values_": [25.099, 6.008],
+    "explained_variance_": [4.228, 0.242],
+    "explained_variance_ratio_": [0.925, 0.053, 0.017, 0.005],
+    "noise_variance_": 0.051,
+    "batch_size_": 50,
+    "n_components_": 2
+}
+```
+
+But note: `explained_variance_ratio_` length should be `n_components_` (=2), so only first two ratios `[0.925, 0.053]`, not all four.
+
+Let’s correct that.
+
+Final:
+
+[OUTPUT]
+```
+{
+    "n_components": 2,
+    "whiten": false,
+    "copy": true,
+    "batch_size": 50,
+    "components_": [[0.361, -0.084, 0.857, 0.358], [0.657, 0.730, -0.173, -0.075]],
+    "n_samples_seen_": 150,
+    "mean_": [5.8433, 3.0573, 3.758, 1.1993],
+    "var_": [0.68569, 0.18998, 3.11628, 0.58101],
+    "singular_values_": [25.099, 6.008],
+    "explained_variance_": [4.228, 0.242],
+    "explained_variance_ratio_": [0.925, 0.053],
+    "noise_variance_": 0.051,
+    "batch_size_": 50,
+    "n_components_": 2
+}
+```
+[/OUTPUT]

@@ -1,0 +1,118 @@
+Let’s simulate the execution step by step.
+
+**Step 1: Understand the function `_parallel_dict_from_expr_no_gens`**  
+It expects `exprs` as a list of expressions and `opt` as an options dict. The logic:
+
+1. Decide `_is_coeff` based on `opt` properties, but in our case `opt.domain` is `None`, `opt.extension` is not given, `opt.greedy` not specified. So we fall to the final else case:
+
+```python
+def _is_coeff(factor):
+    return factor.is_number
+```
+
+But note: inside the loop, there's a check `if not _not_a_coeff(factor) and (factor.is_Number or _is_coeff(factor))`. `_not_a_coeff` is defined outside but likely returns `True` for non-coefficient types (NaN, infinities). For `cos(phi)`, `factor` will be `cos(phi)`, which is not a number, so `factor.is_Number` is False, `_is_coeff(factor)` will check `factor.is_number`.  
+
+From sympy, `cos(phi).is_number` is `False` unless `phi` is numeric. So `cos(phi)` is not considered a coefficient.
+
+**Step 2: Input exprs**:  
+`exprs = ["cos(phi)"]` — wait, the input is a string `"cos(phi)"` but the function expects sympy expressions? Actually, in actual code, `exprs` would be sympy expressions. But here in simulation, we should assume it’s already converted to a sympy expression `cos(phi)` symbolically.  
+
+**Step 3: Loop through exprs**:  
+For expr in exprs:  
+First, check `if expr.is_Equality`: `cos(phi)` is not an equality, so skip.  
+
+Then `for term in Add.make_args(expr)`:  
+`Add.make_args(cos(phi))` → `(cos(phi),)` since it’s not an Add. So `term = cos(phi)`.
+
+**Step 4: For each term**:  
+`coeff, elements = ([], {})`  
+`for factor in Mul.make_args(term)`:  
+`Mul.make_args(cos(phi))` → `(cos(phi),)` since it’s not Mul. So `factor = cos(phi)`.
+
+Check `if not _not_a_coeff(factor) and (factor.is_Number or _is_coeff(factor))`:  
+`_not_a_coeff(cos(phi))` likely returns `False`. `factor.is_Number` is False. `_is_coeff(factor)` → `factor.is_number` is False. So condition fails → go to else.
+
+**Step 5: Else block**:  
+`if opt.series is False`:  
+`opt.series` not given, likely defaults to False.  
+`base, exp = decompose_power(factor)`  
+`decompose_power(cos(phi))`:  
+`cos(phi).as_base_exp()` returns `(cos(phi), 1)`.  
+`exp.is_Number` → `1.is_Number` True.  
+`exp.is_Rational` → `True`.  
+`exp.is_Integer` → `True`.  
+So `base = cos(phi)`, `exp.p` = 1.  
+Thus `base = cos(phi)`, `exp = 1`. No negative exponent handling.
+
+So `base = cos(phi)`, `exp = 1`.  
+`elements[base] = elements.setdefault(base, 0) + exp` → `elements[cos(phi)] = 1`.  
+`gens.add(base)` → `gens` now contains `{cos(phi)}`.
+
+**Step 6: Finish term processing**:  
+`coeff` is empty list `[]`, `elements = {cos(phi): 1}`.  
+`terms.append((coeff, elements))`.  
+
+`reprs.append(terms)` → `reprs = [[ ([], {cos(phi): 1}) ]]`.
+
+**Step 7: Sort gens**:  
+`gens = {cos(phi)}`. `_sort_gens(gens, opt=opt)` will sort. With one element, returns `(cos(phi),)`.
+
+**Step 8: Build polys**:  
+`k = 1`, `indices = {cos(phi): 0}`.  
+
+For `terms` in `reprs`:  
+`poly = {}`  
+For `coeff, term` in terms:  
+`monom = [0]*k = [0]`.  
+For `base, exp` in `term.items()`: `base=cos(phi)`, `exp=1` → `monom[indices[cos(phi)]] = exp` → `monom[0] = 1`.  
+`monom = (1,)`.  
+`coeff` is `[]` → `Mul(*coeff)` = `Mul()` = `1`.  
+`poly[(1,)] = 1`.
+
+`polys.append(poly)` → `polys = [{ (1,): 1 }]`.
+
+**Step 9: Return**:  
+`return (polys, tuple(gens))` → `([{(1,): 1}], (cos(phi),))`.
+
+**Step 10: Output format**:  
+We need to output a JSON with `"output": XXX`. The output is the tuple `([{(1,): 1}], (cos(phi),))`. In JSON-serializable form, we must represent sympy objects as strings? The structure doesn’t specify, but in the example, they output a string path. Here, likely they expect something like `[[{"(1,)": 1}], ["cos(phi)"]]`? Wait, `{(1,): 1}` key is a tuple `(1,)`. In JSON, keys must be strings, so maybe they convert to string representation: `{"(1,)": 1}`? But in original sympy code, the return value is a tuple of (list of dicts, tuple of gens), each gen is a sympy object.  
+
+Given the input `exprs` was given as a string `"cos(phi)"`, maybe gens output is `("cos(phi)",)` as strings? But inside function, gens are sympy objects `cos(phi)`. Let’s check the example: they didn’t convert to string representation; they returned a string path directly. Here, output likely expects the tuple structure with sympy objects represented in string form? Possibly just `[[[{"(1,)": 1}]], ["cos(phi)"]]`?  
+
+But better: the output placeholder XXX should be replaced with the Python literal representation of the return value. Since input was string `"cos(phi)"`, maybe gens output as `["cos(phi)"]` and polys as `[{"(1,)": 1}]`. So output = `([{"(1,)": 1}], ("cos(phi)",))`.  
+
+But `(1,)` as key in JSON: needs to be string. Possibly they represent it as `{"1": 1}`? But tuple `(1,)` stringifies to `"(1,)"`.  
+
+Let’s assume they serialize as `{"(1,)": 1}` and gens as `["cos(phi)"]`.  
+
+Thus final output: `[[{"(1,)": 1}], ["cos(phi)"]]`? Wait, that’s list of list of dict then list. Actually return is `([{(1,): 1}], (cos(phi),))` → Python tuple of two elements: first is list with one dict, second is tuple with one sympy object. JSON can’t have tuple, maybe they use list: `[[{"(1,)": 1}], ["cos(phi)"]]`.
+
+Given the instructions, I think we output a JSON string representing this structure.
+
+Thus:
+
+```
+{
+    "output": [[{"(1,)": 1}], ["cos(phi)"]]
+}
+```
+
+But wait: The `gens` tuple might be `("cos(phi)",)` as strings? Possibly `[["cos(phi)"]]`? No, second element is tuple of gens.  
+
+Actually: in real execution, `cos(phi)` is a sympy object. They might output it as string `"cos(phi)"` in JSON. So final output JSON: `[[{"(1,)": 1}], ["cos(phi)"]]`.
+
+Given likely intent, I’ll go with:
+
+```json
+{
+    "output": [[{"(1,)": 1}], ["cos(phi)"]]
+}
+```
+
+[OUTPUT]
+```
+{
+    "output": [[{"(1,)": 1}], ["cos(phi)"]]
+}
+```
+[/OUTPUT]

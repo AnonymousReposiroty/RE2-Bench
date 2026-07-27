@@ -1,0 +1,87 @@
+Let's reason this through step-by-step.  
+
+First, the output is `{"output": null}`. In the Python code, the function `morsel_to_cookie` ends with `return create_cookie(...)`, so the output here is the result of calling `create_cookie`. Since the output is `null`, something must have gone wrong — likely an exception was raised and not caught, causing the function to return `None` (represented as `null` in JSON).  
+
+Looking at the possible exceptions in `morsel_to_cookie`:  
+
+1. If `morsel['max-age']` exists and is not convertible to an integer, it raises `TypeError` with a custom message.  
+2. If `morsel['expires']` exists but `time.strptime` fails (bad format), it would raise `ValueError` inside `calendar.timegm(time.strptime(...))`.  
+3. Inside `create_cookie`, there's also a possible `TypeError` for bad keyword arguments.  
+
+But the function signature for `create_cookie` is called with fixed keys: `comment`, `comment_url`, `discard`, `domain`, `expires`, `name`, `path`, `port`, `rest`, `rfc2109`, `secure`, `value`, `version`. These are all in the `result` dict, so no `badargs` exception here.  
+
+So likely the problem is in `morsel_to_cookie` itself before reaching `create_cookie`.  
+
+If the output is `null`, maybe an exception was caught by the test harness, leaving `output` as `null`. That means the input `morsel` should cause an exception.  
+
+Checking conditions:  
+
+- If `morsel['max-age']` exists and is not an integer inside the string (e.g., `morsel['max-age']` is `"abc"`), then `int(morsel['max-age'])` raises `ValueError`, and the `except ValueError` catches it and re-raises `TypeError`.  
+- But this `TypeError` might be caught somewhere outside (maybe by test code) and returns `None`? But the prompt only shows `morsel_to_cookie` and `create_cookie`; maybe the test runner returns `null` for any exception.  
+
+Alternatively, maybe the `morsel` has both `max-age` and `expires`? The code checks `max-age` first: if truthy, tries to convert to int; else if `expires` truthy, parse datetime. If `max-age` is a string `"0"` or `""`?  
+
+Actually, if `morsel['max-age']` is truthy but non-integer, that triggers the TypeError.  
+
+We need to guess an input that causes an error. The simplest is to set `max-age` to `"abc"` (non-integer) and leave `expires` falsy.  
+
+Also, `morsel.key` is used for `name` — that might also raise if missing, but Morsel objects have a `.key` attribute. We'll assume it's set.  
+
+Let’s propose:  
+- `max-age`: `"abc"` (truthy, non-int)  
+- `expires`: `""` (falsy)  
+- other fields can be defaults.  
+
+Wait: `morsel['max-age']` being truthy — `"abc"` is truthy. Then `int(morsel['max-age'])` inside `int(time.time() + int(...))` first tries `int("abc")` → `ValueError` → except catches and raises `TypeError`.  
+
+That fits an error path, which might lead to output being `null`.  
+
+So input morsel:  
+
+```json
+{
+    "expires": "",
+    "path": "/",
+    "comment": "",
+    "domain": "",
+    "max-age": "abc",
+    "secure": "",
+    "httponly": "",
+    "version": "",
+    "samesite": ""
+}
+```  
+
+Let's check `morsel['secure']` and `morsel['httponly']` are used with `bool()`; empty string is falsy → `False` in cookie. That's fine.  
+
+But `morsel['comment']` is passed directly to `create_cookie` as `comment=morsel['comment']`, which could be `""`, not `None` — possible but fine. `morsel['comment']` also used for `comment_url=bool(morsel['comment'])` — empty string → `False`.  
+
+Also `morsel['version'] or 0` — empty string → `0`.  
+
+So only `max-age` triggers error → output null.  
+
+[THOUGHT]  
+Given output is `null`, the function likely raised an exception before returning. The only exception in `morsel_to_cookie` occurs if `max-age` is truthy but not an integer string. So `max-age` should be truthy non-int, e.g., `"abc"`. `expires` should be falsy to take the max-age branch. All other morsel fields can be empty defaults.  
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "morsel": {
+            "expires": "",
+            "path": "",
+            "comment": "",
+            "domain": "",
+            "max-age": "abc",
+            "secure": "",
+            "httponly": "",
+            "version": "",
+            "samesite": ""
+        }
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

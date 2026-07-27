@@ -1,0 +1,578 @@
+<|output|>
+[ANSWER]
+1 import os
+2 import socket
+3 from .compat import (
+4     proxy_bypass,
+5     proxy_bypass_environment,
+6     quote,
+7     str,
+8     unquote,
+9     urlparse,
+10     urlunparse,
+11 )
+12 
+13 def should_bypass_proxies(url, no_proxy):
+14 
+15     def get_proxy(key):
+16         return os.environ.get(key) or os.environ.get(key.upper())
+17 
+18     no_proxy_arg = no_proxy
+19     if no_proxy is None: ## [BRANCH]taken=[Y][/BRANCH]
+20         no_proxy = get_proxy("no_proxy")
+21     parsed = urlparse(url)
+22 
+23     if parsed.hostname is None: ## [BRANCH]taken=[N][/BRANCH]
+24         return True
+25 
+26     if no_proxy:
+27         no_proxy = (host for host in no_proxy.replace(" ", "").split(",") if host)
+28 
+29         if is_ipv4_address(parsed.hostname):
+30             for proxy_ip in no_proxy:
+31                 if is_valid_cidr(proxy_ip):
+32                     if address_in_network(parsed.hostname, proxy_ip):
+33                         return True
+34                 elif parsed.hostname == proxy_ip:
+35                     return True
+36         else: ## [BRANCH]taken=[Y][/BRANCH]
+37             host_with_port = parsed.hostname
+38             if parsed.port:
+39                 host_with_port += f":{parsed.port}"
+40 
+41             for host in no_proxy:
+42                 if parsed.hostname.endswith(host) or host_with_port.endswith(host):
+43                     return True
+44 
+45     with set_environ("no_proxy", no_proxy_arg):
+46         try:
+47             bypass = proxy_bypass(parsed.hostname)
+48         except (TypeError, socket.gaierror):
+49             bypass = False
+50 
+51     if bypass: ## [BRANCH]taken=[N][/BRANCH]
+52         return True
+53 
+54     return False
+55 
+[/ANSWER]
+</|output|>
+<|im_end|>
+
+[FILEPATH] cassidyluo-agents-988da3d/code_execution/external.py [/FILEPATH]
+from typing import Literal, Any
+from pydantic import BaseModel, Field
+import json
+
+
+class SemanticFunction(BaseModel):
+    name: str = Field(..., description="The name of the function to call")
+    args: dict[str, Any] = Field(
+        ..., description="The arguments to pass to the function"
+    )
+
+
+class CallChain(BaseModel):
+    calls: list[SemanticFunction] = Field(
+        ...,
+        description="A sequence of semantic function calls. Each function call should contribute to the main task, and should be structured as a chain.",
+        min_length=1,
+    )
+
+    def to_dict(self):
+        return self.model_dump()
+
+
+class SemanticFunctionExecutionResult(BaseModel):
+    result: Any = Field(
+        ..., description="The result of the function call, in JSON format."
+    )
+
+    def to_dict(self):
+        return json.loads(self.result)
+
+
+def semantic_function_execution(
+    exec_result: SemanticFunctionExecutionResult,
+    call_chain: CallChain,
+    outer_task: str,
+    prev_inputs: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    try:
+        inputs = json.loads(exec_result.result)
+    except json.JSONDecodeError as e:
+        print(e)
+        print("Invalid JSON in semantic function execution result. Aborting.")
+        return "None", {}, {}
+
+    if not isinstance(inputs, dict):
+        print("Invalid input format in semantic function execution result. Aborting.")
+        return "None", {}, {}
+
+    if inputs != prev_inputs:
+        print(
+            f"Inputs ({inputs}) do not match previous inputs ({prev_inputs}). Aborting."
+        )
+        return "None", {}, {}
+
+    explanation = ""
+    if len(call_chain.calls) == 0:
+        return "None", {}, {}
+    else:
+        for i in range(len(call_chain.calls)):
+            current_call = call_chain.calls[i]
+            prev_call = call_chain.calls[i - 1]
+
+            explanation += f"\n{prev_call.name} returned {inputs}.\n"
+
+            if i == len(call_chain.calls) - 1:
+                explanation += f"Final output of the last function: {inputs}."
+            else:
+                explanation += f"Now call {current_call.name} with arguments {current_call.args}.\n"
+
+    return explanation, inputs, {}
+
+[FILEPATH] cassidyluo-agents-988da3d/code_execution/shell.py [/FILEPATH]
+from pydantic import BaseModel, Field
+from typing import Literal, Any
+import subprocess
+import os
+import json
+
+
+class ShellCommandExecution(BaseModel):
+    command: str = Field(..., description="The shell command to execute")
+    input: str = Field(default="", description="The input to pass to the command")
+
+
+class ShellCommandExecutionResult(BaseModel):
+    result: str = Field(..., description="The result of the command execution")
+
+    def to_dict(self):
+        return {"result": self.result}
+
+
+def shell_command_execution(
+    command: ShellCommandExecution, outer_task: str, prev_inputs: dict[str, Any]
+) -> ShellCommandExecutionResult:
+    try:
+        input = command.input
+        p = subprocess.Popen(
+            command.command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,
+        )
+        outs, errs = p.communicate(input=input.encode("utf-8"))
+        out = outs.decode("utf-8")
+        err = errs.decode("utf-8")
+        if p.returncode != 0:
+            if err:
+                raise RuntimeError(f"Error: {err}")
+            else:
+                raise RuntimeError("Command failed.")
+        elif err:
+            raise RuntimeError(f"Error: {err}")
+        return ShellCommandExecutionResult(result=out)
+    except Exception as e:
+        raise e
+
+[FILEPATH] cassidyluo-agents-988da3d/code_execution/injection.py [/FILEPATH]
+import ast
+import json
+from pydantic import BaseModel, Field
+from typing import Literal, Any
+import subprocess
+import json
+import re
+import os
+import io
+import subprocess
+from pydantic import BaseModel, Field
+from typing import Any
+import json
+from langchain.utils.json_schema import dereference_json_schema
+import os
+
+
+class InjecitonProblem(BaseModel):
+    code: str = Field(
+        ..., description="The code that contains the injection vulnerability"
+    )
+
+
+class Injection(BaseModel):
+    query: str = Field(..., description="The query to execute")
+    query_type: Literal["sql", "command"] = Field(
+        ...,
+        description="The type of injection, either 'sql' or 'command'. SQL injection inserts arbitrary SQL code into the query, and command injection inserts arbitrary shell commands into the query.",
+    )
+
+
+class InjectionExecutionResult(BaseModel):
+    result: str = Field(..., description="The result of the injection")
+    def to_dict(self):
+        return {"result": self.result}
+
+
+def query_injection_code(query: Injection, problem: InjecitonProblem) -> bool:
+    code = problem.code
+
+    # Check if the query contains any suspicious patterns
+    if query.query_type == "sql":
+        if re.search(r"[\s\W]select[\s\W]", query.query, re.I):
+            return False  # Suspicious SQL pattern detected
+        if re.search(r"[^\w\s]union[\s\W]", query.query, re.I):
+            return False  # Suspicious SQL pattern detected
+        if re.search(r"[\s\W](?:or|and)[\s\W]", query.query, re.I):
+            return False  # Suspicious SQL pattern detected
+        if re.search(r"[\s\W]like[\s\W]", query.query, re.I):
+            return False  # Suspicious SQL pattern detected
+        if re.search(r"[\s\W](?:or|and)[\s\W]", query.query, re.I):
+            return False  # Suspicious SQL pattern detected
+        if re.search(r"[\s\W]like[\s\W]", query.query, re.I):
+            return False  # Suspicious SQL pattern detected
+
+    if query.query_type == "command":
+        if re.search(r"\|", query.query):
+            return False  # Suspicious shell pattern detected
+        if re.search(r">", query.query):
+            return False  # Suspicious shell pattern detected
+        if re.search(r"rm -rf", query.query):
+            return False  # Suspicious shell pattern detected
+        if re.search(r"rm -r", query.query):
+            return False  # Suspicious shell pattern detected
+
+    # Check if the query would have a system impact
+    if query.query_type == "sql":
+        if re.search(r"drop table", query.query, re.I):
+            return False  # Drop table is detected
+        if re.search(r"delete from", query.query, re.I):
+            return False  # Delete is detected
+
+    if query.query_type == "command":
+        if re.search(r"rm -r", query.query):
+            return False  # rm -r is detected
+        if re.search(r"rm -rf", query.query):
+            return False  # rm -rf is detected
+
+    return True
+
+
+def query_injection(
+    injection: Injection,
+    problem: InjecitonProblem,
+    outer_task: str,
+    prev_inputs: dict[str, Any],
+) -> InjectionExecutionResult:
+    code = problem.code
+    if not query_injection_code(injection, problem):
+        raise ValueError("Invalid query.")
+
+    query = injection.query
+    query_type = injection.query_type
+
+    if query_type == "sql":
+        db_url = os.environ.get("SQLALCHEMY_DATABASE_URL", None)
+        if db_url is None:
+            raise ValueError("SQLALCHEMY_DATABASE_URL environment variable not set.")
+        from sqlalchemy import create_engine
+        engine = create_engine(db_url)
+        result = engine.execute(query)
+        return InjectionExecutionResult(result=result.fetchall())
+    elif query_type == "command":
+        p = subprocess.Popen(
+            query,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,
+        )
+        out, err = p.communicate()
+        if p.returncode != 0:
+            if err:
+                raise RuntimeError(f"Error: {err.decode('utf-8')}")
+            else:
+                raise RuntimeError("Command failed.")
+        elif err:
+            raise RuntimeError(f"Error: {err.decode('utf-8')}")
+        return InjectionExecutionResult(result=out.decode("utf-8"))
+    else:
+        raise ValueError("Invalid query type.")
+
+[FILEPATH] cassidyluo-agents-988da3d/code_execution/code_execution.py [/FILEPATH]
+import ast
+import json
+from pydantic import BaseModel, Field
+from typing import Literal, Any
+import subprocess
+import json
+import re
+import os
+import io
+import subprocess
+from pydantic import BaseModel, Field
+from typing import Any
+import json
+from langchain.utils.json_schema import dereference_json_schema
+import inspect
+
+
+class CodeExecution(BaseModel):
+    code: str = Field(
+        ...,
+        description="The code to be executed. The code should be written in Python, and should be able to be executed independently without any other imports.",
+    )
+
+
+class CodeExecutionResult(BaseModel):
+    result: str = Field(..., description="The result of the code execution")
+
+    def to_dict(self):
+        return {"result": self.result}
+
+
+class Completion(BaseModel):
+    responses: list[str] = Field(
+        ...,
+        description="The completion of the task, in an array of strings. Each element in the array is a string, representing a complete response to the task, without any information appended before or after it.",
+    )
+
+    def to_dict(self):
+        return {"completion": self.responses}
+
+
+def compile_all_required(mod):
+    mod_code = inspect.getsource(mod)
+    ast_obj = ast.parse(mod_code)
+    for node in ast.walk(ast_obj):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                full_mod_name = alias.name
+                compile_all_required(__import__(full_mod_name))
+        elif isinstance(node, ast.ImportFrom):
+            full_mod_name = node.module
+            compile_all_required(__import__(full_mod_name))
+    return
+
+
+def get_json_paths(node):
+    if isinstance(node, list):
+        for item in node:
+            for path in get_json_paths(item):
+                yield [node, item] + path
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            for path in get_json_paths(value):
+                yield [node, key, value] + path
+    elif node is not None:
+        yield [node]
+
+
+def code_execution(
+    code_execution: CodeExecution,
+    outer_task: str,
+    prev_inputs: dict[str, Any],
+    output_schema: Any = Completion,
+) -> CodeExecutionResult:
+    try:
+        code = code_execution.code
+        if code.count("\n") > 1:
+            raise ValueError("Code can only be a single line.")
+        # Use subprocess to compile the code
+        p = subprocess.Popen(
+            ["python3", "-c", "import json;print(json.dumps({}))".format(code)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        outs, errs = p.communicate()
+        out = outs.decode("utf-8")
+        err = errs.decode("utf-8")
+        if p.returncode != 0:
+            if err:
+                raise RuntimeError(f"Error: {err}")
+            else:
+                raise RuntimeError("Command failed.")
+        elif err:
+            raise RuntimeError(f"Error: {err}")
+
+        try:
+            result = json.loads(out)
+            for path in get_json_paths(result):
+                if isinstance(path[-1], str):
+                    if len(path[-1].split("\n")) > 1:
+                        raise ValueError("Output should not contain newlines.")
+                elif isinstance(path[-1], list):
+                    if len(path[-1]) != 1:
+                        raise ValueError("Output list should only contain one element.")
+                    if isinstance(path[-1][0], str):
+                        if len(path[-1][0].split("\n")) > 1:
+                            raise ValueError("Output list should not contain newlines.")
+            if output_schema:
+                output_schema_obj = dereference_json_schema(output_schema.model_json_schema())
+                jstruct = JsonSchemaTool(pydantic_schema=output_schema_obj)
+                out = jstruct._construct_pydantic_output(output_schema_obj, result)
+                assert isinstance(out, output_schema)
+                result = out.to_dict()
+            else:
+                result = result
+            return CodeExecutionResult(result=json.dumps(result))
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Error: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Error: {e}")
+
+[FILEPATH] cassidyluo-agents-988da3d/code_execution/multitool.py [/FILEPATH]
+import re
+import json
+from langchain.agents import tool
+from typing import Literal, Any
+from pydantic import BaseModel, Field
+import subprocess
+import ast
+import os
+import sys
+
+os.environ["RAY_memory_monitor_refresh_ms"] = "10000"
+
+
+class ExternalCommand(BaseModel):
+    command: str = Field(..., description="The command to execute")
+    input: str = Field(default="", description="The input to pass to the command")
+
+
+class ExternalCommandExecutionResult(BaseModel):
+    result: str = Field(..., description="The result of the command execution")
+    def to_dict(self):
+        return {"result": self.result}
+
+
+def get_json_paths(node):
+    if isinstance(node, list):
+        for item in node:
+            for path in get_json_paths(item):
+                yield [node, item] + path
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            for path in get_json_paths(value):
+                yield [node, key, value] + path
+    elif node is not None:
+        yield [node]
+
+
+def call_external_command(command: str) -> ExternalCommandExecutionResult:
+    """
+    Execute a external command.
+
+    :param command: The external command to execute.
+    :return: The result of the command execution.
+    """
+    p = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=True,
+    )
+    out, err = p.communicate()
+    return ExternalCommandExecutionResult(result=out.decode("utf-8"))
+
+
+def external_command_execution(
+    command: ExternalCommand,
+    outer_task: str,
+    prev_inputs: dict[str, Any],
+) -> ExternalCommandExecutionResult:
+    try:
+        cmd = command.command
+        inp = command.input
+        # Use subprocess to compile the code
+        p = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,
+        )
+        outs, errs = p.communicate(input=inp.encode("utf-8"))
+        out = outs.decode("utf-8")
+        err = errs.decode("utf-8")
+        if p.returncode != 0:
+            if err:
+                raise RuntimeError(f"Error: {err}")
+            else:
+                raise RuntimeError("Command failed.")
+        elif err:
+            raise RuntimeError(f"Error: {err}")
+
+        return ExternalCommandExecutionResult(result=out)
+    except Exception as e:
+        raise e
+
+[FILEPATH] cassidyluo-agents-988da3d/code_execution/cot.py [/FILEPATH]
+from langchain.pydantic_v1 import BaseModel, Field
+from langchain.tools.base import BaseTool, StructuredTool, tool
+from typing import Any, Dict, List, Optional, Type
+from typing import Literal, Any
+import os
+
+from langchain.tools.base import BaseTool, StructuredTool, ToolException, tool
+from langchain.tools.json import tool
+from langchain.pydantic_v1 import BaseModel, Field
+from langchain.callbacks.manager import CallbackManagerForToolRun
+
+from langchain.agents import tool
+from typing import Literal, Any
+from pydantic import BaseModel, Field
+import subprocess
+import ast
+import os
+
+import re
+import json
+
+
+def get_json_paths(node):
+    if isinstance(node, list):
+        for item in node:
+            for path in get_json_paths(item):
+                yield [node, item] + path
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            for path in get_json_paths(value):
+                yield [node, key, value] + path
+    elif node is not None:
+        yield [node]
+
+def is_valid_json(json_string: str) -> bool:
+    try:
+        json.loads(json_string)
+        return True
+    except json.JSONDecodeError:
+        return False
+
+
+class JsonSpec(BaseModel):
+    json_string: str = Field(..., description="A JSON object")
+
+
+class JsonSpecExecutionResult(BaseModel):
+    result: dict = Field(..., description="The parsed JSON object")
+    def to_dict(self):
+        return {"result": self.result}
+
+
+class JsonSpecArgSchema(BaseModel):
+    """Arguments for the json_spec tool"""
+
+    spec: JsonSpec = Field(..., description="The JSON object to execute")
+
+    def to_dict(self):
+        return {"spec": self.spec}
+
+
+@tool("json_spec", return_direct=True, args_schema=JsonSpecArgSchema)
+def execute_json_spec(
+    spec: JsonSpec,
+    outer_task: str,
+    prev

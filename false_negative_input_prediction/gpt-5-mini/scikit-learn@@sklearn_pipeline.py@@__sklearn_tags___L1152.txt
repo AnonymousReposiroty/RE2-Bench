@@ -1,0 +1,219 @@
+<<FUNCTION_NAME>>
+
+__sklearn_tags__
+
+<<CODE>>
+
+from copy import deepcopy
+from sklearn.utils._param_validation import HasMethods, Hidden
+from sklearn.utils._tags import get_tags
+from sklearn.utils.metaestimators import _BaseComposition, available_if
+
+class Pipeline(_BaseComposition):
+    """
+    A sequence of data transformers with an optional final predictor.
+
+    `Pipeline` allows you to sequentially apply a list of transformers to
+    preprocess the data and, if desired, conclude the sequence with a final
+    :term:`predictor` for predictive modeling.
+
+    Intermediate steps of the pipeline must be transformers, that is, they
+    must implement `fit` and `transform` methods.
+    The final :term:`estimator` only needs to implement `fit`.
+    The transformers in the pipeline can be cached using ``memory`` argument.
+
+    The purpose of the pipeline is to assemble several steps that can be
+    cross-validated together while setting different parameters. For this, it
+    enables setting parameters of the various steps using their names and the
+    parameter name separated by a `'__'`, as in the example below. A step's
+    estimator may be replaced entirely by setting the parameter with its name
+    to another estimator, or a transformer removed by setting it to
+    `'passthrough'` or `None`.
+
+    For an example use case of `Pipeline` combined with
+    :class:`~sklearn.model_selection.GridSearchCV`, refer to
+    :ref:`sphx_glr_auto_examples_compose_plot_compare_reduction.py`. The
+    example :ref:`sphx_glr_auto_examples_compose_plot_digits_pipe.py` shows how
+    to grid search on a pipeline using `'__'` as a separator in the parameter names.
+
+    Read more in the :ref:`User Guide <pipeline>`.
+
+    .. versionadded:: 0.5
+
+    Parameters
+    ----------
+    steps : list of tuples
+        List of (name of step, estimator) tuples that are to be chained in
+        sequential order. To be compatible with the scikit-learn API, all steps
+        must define `fit`. All non-last steps must also define `transform`. See
+        :ref:`Combining Estimators <combining_estimators>` for more details.
+
+    transform_input : list of str, default=None
+        The names of the :term:`metadata` parameters that should be transformed by the
+        pipeline before passing it to the step consuming it.
+
+        This enables transforming some input arguments to ``fit`` (other than ``X``)
+        to be transformed by the steps of the pipeline up to the step which requires
+        them. Requirement is defined via :ref:`metadata routing <metadata_routing>`.
+        For instance, this can be used to pass a validation set through the pipeline.
+
+        You can only set this if metadata routing is enabled, which you
+        can enable using ``sklearn.set_config(enable_metadata_routing=True)``.
+
+        .. versionadded:: 1.6
+
+    memory : str or object with the joblib.Memory interface, default=None
+        Used to cache the fitted transformers of the pipeline. The last step
+        will never be cached, even if it is a transformer. By default, no
+        caching is performed. If a string is given, it is the path to the
+        caching directory. Enabling caching triggers a clone of the transformers
+        before fitting. Therefore, the transformer instance given to the
+        pipeline cannot be inspected directly. Use the attribute ``named_steps``
+        or ``steps`` to inspect estimators within the pipeline. Caching the
+        transformers is advantageous when fitting is time consuming. See
+        :ref:`sphx_glr_auto_examples_neighbors_plot_caching_nearest_neighbors.py`
+        for an example on how to enable caching.
+
+    verbose : bool, default=False
+        If True, the time elapsed while fitting each step will be printed as it
+        is completed.
+
+    Attributes
+    ----------
+    named_steps : :class:`~sklearn.utils.Bunch`
+        Dictionary-like object, with the following attributes.
+        Read-only attribute to access any step parameter by user given name.
+        Keys are step names and values are steps parameters.
+
+    classes_ : ndarray of shape (n_classes,)
+        The classes labels. Only exist if the last step of the pipeline is a
+        classifier.
+
+    n_features_in_ : int
+        Number of features seen during :term:`fit`. Only defined if the
+        underlying first estimator in `steps` exposes such an attribute
+        when fit.
+
+        .. versionadded:: 0.24
+
+    feature_names_in_ : ndarray of shape (`n_features_in_`,)
+        Names of features seen during :term:`fit`. Only defined if the
+        underlying estimator exposes such an attribute when fit.
+
+        .. versionadded:: 1.0
+
+    See Also
+    --------
+    make_pipeline : Convenience function for simplified pipeline construction.
+
+    Examples
+    --------
+    >>> from sklearn.svm import SVC
+    >>> from sklearn.preprocessing import StandardScaler
+    >>> from sklearn.datasets import make_classification
+    >>> from sklearn.model_selection import train_test_split
+    >>> from sklearn.pipeline import Pipeline
+    >>> X, y = make_classification(random_state=0)
+    >>> X_train, X_test, y_train, y_test = train_test_split(X, y,
+    ...                                                     random_state=0)
+    >>> pipe = Pipeline([('scaler', StandardScaler()), ('svc', SVC())])
+    >>> # The pipeline can be used as any other estimator
+    >>> # and avoids leaking the test set into the train set
+    >>> pipe.fit(X_train, y_train).score(X_test, y_test)
+    0.88
+    >>> # An estimator's parameter can be set using '__' syntax
+    >>> pipe.set_params(svc__C=10).fit(X_train, y_train).score(X_test, y_test)
+    0.76
+    """
+    _parameter_constraints: dict = {'steps': [list, Hidden(tuple)], 'transform_input': [list, None], 'memory': [None, str, HasMethods(['cache'])], 'verbose': ['boolean']}
+
+    def __init__(self, steps, *, transform_input=None, memory=None, verbose=False):
+        self.steps = steps
+        self.transform_input = transform_input
+        self.memory = memory
+        self.verbose = verbose
+
+    def __sklearn_tags__(self):
+        tags = super().__sklearn_tags__()
+        if not self.steps:
+            return tags
+        try:
+            if self.steps[0][1] is not None and self.steps[0][1] != 'passthrough':
+                tags.input_tags.pairwise = get_tags(self.steps[0][1]).input_tags.pairwise
+            tags.input_tags.sparse = all((get_tags(step).input_tags.sparse for name, step in self.steps if step is not None and step != 'passthrough'))
+        except (ValueError, AttributeError, TypeError):
+            pass
+        try:
+            if self.steps[-1][1] is not None and self.steps[-1][1] != 'passthrough':
+                last_step_tags = get_tags(self.steps[-1][1])
+                tags.estimator_type = last_step_tags.estimator_type
+                tags.target_tags.multi_output = last_step_tags.target_tags.multi_output
+                tags.classifier_tags = deepcopy(last_step_tags.classifier_tags)
+                tags.regressor_tags = deepcopy(last_step_tags.regressor_tags)
+                tags.transformer_tags = deepcopy(last_step_tags.transformer_tags)
+        except (ValueError, AttributeError, TypeError):
+            pass
+        return tags
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'steps': [['kernel_pca', "KernelPCA(gamma=np.float64(0.25), kernel='rbf', n_components=2)"], ['Perceptron', 'Perceptron(max_iter=5)']], 'transform_input': None, 'memory': None, 'verbose': False}, 'args': {}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+Tags(estimator_type='classifier', target_tags=TargetTags(required=False, one_d_labels=False, two_d_labels=False, positive_only=False, multi_output=False, single_output=True), transformer_tags=None, classifier_tags=ClassifierTags(poor_score=False, multi_class=True, multi_label=False), regressor_tags=None, array_api_support=False, no_validation=False, non_deterministic=False, requires_fit=True, _skip_test=False, input_tags=InputTags(one_d_array=False, two_d_array=True, three_d_array=False, sparse=True, categorical=False, string=False, dict=False, positive_only=False, allow_nan=False, pairwise=False))
+
+<<LLM_RESPONSE>>
+
+[THOUGHT]
+We need to determine the Pipeline instance (self) fields so that calling Pipeline.__sklearn_tags__() produces the given Tags string.
+
+Key parts of the method and how they map to the output:
+- The method first calls super().__sklearn_tags__() to get a base Tags object. That provides a Tags object which will be modified below.
+- The method returns early if self.steps is empty. Since the output shows many modified fields (estimator_type='classifier', classifier_tags populated, input_tags.sparse=True, pairwise=False, etc.), self.steps must be non-empty.
+- First try-block:
+  - If the first step's estimator (self.steps[0][1]) is not None and not 'passthrough', then tags.input_tags.pairwise is set to get_tags(first_estimator).input_tags.pairwise. The output shows pairwise=False, so the first estimator's tags must have input_tags.pairwise == False.
+  - tags.input_tags.sparse = all(get_tags(step).input_tags.sparse for each non-None, non-'passthrough' step). The output shows sparse=True, so every considered step must have input_tags.sparse == True. The simplest way to satisfy both is to have a single estimator whose tags have pairwise=False and sparse=True.
+- Second try-block:
+  - If the last step's estimator is not None and not 'passthrough', last_step_tags = get_tags(last_estimator) and then:
+    - tags.estimator_type = last_step_tags.estimator_type -> output has 'classifier' so last estimator must report estimator_type 'classifier'.
+    - tags.target_tags.multi_output set to last_step_tags.target_tags.multi_output -> output shows multi_output=False, single_output=True.
+    - tags.classifier_tags = deepcopy(last_step_tags.classifier_tags) -> output shows classifier_tags with multi_class=True, multi_label=False, poor_score=False.
+    - regressor_tags and transformer_tags are set to copies; output shows both None.
+
+Therefore a minimal self that produces the output is:
+- steps: a single-element list with a (name, estimator) pair, where the estimator implements __sklearn_tags__() and returns Tags such that:
+  - estimator_type == 'classifier'
+  - input_tags.sparse == True
+  - input_tags.pairwise == False
+  - target_tags.multi_output == False (and consequently single_output True)
+  - classifier_tags has multi_class == True, multi_label == False, poor_score == False
+  - regressor_tags and transformer_tags are None
+- transform_input can be None, memory None, verbose False (these aren't modified in the method and their values don't affect the produced tags here).
+
+We represent the estimator in the JSON input as a placeholder object labeled to indicate it's an estimator whose __sklearn_tags__ returns the required classifier tags. The JSON uses null for Python None and false for False.
+
+Putting that together yields the following input structure.
+[/THOUGHT]
+[INPUT]
+```
+{
+    "self": {
+        "steps": [
+            [
+                "clf",
+                {
+                    "__sklearn_tags__": "estimator returning estimator_type='classifier', input_tags: {sparse: True, pairwise: False}, target_tags.multi_output: False, classifier_tags: {poor_score: False, multi_class: True, multi_label: False}, regressor_tags: None, transformer_tags: None"
+                }
+            ]
+        ],
+        "transform_input": null,
+        "memory": null,
+        "verbose": false
+    },
+    "args": {},
+    "kwargs": {}
+}
+```
+[/INPUT]

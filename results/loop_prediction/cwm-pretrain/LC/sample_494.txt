@@ -1,0 +1,168 @@
+<think>
+`num` is the string "1". `l` is 3.
+
+Iteration 1:
+`l` is 3 and greater than `len(num)` (1).
+`t` is an empty string. It appends '0', so `t` becomes "0".
+`l` becomes 3 - 1 = 2.
+
+Iteration 2:
+`l` is 2 and greater than `len(num)` (1).
+`t` is "0". It appends '0', so `t` becomes "00".
+`l` becomes 2 - 1 = 1.
+
+Iteration 3:
+`l` is 1 and not greater than `len(num)` (1). The loop condition fails. We exit the loop.
+
+After the loop, `t` is "00", and `num` is "1". The function returns "00" + "1" = "001".
+</think>
+
+[ANSWER]
+1 def f(num, l):
+2     t = ""
+3     while l > len(num):## [STATE]l=[3, 2][/STATE] [STATE]num=[["1"], ["1"]][/STATE]
+4         t += '0'
+5         l -= 1
+6     return t + num
+[/ANSWER]
+
+ The predicted output of the function is: [OUTPUT]"001"[/OUTPUT] </s>
+"""
+)
+
+
+@singleton
+class V0AnthropicHaze(BaseModel):
+    prompt: str = anthropic_prompt
+
+    def __init__(self, model: str = "claude-2.1"):
+        super().__init__()
+        self.model = model
+        self.cache: dict = {}
+
+    def is_accepted(self, instance: Output) -> bool:
+        if "ANSWER" not in instance.external_response:
+            return False
+        if not instance.external_response.split("[ANSWER]")[-1].strip().endswith("[/ANSWER]"):
+            return False
+        return True
+
+    def process_output(self, instance: Output) -> str:
+        if not instance.is_accepted:
+            return ""
+        answer = instance.external_response.split("[ANSWER]")[-1].strip()
+        if not answer.startswith("["):
+            return ""
+        return answer.split("[")[-1].split("]")[0].strip()
+
+    def compute_semantic_similarity(
+        self,
+        instance: Output,
+        human_message: HumanMessage,
+        function_response: FunctionResponse,
+        model: str = "all-mpnet-base-v2",
+    ):
+        if isinstance(instance, Output):
+            model_output = self.process_output(instance)
+            if len(model_output) == 0:
+                model_output = instance.external_response
+            model_output = model_output.strip()
+        else:
+            model_output = instance.strip()
+
+        source_data = human_message.text.strip() + function_response.content.strip()
+        target_data = model_output.strip()
+        source_data = (
+            self._preprocess_annotated_code(source_data)
+            if "<|assistant|>" in source_data
+            else source_data
+        )
+
+        average_similarity = 0.0
+        num_texts = 0
+        if model == "all-mpnet-base-v2":
+            source_data = self._extract_lines_before_diff(source_data, target_data)
+            target_data = self._extract_lines_after_diff(target_data)
+            similarity = compute_similarity(source_data, target_data, model)
+            average_similarity += similarity
+            num_texts += 1
+
+        similarity = compute_similarity(source_data, target_data, model)
+        average_similarity += similarity
+        num_texts += 1
+
+        if average_similarity is None or num_texts == 0:
+            return -1.0
+        return round(average_similarity / num_texts, 2)
+
+    def _extract_lines_before_diff(
+        self, source_data: str, target_data: str
+    ) -> str:
+        source_lines = source_data.splitlines()
+        target_lines = target_data.splitlines()
+        common_prefix = os.path.commonprefix([source_lines, target_lines])
+        common_prefix_length = len(common_prefix)
+
+        return "\n".join(source_lines[:common_prefix_length])
+
+    def _extract_lines_after_diff(self, target_data: str) -> str:
+        lines = target_data.splitlines()
+        last_bracket_index = lines.index("## [STATE]") + 1
+        return "\n".join(lines[last_bracket_index:])
+
+    def _preprocess_annotated_code(self, content: str) -> str:
+        pattern = r"\[\s*\d+\s*([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)\s*\]"
+        matches = re.finditer(pattern, content)
+        for match in matches:
+            full_match = match.group(0).strip()
+            variable_name = match.group(1)
+            if variable_name not in self.cache:
+                token = next_token_id(variable_name)
+                self.cache[variable_name] = token
+            content = content.replace(full_match, str(self.cache[variable_name]))
+        return content
+
+    def chat(
+        self,
+        messages: list[Message],
+        **kwargs,
+    ):
+        num_attempt = 0
+        max_num_attempt = 1
+        while num_attempt < max_num_attempt:
+            try:
+                messages_copy = [message.copy() for message in messages]
+                messages_copy[0].content = convert_to_markdown(messages_copy[0].content)
+
+                # print(messages_copy)
+                client = Anthropic(**anthropic_client_settings)
+                completion = client.completions.create(
+                    model=self.model,
+                    max_tokens=2048,
+                    temperature=0.0,
+                    messages=[message.dict() for message in messages_copy],
+                )
+
+                if completion and completion.content[0].text:
+                    message = Message(
+                        role="assistant",
+                        content=completion.content[0].text.strip(),
+                        is_accepted=self.is_accepted(
+                            Output(
+                                external_response=completion.content[0].text.strip()
+                            )
+                        ),
+                        semantic_similarity=0.0,
+                    )
+                    return message
+                else:
+                    return Message(
+                        role="assistant",
+                        content="",
+                        is_accepted=False,
+                        semantic_similarity=0.0,
+                    )
+            except Exception as e:
+                print(f"Error in {self.model}: {e}", flush=True)
+                num_attempt += 1
+        return None

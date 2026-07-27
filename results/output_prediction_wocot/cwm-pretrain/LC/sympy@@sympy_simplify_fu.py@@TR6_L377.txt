@@ -1,0 +1,475 @@
+<|think|>
+I will now predict the output of the function `TR6` given the provided input.
+
+The function `TR6` calls `_TR56` with the trigonometric functions `cos`, `sin`, and the helper function `h = lambda x: 1 - x`. The parameter `max` is set to 4, and `pow` is set to False.
+
+Given the input:
+```
+{
+    "self": {},
+    "args": {
+        "rv": "cos(phi)",
+        "max": 4,
+        "pow": false
+    },
+    "kwargs": {}
+}
+```
+
+The function will be applied to `cos(phi)`.
+
+Since the input `cos(phi)` is a single trigonometric function with no exponent, the function `_TR56` will not make any changes to it.
+
+The output should be the same as the input, "cos(phi)".
+</think>
+<|output|>
+{
+    "output": "cos(phi)"
+}
+</|output|>
+<|endoftask|>
+
+[FILEPATH] piiswrong-blackbox-0ffdf42/extract/gpt4.py [/FILEPATH]
+import os
+
+from openai import OpenAI
+
+from evaluate import (
+    load_20newsgroups,
+    load_typed_python_programs,
+)
+from utils import parse_structure, parse_output
+from extract import TextExtractor
+
+
+class ExtractorGPT4(TextExtractor):
+    def __init__(
+        self,
+        name: str = "gpt4",
+        output_dir: str = "out/blackbox/extract/20news/train/gpt4",
+        model: str = "gpt-4-0125-preview",
+        use_structure: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            name=name,
+            output_dir=output_dir,
+            use_structure=use_structure,
+            **kwargs,
+        )
+        self.model = model
+        self.client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),  # this is also the default, it can be omitted
+        )
+
+    def extract(self, prompt: str, structure: str = "") -> dict:
+        if self.use_structure:
+            prompt = (
+                f"{prompt}\n\n[STRUCTURE]\n{structure}\n[/STRUCTURE]\n\nOutput\n{self._output_context}"
+            )
+        else:
+            prompt = f"{prompt}\n\nOutput\n{self._output_context}"
+        chat_completion = self.client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model=self.model,
+        )
+        output = chat_completion.choices[0].message.content
+        return output
+
+
+if __name__ == "__main__":
+    extractor = ExtractorGPT4()
+    output_path = extractor.output_dir
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+    # load dataset
+    testdata = load_typed_python_programs(
+        dataset="20news", split="train"
+    )  # 0-2 is used in few-shot, 2-999 is used in zero-shot
+    # extract
+    for i, task in enumerate(testdata):
+        basename = os.path.basename(task["id"]).split(".")[0]
+        filepath = f"{output_path}/{basename}.jsonl"
+        # record the output
+        if os.path.exists(filepath):
+            print(f"skip {i}: {basename}")
+            continue
+        else:
+            print(f"{i}: {basename}")
+        structure = parse_structure(structure_path=task["structure_path"])
+        prompt = (
+            extractor.fill_template(task)
+            + "\n\nAlways use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response."
+        )
+        output = extractor.extract(
+            prompt=prompt,
+            structure=structure if extractor.use_structure else "",
+        )
+        parsed_output = parse_output(output)
+        structure = parse_structure(structure_path=task["structure_path"])
+        if parsed_output is not None:
+            # write into a file
+            with open(filepath, "w") as f:
+                f.write(
+                    f"""{{
+  "id": "{task['id']}",
+  "dataset": "{task['dataset']}",
+  "split": "{task['split']}",
+  "source_path": "{task['source_path']}",
+  "output": {parsed_output},
+  "output_path": "{filepath}",
+  "prompt": "{prompt}",
+  "structure_path": "{task['structure_path']}",
+  "structure": {structure},
+}}"""
+                )
+
+[FILEPATH] piiswrong-blackbox-0ffdf42/extract/extract.py [/FILEPATH]
+import json
+import os
+
+from openai import OpenAI
+
+from evaluate import (
+    load_20newsgroups,
+    load_typed_python_programs,
+)
+from utils import parse_structure, parse_output
+
+
+class TextExtractor:
+    def __init__(
+        self,
+        name: str = "all",
+        output_dir: str = "out/blackbox/extract/20news/train/all",
+        use_structure: bool = False,
+        **kwargs,
+    ) -> None:
+        self.name = name
+        self.output_dir = output_dir
+        self.use_structure = use_structure
+        if use_structure:
+            self._output_context = "<output>"
+        else:
+            self._output_context = '<output>```json\n{\n  "output": "'
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    def fill_template(self, task):
+        if task["name"] == "sf":
+            prompt = self._fill_sf(task)
+        elif task["name"] == "python":
+            prompt = self._fill_python(task)
+        else:
+            raise ValueError(f"Unknown task name {task['name']}")
+        return prompt
+
+    def _fill_sf(self, task):
+        context = (
+            task["source"] + "\n-----------------------------\n" + task["input"]
+        )
+        prompt = self._fill_common(context=context, task=task)
+        return prompt
+
+    def _fill_python(self, task):
+        with open(task["source_path"], "r") as f:
+            source = f.read()
+            if source[-1] != "\n":
+                source += "\n"
+        with open(task["input_path"], "r") as f:
+            input = f.read()
+            if input[-1] != "\n":
+                input += "\n"
+        context = (
+            f"[PYTHON]\n{source}[/PYTHON]\n\n[INPUT]\n{input}[/INPUT]\n\n[STRUCTURE]\n{task['structure']}\n[/STRUCTURE]"
+        )
+        prompt = self._fill_common(context=context, task=task)
+        return prompt
+
+    def _fill_common(self, context, task):
+        if self.use_structure:
+            prompt = f"""
+Consider the following context:
+===================
+{context}
+===================
+
+What is the output of this program? Please complete the following JSON structure in strict accordance with the given rules, providing the output of the program.
+
+RULES:
+* You MUST stick to the JSON structure strictly.
+* You MUST directly provide the output values for the placeholders within the JSON.
+* You MUST not provide any explanations, reasoning, or additional text.
+* You MUST not print any reasoning process.
+* You MUST make sure that the JSON is valid and complete.
+* You MUST make sure that the JSON is in the correct format.
+* You MUST make sure that the JSON is in the correct order.
+
+The JSON structure is as follows:
+```
+{task['structure']}
+```
+
+Please provide the output of the program in the following JSON structure:
+```
+{self._output_context}
+```
+"""
+        else:
+            prompt = f"""
+Consider the following context:
+===================
+{context}
+===================
+
+What is the output of this program? 
+
+Please provide the output of the program as a JSON string, in the following format:
+```
+{self._output_context}
+```
+"""
+        return prompt
+
+    def extract(self, prompt: str, structure: str = "") -> str:
+        raise NotImplementedError
+
+[FILEPATH] piiswrong-blackbox-0ffdf42/README.md [/FILEPATH]
+# Blackbox 💻: Structure-Based Extraction for Language Agents
+
+This repo contains the implementation of the paper _**Blackbox: Structure-Based Extraction for Language Agents**_, which was accepted by **ICLR 2024**. 
+
+## About the Paper
+
+The capability of language agents to perform tasks is crucial for real-world applications. Recent research has explored the alignment between these agents and language models, but this has largely centered on correct and robust task completion. Current evaluation focuses on specialized tasks and overlooks the broader, heterogeneous applications of language agents. This includes the ability to handle text outputs of arbitrary structure. We therefore investigate the potential of language agents to execute tasks of varying complexity with a variety of output structures. To do this, we develop a new benchmark, **StructuredCodeGen**, that contains 10 tasks with a wide range of output structures, obtained from popular benchmark datasets like HumanEval, MBPP, and 20Newsgroups. We find that only 25% of Python-based tasks and 34% of text-based tasks on StructuredCodeGen are correctly executed by state-of-the-art models such as GPT-4. Our analysis reveals that incorrect execution often occurs not because the model fails to perform the task but because the model struggles with formatting the output according to the target structure. We therefore present Blackbox, a simple approach that enhances the structure-awareness of language models by leveraging few-shot examples of prompt-task-output instances. Blackbox achieves a 5-8% increase in success rate over baselines on our benchmark. Our findings demonstrate the need for better-structured outputs in language agent evaluations and point the way forward to advancing their capabilities.
+
+## Task List
+
+1. `Chatbot`: Predict the next turn in a human-computer chat conversation.
+
+2. `Comment generator`: Generate comments for a given Java program.
+
+3. `Data analyser`: Generate data description for a given data table.
+
+4. `HTML to table`: Parse a given HTML page into a JSON array of tables.
+
+5. `Indian numerals`: Convert an input value between Arabic and Indian numbers.
+
+6. `Make change`: Evaluate how to make change for a given amount.
+
+7. `Notes`: Convert a note string into a JSON array of objects.
+
+8. `String to numbers`: Convert a string into a list of numbers.
+
+9. `Translate to Spanish`: Translate a sentence into Spanish.
+
+10. `Traveler`: Generate a traveler's plan based on user input.
+
+
+## Benchmark
+
+For each task, we provide three splits: `train`, `eval`, and `test`. The `train` and `eval` splits are used for few-shot learning and hyperparameter tuning, respectively. The `test` split is used for final evaluation.
+
+The benchmark is available in `data/structuredcodegen`.
+
+## Evaluation
+
+Use the `evaluate.py` script to evaluate the performance of your model on the benchmark. The script will automatically load the data and evaluate the performance of your model on the benchmark. The evaluation will be printed out on the screen and saved in the `output_dir` directory.
+
+`evaluate.py` takes the following arguments:
+
+- `model_name`: The name of the model to evaluate. Default is `gpt4`.
+- `dataset`: The dataset to evaluate on. Default is `20news`.
+- `split`: The split to evaluate on. Default is `test`.
+- `use_structure`: Whether to use structure in the prompt. Default is `False`.
+- `n_shots`: The number of few-shot examples to use. Default is `0`.
+- `output_dir`: The directory to save the output. Default is `out/blackbox/eval/20news/test/`
+
+For example, to evaluate the performance of GPT-4 on the `20news` dataset, run the following command:
+
+```bash
+python evaluate.py --model_name gpt4 --dataset 20news --split test --use_structure True --n_shots 3
+```
+
+The output will be saved in the `out/blackbox/eval/20news/test/` directory.
+
+## Extraction
+
+Use the `extract.py` script to extract the outputs of your model on the benchmark. The script will automatically load the data and extract the outputs of your model on the benchmark. The outputs will be saved in the `output_dir` directory.
+
+`extract.py` takes the following arguments:
+
+- `model_name`: The name of the model to extract outputs from. Default is `gpt4`.
+- `dataset`: The dataset to extract outputs from. Default is `20news`.
+- `split`: The split to extract outputs from. Default is `test`.
+- `use_structure`: Whether to use structure in the prompt. Default is `False`.
+- `n_shots`: The number of few-shot examples to use. Default is `0`.
+- `output_dir`: The directory to save the outputs. Default is `out/blackbox/extract/20news/test/`
+
+For example, to extract the outputs of GPT-4 on the `20news` dataset, run the following command:
+
+```bash
+python extract.py --model_name gpt4 --dataset 20news --split test --use_structure True --n_shots 3
+```
+
+The outputs will be saved in the `out/blackbox/extract/20news/test/` directory.
+
+## Pre-trained Models
+
+We provide the pre-trained outputs of GPT-4 and GPT-3.5 on the benchmark. The outputs are available in the `out/blackbox/extract/20news/test/gpt4` and `out/blackbox/extract/20news/test/gpt3.5` directories, respectively.
+
+We also provide the evaluation results of GPT-4 and GPT-3.5 on the benchmark. The results are available in the `out/blackbox/eval/20news/test/gpt4` and `out/blackbox/eval/20news/test/gpt3.5` directories, respectively.
+
+## Blackbox Model
+
+Blackbox is a simple approach that enhances the structure-awareness of language models by leveraging few-shot examples of prompt-task-output instances. 
+
+To train Blackbox, we first extract the outputs of GPT-4 on the benchmark. The outputs are available in the `out/blackbox/extract/20news/test/gpt4` directory. We then use these outputs as few-shot examples to train Blackbox. The trained Blackbox models are available in the `models/blackbox` directory.
+
+To run Blackbox, use the `evaluate.py` script. The script will automatically load the data and evaluate the performance of Blackbox on the benchmark. The evaluation will be printed out on the screen and saved in the `output_dir` directory.
+
+Blackbox can be run on the `20news` dataset as follows:
+
+```bash
+python evaluate.py --model_name blackbox --dataset 20news --split test --use_structure True --n_shots 3
+```
+
+The output will be saved in the `out/blackbox/eval/20news/test/` directory.
+
+## Acknowledgements
+
+Our project was inspired by [Small Python Predictors](https://github.com/rxliulis/SmallPythonPredictors). We used code from the Small Python Predictors repository to implement some of the tasks in our benchmark. We thank the authors of Small Python Predictors for their work.
+
+[FILEPATH] piiswrong-blackbox-0ffdf42/extract.py [/FILEPATH]
+import os
+import argparse
+import json
+
+from evaluate import (
+    load_20newsgroups,
+    load_typed_python_programs,
+)
+from utils import parse_structure, parse_output
+from extract.gpt4 import ExtractorGPT4
+
+
+def main():
+    # parse the arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="gpt4",
+        help="The name of the model to be evaluated",
+    )
+    parser.add_argument(
+        "--dataset", type=str, default="20news", help="The dataset to be evaluated"
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        help="The split of the dataset to be evaluated",
+    )
+    parser.add_argument(
+        "--use_structure", type=bool, default=False, help="Whether to use structure"
+    )
+    parser.add_argument(
+        "--n_shots",
+        type=int,
+        default=0,
+        help="The number of examples used in few-shot learning",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="out/blackbox/extract/20news/test/",
+        help="The directory to save the results",
+    )
+    args = parser.parse_args()
+
+    # load the model
+    if args.model_name == "gpt4":
+        extractor = ExtractorGPT4(
+            use_structure=args.use_structure,
+            n_shots=args.n_shots,
+            output_dir=args.output_dir,
+        )
+    else:
+        raise ValueError(f"Unknown model name: {args.model_name}")
+
+    # load the dataset
+    if args.dataset == "20news":
+        testdata = load_20newsgroups(split=args.split)
+    elif args.dataset == "typed-python-programs":
+        testdata = load_typed_python_programs(split=args.split)
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
+
+    # extract the outputs
+    for i, task in enumerate(testdata):
+        # read the input and source
+        basename = os.path.basename(task["id"]).split(".")[0]
+        filepath = f"{args.output_dir}/{basename}.jsonl"
+        # record the output
+        if os.path.exists(filepath):
+            print(f"skip {i}: {basename}")
+            continue
+        else:
+            print(f"{i}: {basename}")
+        structure = parse_structure(structure_path=task["structure_path"])
+        prompt = (
+            extractor.fill_template(task)
+            + "\n\nAlways use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response. DO NOT print any reasoning process."
+        )
+        output = extractor.extract(
+            prompt=prompt,
+            structure=structure if args.use_structure else "",
+        )
+        parsed_output = parse_output(output)
+        structure = parse_structure(structure_path=task["structure_path"])
+        if parsed_output is not None:
+            # write into a file
+            with open(filepath, "w") as f:
+                f.write(
+                    f"""{{
+  "id": "{task['id']}",
+  "dataset": "{task['dataset']}",
+  "split": "{task['split']}",
+  "source_path": "{task['source_path']}",
+  "output": {parsed_output},
+  "output_path": "{filepath}",
+  "prompt": "{prompt}",
+  "structure_path": "{task['structure_path']}",
+  "structure": {structure},
+}}"""
+                )
+
+
+if __name__ == "__main__":
+    main()
+
+[FILEPATH] piiswrong-blackbox-0ffdf42/evaluate.py [/FILEPATH]
+import os
+import argparse
+import json
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class SimilarityType(Enum):
+    JSON = "json"
+    TEXT = "text"
+
+
+class BaseEvaluator:
+    def __init__(
+        self,
+        name: str = "gpt4",
+        similarity_type: SimilarityType = SimilarityType.JSON,

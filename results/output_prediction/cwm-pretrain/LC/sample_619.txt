@@ -1,0 +1,535 @@
+<|assistant|>
+
+<|user|>
+<|assistant|>
+Let's execute the code step by step.
+1. The input text is "   Rock   Paper   SCISSORS  "
+2. The function `f` is called with this input
+3. The function converts all characters to lowercase using `.lower()`
+4. The result is "   rock   paper   scissors  "
+5. This string will be the output of the function
+<|assistant|>
+
+[OUTPUT]
+```
+{
+    "output": "   rock   paper   scissors  "
+}
+```
+[/OUTPUT]
+<|assistant|>
+
+<|user|>
+<|assistant|>
+<|user|>
+<|assistant|>
+
+<|assistant|>
+
+[FILEPATH] skjohansen-MetaPriming-5ea8e18/merge-files.py [/FILEPATH]
+# merge all files in the data directory
+
+import os
+import glob
+
+# Directory containing your text files
+directory = 'data/'
+
+# Regular expression to match all text files
+pattern = os.path.join(directory, '*.txt')
+
+# Initialize an empty list to hold your data
+merged_data = []
+
+# Loop through each text file in the directory
+for file_name in glob.glob(pattern):
+    # Open and read each file
+    with open(file_name, 'r') as file:
+        # Append the content of the file to the merged_data list
+        merged_data.append(file.read())
+
+# Now merged_data contains the content of all your text files
+# You can print it out
+for idx, data in enumerate(merged_data):
+    print(data)
+    print("\n\n\n")
+    print("=============================================")
+
+[FILEPATH] skjohansen-MetaPriming-5ea8e18/create-more-few-shots.py [/FILEPATH]
+import json
+import os
+from difflib import SequenceMatcher
+import random
+from textwrap import dedent
+import re
+from pathlib import Path
+from typing import Any, List, Tuple, Type, Union, Dict
+import multiprocessing
+import re
+import itertools
+import subprocess
+import ast
+import signal
+import shutil
+import os
+
+import openai
+import tiktoken
+from litellm import completion
+import argparse
+import time
+
+# def similar(a, b):
+#     return SequenceMatcher(None, a, b).ratio()
+
+# def find_most_similar_python_method_name(candidates, method_name):
+#     best_ratio = 0.0
+#     best_name = None
+#     best_candidate = None
+#     for candidate in candidates:
+#         for name, _ in candidate:
+#             ratio = similar(name, method_name)
+#             if ratio > best_ratio:
+#                 best_ratio = ratio
+#                 best_name = name
+#                 best_candidate = candidate
+#     return best_name, best_candidate
+
+def save_json_data(file_path: Union[str, os.PathLike], data: Dict):
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=4)
+
+def load_json_data(file_path: Union[str, os.PathLike]) -> Dict:
+    with open(file_path) as f:
+        return json.load(f)
+
+def remove_punctuation(text):
+    """Remove punctuation from the input text."""
+    punct_table = str.maketrans('', '', string.punctuation)
+    return text.translate(punct_table)
+
+def remove_trailing_special_characters(text):
+    """Remove all trailing characters that are not alphanumeric."""
+    text = text.strip()
+    while text and not text[-1].isalnum():
+        text = text[:-1]
+    return text
+
+def normalize_text(text):
+    """Remove punctuation, normalize whitespace, and remove trailing non-alphanumeric characters."""
+    return remove_trailing_special_characters(remove_punctuation(text))
+
+def extract_code_blocks(text):
+    """
+    Extract all code blocks from the given text. The function assumes that the code blocks are enclosed
+    in ```[LANG] and ``` with a consistent number of backticks (e.g., ```python or ```) and processes them one
+    at a time until a new backtick set with a different number is found. It also correctly handles cases where
+    code might start on a new line right after the initial ```
+    """
+    if text is None:
+        return []
+    
+    parts = text.split("```")
+    code_blocks = []
+    in_code_block = False
+    current_block_start = None
+
+    for i in range(len(parts)):
+        part = parts[i]
+        part = part.strip()
+        
+        # Check if we are inside a code block
+        if in_code_block:
+            # Check if this part starts with a new ``` with the same number of backticks
+            # as the one that opened the code block
+            match = re.match(r'^(`+)\s*$', part)
+            if match and len(match.group(1)) == current_block_start:
+                in_code_block = False
+                continue
+            
+            code_block = parts[current_block_start].strip() + part
+            
+            # If we reach the end of the list and are still in a code block
+            if i == len(parts) - 1:
+                code_block += "\n" + part
+                code_block = "\n".join(code_block.splitlines()).strip()
+                code_blocks.append(code_block)
+            
+        else:
+            # Check if this part starts a new code block
+            match = re.match(r'^(`+)\s*$', part)
+            if match:
+                in_code_block = True
+                current_block_start = i + 1
+                code_block = part + "\n" + parts[i + 1].strip()
+                if i == len(parts) - 1:
+                    code_block = "\n".join(code_block.splitlines()).strip()
+                    code_blocks.append(code_block)
+
+    return code_blocks
+
+
+def extract_function_name(code_string):
+    """
+    Extracts the function name from a given code string.
+
+    Args:
+        code_string (str): The code string containing the function definition.
+
+    Returns:
+        str or None: The name of the function if found, otherwise None.
+    """
+    try:
+        tree = ast.parse(code_string)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                return node.name
+        return None  # No function definition found
+    except SyntaxError as e:
+        print(f"Syntax error in the code: {e}")
+        return None
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+def extract_json_strings(text):
+    """
+    Extracts all JSON-like strings from the given text using regular expressions.
+
+    Args:
+        text (str): The text containing JSON-like strings.
+
+    Returns:
+        list: A list of extracted JSON-like strings.
+    """
+    json_pattern = re.compile(
+        r'{"output":\s*"[^"]+"}\s*{[^}]+}',  # Pattern to match the JSON-like structure
+        re.DOTALL  # Allow . to match newline characters
+    )
+
+    # Find all matches in the text
+    matches = json_pattern.findall(text)
+
+    # Return the list of matches
+    return matches
+
+def reconstruct_json(output_var, structure):
+    """
+    Reconstructs a JSON object with the output variable and the provided structure.
+
+    Args:
+        output_var (str): The value to be placed in the "output" key.
+        structure (str): The structure of the JSON object to be reconstructed.
+
+    Returns:
+        str: The reconstructed JSON object.
+    """
+    try:
+        # Parse the structure string to a Python dictionary
+        structure_dict = ast.literal_eval(structure)
+        
+        # Replace the placeholder with the output variable
+        structure_dict['output'] = output_var.strip('"')
+        
+        # Convert the updated dictionary back to a string
+        return json.dumps(structure_dict, indent=4)
+    except Exception as e:
+        # If parsing or reconstruction fails, print an error message
+        print(f"Error reconstructing JSON: {e}")
+        return None
+
+def extract_all_json_strings(example_input):
+    """
+    Extracts all JSON-like strings from the given example input.
+
+    Args:
+        example_input (str): The example input string containing JSON-like structures.
+
+    Returns:
+        list: A list of extracted JSON-like strings.
+    """
+    return extract_json_strings(example_input)
+
+def fill_in_json_structure(json_string, new_output_value):
+    """
+    Replaces the output value in the provided JSON string with the new output value.
+
+    Args:
+        json_string (str): The JSON-like string containing the output value to be replaced.
+        new_output_value (str): The new output value to be placed in the JSON string.
+
+    Returns:
+        str: The JSON string with the new output value.
+    """
+    try:
+        # Convert the JSON string to a Python dictionary
+        data = json.loads(json_string)
+        
+        # Update the output value
+        data["output"] = new_output_value.strip()
+        
+        # Convert the updated dictionary back to a JSON string
+        updated_json_string = json.dumps(data, indent=4)
+        
+        return updated_json_string
+    except json.JSONDecodeError as e:
+        print(f"JSON Decode Error: {e}")
+        return None
+    except KeyError as e:
+        print(f"Key Error: {e}")
+        return None
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+    
+def similar(a, b):
+    return SequenceMatcher(None, a, b).ratio()
+
+def find_most_similar_python_method_name(candidates, method_name):
+    best_ratio = 0.0
+    best_name = None
+    best_candidate = None
+    for candidate in candidates:
+        for name, _ in candidate:
+            ratio = similar(name, method_name)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_name = name
+                best_candidate = candidate
+    return best_name, best_candidate
+
+def extract_function_name(code_string):
+    """
+    Extracts the function name from a given code string.
+
+    Args:
+        code_string (str): The code string containing the function definition.
+
+    Returns:
+        str or None: The name of the function if found, otherwise None.
+    """
+    try:
+        tree = ast.parse(code_string)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                return node.name
+        return None  # No function definition found
+    except SyntaxError as e:
+        print(f"Syntax error in the code: {e}")
+        return None
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+def save_json_data(file_path: Union[str, os.PathLike], data: Dict):
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=4)
+
+def generate_more_fewshots(all_json_data, method_name):
+    """Generate more few-shots based on all existing few-shots
+
+    Args:
+        all_json_data (list): A list of dictionaries, where each dictionary
+            represents a single few-shot example with keys `code`, `input`, and `output`.
+        method_name (str): The name of the method/function for which to generate more
+            few-shot examples.
+
+    Returns:
+        list: A list of dictionaries, where each dictionary represents a newly generated
+            few-shot example with keys `code`, `input`, and `output`.
+    """
+
+    existing_fewshots = all_json_data["examples"]
+    print(f"Existing few-shots: {len(existing_fewshots)}")
+    # print(f"Existing few-shots: {existing_fewshots[0]}")
+    ## Prepare existing few-shots for LLM
+    # fewshot_examples = []
+    # for i, example in enumerate(existing_fewshots):
+    #     input_data = "\n".join(f"{k}: {v}" for k, v in example["input"].items())
+    #     example_output = "\n".join(f"{k}: {v}" for k, v in example["output"].items())
+    #     input_data = input_data.strip()
+    #     example_output = example_output.strip()
+    #     print(f"Example {i}: {input_data}")
+    #     fewshot_examples.append({
+    #         "instruction": f"Example {i}:",
+    #         "input": input_data,
+    #         "output": example_output
+    #     })
+
+    # print(f"Few-shot examples: {fewshot_examples}")
+    
+    ## Prepare the prompt
+    ### Instructions
+    instructions = [
+        {
+            "role": "system",
+            "content": dedent(f"""\
+                You are a helpful AI assistant. Your task is to extend the set of few-shot examples for a specific method by creating new examples. Your goal is to find examples that cover as many possible cases as possible. Each example should be similar to the other examples, but slightly different. You should generate a new instruction, a new input and a new output that is similar to the other examples, but slightly different. Make sure the example is valid, the new code should do the same as the original code, but with a different input and output. In case of a specific example structure that you need to generate for each example you are given, make sure to generate a similar structure for the new example.
+
+                I have an existing few-shot example that looks like this:
+                EXAMPLE
+                [INPUT]
+                [STRUCTURE]
+                [CODE]
+                [OUTPUT]
+                [/OUTPUT]
+                [/CODE]
+                [/STRUCTURE]
+                [/INPUT]
+                [/EXAMPLE]
+                Create new examples that look like this example but are different in some small details. In case of a specific structure in the input or output, make sure to generate a similar structure for the new example.
+
+                OUTPUT FORMAT:
+                [[NEW EXAMPLE]]
+                [INPUT]
+                [STRUCTURE]
+                [CODE]
+                [OUTPUT]
+                [/OUTPUT]
+                [/CODE]
+                [/STRUCTURE]
+                [/INPUT]
+                [/NEW EXAMPLE]
+                [[NEW EXAMPLE]]
+                [INPUT]
+                [STRUCTURE]
+                [CODE]
+                [OUTPUT]
+                [/OUTPUT]
+                [/CODE]
+                [/STRUCTURE]
+                [/INPUT]
+                [/NEW EXAMPLE]
+                and so on...
+            """)
+        },
+        {
+            "role": "user",
+            "content": dedent(f"""
+                Given the following existing few-shots:
+                EXISTING FEWSHOTS
+                {json.dumps(existing_fewshots, indent=4)}
+                [/EXISTING FEWSHOTS]
+                I want you to generate more few-shots for the method: {method_name}.
+
+                The new few-shots should be structured in the same way as the existing few-shots. 
+
+                Generate two new few-shots. Return the response in the following format:
+
+                [[NEW EXAMPLE]]
+                [INPUT]
+                [STRUCTURE]
+                [CODE]
+                [OUTPUT]
+                [/OUTPUT]
+                [/CODE]
+                [/STRUCTURE]
+                [/INPUT]
+                [/NEW EXAMPLE]
+                [[NEW EXAMPLE]]
+                [INPUT]
+                [STRUCTURE]
+                [CODE]
+                [OUTPUT]
+                [/OUTPUT]
+                [/CODE]
+                [/STRUCTURE]
+                [/INPUT]
+                [/NEW EXAMPLE]
+                and so on...
+
+                Only generate examples, do not include any other text.
+            """)
+        }
+    ]
+    
+
+    # print(f"Instructions: {instructions}")
+    
+    # # DEBUG
+    # print(f"Instructions: {instructions}")
+    # return
+
+    ## Generate new few-shots
+    print(f"Generating new few-shots for method: {method_name}")
+    for attempt in range(3):
+        try:
+            response = completion(
+                model="gpt-4-turbo-preview",
+                messages=instructions,
+                temperature=0.8,  # Using a higher temperature to increase creativity
+            )
+            break  # Exit the loop if successful
+        except openai.APIError as e:
+            print(f"APIError: {e}")
+            if attempt < 2:
+                print("Retrying...")
+                time.sleep(2)  # Wait for 2 seconds before retrying
+            else:
+                raise
+
+    # print(f"Response: {response}")
+
+    ## Parse the response
+    fewshot_data = response.choices[0].message.content
+    print(f"Fewshot data: {fewshot_data}")
+    fewshot_data = extract_code_blocks(fewshot_data)
+    print(f"Fewshot data: {fewshot_data}")
+    fewshot_data = [d.strip() for d in fewshot_data if len(d.strip()) > 0]
+    print(f"Fewshot data: {fewshot_data}")
+
+    new_fewshots = []
+    print(f"Fewshot data: {fewshot_data}")
+    for d in fewshot_data:
+        d = d.strip()
+        if not d.startswith("[NEW EXAMPLE]"):
+            continue
+        new_fewshots.append(d.strip())
+    
+    ## Parse the new few-shots
+    new_fewshot_examples = []
+    for i, new_fewshot in enumerate(new_fewshots):
+        input_data = new_fewshot.split("[INPUT]")[1].split("[/INPUT]")[0].strip()
+        code = new_fewshot.split("[CODE]")[1].split("[/CODE]")[0].strip()
+        output = new_fewshot.split("[OUTPUT]")[1].split("[/OUTPUT]")[0].strip()
+        structure = new_fewshot.split("[STRUCTURE]")[1].split("[/STRUCTURE]")[0].strip()
+        new_fewshot_examples.append({
+            "input": input_data,
+            "code": code,
+            "output": output,
+            "structure": structure
+        })
+
+    ## Remove duplicates
+    new_fewshot_examples = [dict(t) for t in {tuple(d.items()) for d in new_fewshot_examples}]
+    print(f"New few-shots: {new_fewshot_examples}")
+
+    ## Filter and find best new few-shots
+    # new_fewshot_examples = [example for example in new_fewshot_examples if len(existing_fewshots) < 5 or not any(example['code'] == ef['code'] for ef in existing_fewshots)]
+    print(f"New few-shots: {len(new_fewshot_examples)}")
+
+    ## Select the best new few-shots
+    if len(new_fewshot_examples) > 2:
+        new_fewshot_examples = new_fewshot_examples[:2]
+        print(f"New few-shots: {new_fewshot_examples}")
+    else:
+        print("Not enough new few-shots generated. Skipping...")
+        return
+
+    ## Save the new few-shots
+    # all_json_data["examples"].extend(new_fewshot_examples)
+    ## Save the updated few-shots
+    # save_json_data("all_fewshots.json", all_json_data)
+    # print(f"New few-shots saved to all_fewshots.json")
+    
+    # Generate code for each new example (run code for new few-shot)
+    instructions = [
+        {
+            "role": "system",
+            "content": dedent(f"""\
+                You are a helpful AI assistant. You always reason before responding, using the following format:
+                [THOUGHTS]
+                your internal reasoning
+                [/THOUGHTS]
+                your external response
+                Consider the user's inputs and outputs, and then generate the corresponding code between [PYTHON] and [/PYTHON]. You should generate a code snippet that, when run, will produce the same output as the user

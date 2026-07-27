@@ -1,0 +1,427 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. You only need to predict input variable values, and print input between [INPUT] and [/INPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT]. 
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+[/THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import inspect
+from collections import defaultdict
+from sklearn.utils._metadata_requests import _MetadataRequester, _routing_enabled
+from sklearn.utils._repr_html.base import ReprHTMLMixin, _HTMLDocumentationLinkMixin
+from sklearn.utils._repr_html.estimator import estimator_html_repr
+
+class BaseEstimator(ReprHTMLMixin, _HTMLDocumentationLinkMixin, _MetadataRequester):
+    _html_repr = estimator_html_repr
+
+    @classmethod
+    def _get_param_names(cls):
+        init = getattr(cls.__init__, 'deprecated_original', cls.__init__)
+        if init is object.__init__:
+            return []
+        init_signature = inspect.signature(init)
+        parameters = [p for p in init_signature.parameters.values() if p.name != 'self' and p.kind != p.VAR_KEYWORD]
+        for p in parameters:
+            if p.kind == p.VAR_POSITIONAL:
+                raise RuntimeError("scikit-learn estimators should always specify their parameters in the signature of their __init__ (no varargs). %s with constructor %s doesn't  follow this convention." % (cls, init_signature))
+        return sorted([p.name for p in parameters])
+
+    def get_params(self, deep=True):
+        out = dict()
+        for key in self._get_param_names():
+            value = getattr(self, key)
+            if deep and hasattr(value, 'get_params') and (not isinstance(value, type)):
+                deep_items = value.get_params().items()
+                out.update(((key + '__' + k, val) for k, val in deep_items))
+            out[key] = value
+        return out
+
+    def set_params(self, **params):
+        if not params:
+            return self
+        valid_params = self.get_params(deep=True)
+        nested_params = defaultdict(dict)
+        for key, value in params.items():
+            key, delim, sub_key = key.partition('__')
+            if key not in valid_params:
+                local_valid_params = self._get_param_names()
+                raise ValueError(f'Invalid parameter {key!r} for estimator {self}. Valid parameters are: {local_valid_params!r}.')
+            if delim:
+                nested_params[key][sub_key] = value
+            else:
+                setattr(self, key, value)
+                valid_params[key] = value
+        for key, sub_params in nested_params.items():
+            valid_params[key].set_params(**sub_params)
+        return self
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+scikit-learn.sklearn.base._get_param_names
+
+@classmethod
+def _get_param_names(cls):
+    """Get parameter names for the estimator"""
+    # fetch the constructor or the original constructor before
+    # deprecation wrapping if any
+    init = getattr(cls.__init__, "deprecated_original", cls.__init__)
+    if init is object.__init__:
+        # No explicit constructor to introspect
+        return []
+
+    # introspect the constructor arguments to find the model parameters
+    # to represent
+    init_signature = inspect.signature(init)
+    # Consider the constructor parameters excluding 'self'
+    parameters = [
+        p
+        for p in init_signature.parameters.values()
+        if p.name != "self" and p.kind != p.VAR_KEYWORD
+    ]
+    for p in parameters:
+        if p.kind == p.VAR_POSITIONAL:
+            raise RuntimeError(
+                "scikit-learn estimators should always "
+                "specify their parameters in the signature"
+                " of their __init__ (no varargs)."
+                " %s with constructor %s doesn't "
+                " follow this convention." % (cls, init_signature)
+            )
+    # Extract and sort argument names excluding 'self'
+    return sorted([p.name for p in parameters])
+
+scikit-learn.sklearn.base.get_params
+
+def get_params(self, deep=True):
+    """
+    Get parameters for this estimator.
+
+    Parameters
+    ----------
+    deep : bool, default=True
+        If True, will return the parameters for this estimator and
+        contained subobjects that are estimators.
+
+    Returns
+    -------
+    params : dict
+        Parameter names mapped to their values.
+    """
+    out = dict()
+    for key in self._get_param_names():
+        value = getattr(self, key)
+        if deep and hasattr(value, "get_params") and not isinstance(value, type):
+            deep_items = value.get_params().items()
+            out.update((key + "__" + k, val) for k, val in deep_items)
+        out[key] = value
+    return out
+
+scikit-learn.sklearn.base.set_params
+
+def set_params(self, **params):
+    """Set the parameters of this estimator.
+
+    The method works on simple estimators as well as on nested objects
+    (such as :class:`~sklearn.pipeline.Pipeline`). The latter have
+    parameters of the form ``<component>__<parameter>`` so that it's
+    possible to update each component of a nested object.
+
+    Parameters
+    ----------
+    **params : dict
+        Estimator parameters.
+
+    Returns
+    -------
+    self : estimator instance
+        Estimator instance.
+    """
+    if not params:
+        # Simple optimization to gain speed (inspect is slow)
+        return self
+    valid_params = self.get_params(deep=True)
+
+    nested_params = defaultdict(dict)  # grouped by prefix
+    for key, value in params.items():
+        key, delim, sub_key = key.partition("__")
+        if key not in valid_params:
+            local_valid_params = self._get_param_names()
+            raise ValueError(
+                f"Invalid parameter {key!r} for estimator {self}. "
+                f"Valid parameters are: {local_valid_params!r}."
+            )
+
+        if delim:
+            nested_params[key][sub_key] = value
+        else:
+            setattr(self, key, value)
+            valid_params[key] = value
+
+    for key, sub_params in nested_params.items():
+        valid_params[key].set_params(**sub_params)
+
+    return self
+
+scikit-learn.sklearn.base.__repr__
+
+def __repr__(self, N_CHAR_MAX=700):
+    # N_CHAR_MAX is the (approximate) maximum number of non-blank
+    # characters to render. We pass it as an optional parameter to ease
+    # the tests.
+
+    from sklearn.utils._pprint import _EstimatorPrettyPrinter
+
+    N_MAX_ELEMENTS_TO_SHOW = 30  # number of elements to show in sequences
+
+    # use ellipsis for sequences with a lot of elements
+    pp = _EstimatorPrettyPrinter(
+        compact=True,
+        indent=1,
+        indent_at_name=True,
+        n_max_elements_to_show=N_MAX_ELEMENTS_TO_SHOW,
+    )
+
+    repr_ = pp.pformat(self)
+
+    # Use bruteforce ellipsis when there are a lot of non-blank characters
+    n_nonblank = len("".join(repr_.split()))
+    if n_nonblank > N_CHAR_MAX:
+        lim = N_CHAR_MAX // 2  # apprx number of chars to keep on both ends
+        regex = r"^(\s*\S){%d}" % lim
+        # The regex '^(\s*\S){%d}' % n
+        # matches from the start of the string until the nth non-blank
+        # character:
+        # - ^ matches the start of string
+        # - (pattern){n} matches n repetitions of pattern
+        # - \s*\S matches a non-blank char following zero or more blanks
+        left_lim = re.match(regex, repr_).end()
+        right_lim = re.match(regex, repr_[::-1]).end()
+
+        if "\n" in repr_[left_lim:-right_lim]:
+            # The left side and right side aren't on the same line.
+            # To avoid weird cuts, e.g.:
+            # categoric...ore',
+            # we need to start the right side with an appropriate newline
+            # character so that it renders properly as:
+            # categoric...
+            # handle_unknown='ignore',
+            # so we add [^\n]*\n which matches until the next \n
+            regex += r"[^\n]*\n"
+            right_lim = re.match(regex, repr_[::-1]).end()
+
+        ellipsis = "..."
+        if left_lim + len(ellipsis) < len(repr_) - right_lim:
+            # Only add ellipsis if it results in a shorter repr
+            repr_ = repr_[:left_lim] + "..." + repr_[-right_lim:]
+
+    return repr_
+
+scikit-learn.sklearn.compose._column_transformer.get_params
+
+def get_params(self, deep=True):
+    """Get parameters for this estimator.
+
+    Returns the parameters given in the constructor as well as the
+    estimators contained within the `transformers` of the
+    `ColumnTransformer`.
+
+    Parameters
+    ----------
+    deep : bool, default=True
+        If True, will return the parameters for this estimator and
+        contained subobjects that are estimators.
+
+    Returns
+    -------
+    params : dict
+        Parameter names mapped to their values.
+    """
+    return self._get_params("_transformers", deep=deep)
+
+scikit-learn.sklearn.ensemble._base.get_params
+
+def get_params(self, deep=True):
+    """
+    Get the parameters of an estimator from the ensemble.
+
+    Returns the parameters given in the constructor as well as the
+    estimators contained within the `estimators` parameter.
+
+    Parameters
+    ----------
+    deep : bool, default=True
+        Setting it to True gets the various estimators and the parameters
+        of the estimators as well.
+
+    Returns
+    -------
+    params : dict
+        Parameter and estimator names mapped to their values or parameter
+        names mapped to their values.
+    """
+    return super()._get_params("estimators", deep=deep)
+
+scikit-learn.sklearn.pipeline.get_params
+
+def get_params(self, deep=True):
+    """Get parameters for this estimator.
+
+    Returns the parameters given in the constructor as well as the
+    estimators contained within the `steps` of the `Pipeline`.
+
+    Parameters
+    ----------
+    deep : bool, default=True
+        If True, will return the parameters for this estimator and
+        contained subobjects that are estimators.
+
+    Returns
+    -------
+    params : mapping of string to any
+        Parameter names mapped to their values.
+    """
+    return self._get_params("steps", deep=deep)
+
+scikit-learn.sklearn.pipeline.set_params
+
+def set_params(self, **kwargs):
+    """Set the parameters of this estimator.
+
+    Valid parameter keys can be listed with ``get_params()``. Note that
+    you can directly set the parameters of the estimators contained in
+    `steps`.
+
+    Parameters
+    ----------
+    **kwargs : dict
+        Parameters of this estimator or parameters of estimators contained
+        in `steps`. Parameters of the steps may be set using its name and
+        the parameter name separated by a '__'.
+
+    Returns
+    -------
+    self : object
+        Pipeline class instance.
+    """
+    self._set_params("steps", **kwargs)
+    return self
+
+
+[/PYTHON]
+What will be the input of `set_params`, given the following input:
+[OUTPUT]
+```
+{
+    "output": "SpectralBiclustering(method='log', n_init=3, random_state=42)"
+}
+```
+[/OUTPUT]
+
+[THOUGHT]

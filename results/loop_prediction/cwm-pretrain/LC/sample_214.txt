@@ -1,0 +1,451 @@
+<|assistant|> 
+<|output|>
+[ANSWER]
+1 def f(sample):
+2     i = -1
+3     while sample.find('/', i+1) != -1:## [STATE]["sample.find('/', i+1)"]=[5, 9, 13, -1][/STATE]
+4         i = sample.find('/', i+1)
+5     return sample.rindex('/', 0, i)
+6 f('present/here/car%2Fwe')
+[/ANSWER]
+<|output|>
+
+[FILEPATH] entry/baseb.py [/FILEPATH]
+## Simplified LLM-for-Test-Gen
+import os
+import string
+import re
+import csv
+import pandas as pd
+
+# answer eval according to regex:?
+def answer_eval(output, answer):
+    if output is None:
+        return 0
+    output = output.strip()
+    # sub is used to remove all escape characters '\n', '\t', '\r' in output
+    output = output.strip().replace("\n", "").replace("\r", "").replace("\t", "")
+    print("answer is:", answer, "output is:", output)
+    if output == answer:
+        return 1
+    try:
+        eval_output = eval(output)
+    except:
+        return 0
+    try:
+        eval_answer = eval(answer)
+    except:
+        return 0
+    return 1 if eval_output == eval_answer else 0
+def extract_output(response):
+    output_pattern = r'<output>\s*(.*?)\s*<\/output>'
+    match = re.search(output_pattern, response, re.DOTALL)
+    if match:
+        return match.group(1)
+    return response
+    
+## extract answer from raw LLM response
+def extract_answer(response):
+    response = extract_output(response)
+    answer = response.split("[/ANSWER]")[0].split("[ANSWER]")[1]
+    return answer
+    # try:
+    #     # Using regular expression to find the content within [ANSWER] and [/ANSWER]
+    #     match = re.search(r'\[ANSWER\](.*?)\[/ANSWER\]', response, re.DOTALL)
+    #     if match:
+    #         # Extract the content within [ANSWER] and [/ANSWER]
+    #         answer_content = match.group(1)
+    #         # Remove leading/trailing whitespaces
+    #         answer_content = answer_content.strip()
+    #         print(f"Found answer content: {answer_content}")
+    #     else:
+    #         print("No answer content found in the response.")
+    #     return answer_content
+    # except Exception as e:
+    #     print(f"Error: {e}")
+    #     return None
+
+def write_answer(outputs, ans, case_id):
+    # print(f"Extracted answer: {ans}")
+    outputs["ans"].append(ans)
+    outputs["case_id"].append(case_id)
+    print(f"QAs of the evaluated test cases: {ans}")
+    return outputs
+
+# ---------------------- Old evaluation function ----------------------------#
+
+# def evaluate(response, outputs, case_id, input_q):
+#     input_answer = input_q.split("Answer: ")[-1].split('\n')[0].replace("\"", "'").strip()  # handle single/double quotes
+#     if response is not None and response.strip() != "":
+#         if not pd.isnull(input_answer):
+#             # compare extracted answer with the original question
+#             answer = extract_answer(response)
+#             print(answer, input_answer, answer==input_answer)
+#             # compare answer in lower case
+#             if answer.lower() == input_answer.lower():
+#                 print(f"Found answer content: {answer}")
+#                 return write_answer(outputs, answer, case_id)
+#             # TODO: this may not be needed for True or False?
+#             # convert answer from True to 'True' and from False to 'False'
+#             elif isinstance(eval(input_answer), bool):
+#                 print("answer is a boolean")
+#                 # convert answer from True to 'True' and from False to 'False'
+#                 if answer.lower() == str(input_answer).lower():
+#                     return write_answer(outputs, answer, case_id)
+#                 elif answer.lower() == input_answer.lower():
+#                     print(f"Found answer content: {answer}")
+#                     return write_answer(outputs, answer, case_id)
+#                 else:
+#                     print("Answer is not correct")
+#                     return write_answer(outputs, "", case_id)
+#             else:
+#                 print("Answer is not correct")
+#                 return write_answer(outputs, "", case_id)
+#         else:
+#             print("Answer is not correct")
+#             return write_answer(outputs, "", case_id)
+#     else:
+#         print("Answer is not correct")
+#         return write_answer(outputs, "", case_id)
+
+def generate_prompt(code, code_end, predicted_code, predicted_code_end, buggy_code, buggy_code_end, 
+                    bug_line, bug_line_des, additional_info, replacement_pattern, func_name, start_index, type_of_bug, combined_prompt):
+    # read replacement pattern, only extract the text between 'Answer is: ' and the newline character
+    replacement_pattern = replacement_pattern.split("Answer is: ")[-1].split('\n')[0].replace("\"", "'")
+    combined_prompt = f"""{combined_prompt}
+    
+    Consider these unit tests:
+    [UNITTESTS]
+    {code}
+    [/UNITTESTS]
+    ------
+    
+    Consider the following buggy code and code that has been patched:
+    [BUGGY]
+    {buggy_code}
+    [/BUGGY]
+    ------
+    [PATCHED]
+    {predicted_code}
+    [/PATCHED]
+    
+    The bug occurs in line {bug_line} ({bug_line_des}) of the code.
+    
+    {additional_info}
+    
+    Generate a repair patch by replacing the code using the "imperative" tags below. 
+    ONLY the code lines mentioned within the imperative tags should be modified. 
+    The replacement should be on the line that contains the bug but does not need to be on the same location as the bug. 
+    Please follow the exact example format below to generate the repair patch:
+    
+    [EXAMPLE] # the annotated code without the fix; to be modified
+    [START] line start [/START]
+    {buggy_code_end}
+    [/ANSWER]
+    [END] {bug_line} [/END]
+    
+    [EXAMPLE] # the annotated code with the fix; fixed
+    [START] {start_index} [/START]
+    {predicted_code_end}
+    [/ANSWER]
+    [END] {predicted_code_end} [/END]
+    [/EXAMPLE]
+    
+    Please ensure that the bug is fixed and does not compromise the existing functionality. 
+    Please follow the exact example format below to generate the repair patch:
+    
+    [GENERATED] # the annotated code without the fix; to be modified
+    [START] line start [/START]
+    {buggy_code_end}
+    [/ANSWER]
+    [END] {bug_line} [/END]
+    
+    [GENERATED] # the annotated code with the fix; fixed
+    [START] {start_index} [/START]
+    [/ANSWER]
+    [END] {predicted_code_end} [/END]
+    [/GENERATED]
+    
+    ALWAY USE THE TAGS [GENERATED] AND [/GENERATED] TO ENCLOES THE GENERATED CODE in your external response. 
+    DO NOT GENERATE ANY CODE OR IRRELEVANT TEXT AFTER YOUR RESPONSE.
+    """
+    # convert the double quotes to single quotes
+    combined_prompt = combined_prompt.replace("\"", "'")
+    return combined_prompt
+
+[FILEPATH] entry/top1000_dataset.py [/FILEPATH]
+import os
+import pandas as pd
+import numpy as np
+import re
+import csv
+import json
+import ast
+from baseb import generate_prompt, extract_output, answer_eval
+import pdb
+import os
+
+print(os.listdir("./dataset"))
+print(os.listdir("./dataset/test_cases"))
+print(os.listdir("./dataset/test_cases/top1000"))
+print(os.listdir("./dataset/test_cases/top1000/test_cases"))
+print(os.listdir("./dataset/test_cases/top1000/test_cases/unit_tests"))
+print(os.listdir("./dataset/test_cases/top1000/test_cases/original_source"))
+print(os.listdir("./dataset/test_cases/top1000/test_cases/source_code"))
+print(os.listdir("./dataset/test_cases/top1000/test_cases/repaired_source"))
+print(os.listdir("./dataset/test_cases/top1000/test_cases/buggycodex_repaired_source"))
+
+print(os.listdir("./dataset/bug_info"))
+print(os.listdir("./dataset/bug_info/top1000"))
+print(os.listdir("./dataset/bug_info/top1000/bug_reports"))
+
+
+def extract_changes(text):
+    # Define a regular expression pattern to match the code changes
+    pattern = r'\n(\s*)\-([\s\S]+?)\n(\s*)\+([\s\S]+?)\n'  # Match lines starting with '-' or '+'
+    
+    # Find all matches of the pattern in the text
+    changes = re.findall(pattern, text, re.MULTILINE)
+    
+    # Extract and print the deleted and added code
+    changes_list = []
+    if changes:
+        for i, (_, _, deleted_code, _, _, added_code) in enumerate(changes, start=1):
+            # Strip whitespace and print the change
+            change_dict = {
+                "change": f"Change {i}: Deleted Code: {deleted_code.strip()}, Added Code: {added_code.strip()}"
+            }
+            changes_list.append(change_dict)
+    # Process changes_list as needed
+    return changes_list
+
+def extract_test_cases(text):
+    # Define a regular expression pattern to match Python function or method calls
+    pattern = r"def test_\w+\(.*?\):\s*(\w+\(.*?\))\s*==\s*(.*?)(?:\n|$)"
+    
+    # Use re.findall() to find all matches in the text
+    matches = re.findall(pattern, text, re.DOTALL)
+
+    test_cases = []
+    # Print the extracted test cases
+    for idx, (function_call, expected_output) in enumerate(matches, start=1):
+        test_case_dict = {"test_case_id": f"test_case_{idx}",
+                        "function_call": f"Function Call: {function_call}",
+                        "expected_output": f"Expected Output: {expected_output}"}
+        test_cases.append(test_case_dict)
+        
+    return test_cases
+
+def load_json(file_path):
+    # Check if file exists
+    if not os.path.isfile(file_path):
+        print(f"File {file_path} does not exist.")
+        return None
+
+    try:
+        # Load the JSON file
+        with open(file_path, 'r') as file:
+            return json.load(file)
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from file {file_path}: {e}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+    return None
+
+def read_file(file_path):
+    # Check if file exists
+    if not os.path.isfile(file_path):
+        print(f"File {file_path} does not exist.")
+        return None
+
+    try:
+        # Read the content of the file
+        with open(file_path, 'r') as file:
+            return file.read()
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+    return None
+
+def reformat_output(code):
+    # Define a regular expression pattern to match changes surrounded by braces
+    pattern = r'{(.*?)}'
+
+    # Use re.sub() to remove braces from each group
+    cleaned_code = re.sub(pattern, r'\1', code)
+    
+    return cleaned_code
+
+def process_file(id, bug_report, buggy_code, buggy_codex_repair, repaired_code, test_cases):
+    # Perform operations with the loaded JSON
+    # print(f"The first item in the JSON is: {extracted_data.get('items', [])[0]}")
+    changes = extract_changes(bug_report)
+    
+    if len(changes) > 0:
+        print(f"Found bug in {buggy_code}")
+        print(changes)
+        prompt = generate_prompt(test_cases, buggy_code, repaired_code, buggy_codex_repair, 
+                                    changes[0]["change"], changes[0]["change"], "", changes[0]["change"], "get_auto_test_case_test_refactored")
+        print(prompt)
+        response = llm.invoke(prompt)
+        # print("--------------")
+        # print(prompt)
+        # print("--------------")
+        # print(response)
+        response = reformat_output(response)
+        with open(f"input_test_refactored/{id}.py", "w") as file:
+            file.write(response)
+    
+    # print(test_cases)
+
+
+# name: 10000000000_1_change
+# buggycodex repaired
+# print(read_file("./dataset/test_cases/top1000/test_cases/buggycodex_repaired_source/10000000000_1_change/10000000000_1_change.py"))
+# original
+# print(read_file("./dataset/test_cases/top1000/test_cases/source_code/10000000000_1_change/10000000000_1_change.py"))
+# unit test
+# print(read_file("./dataset/test_cases/top1000/test_cases/unit_tests/10000000000_1_change/10000000000_1_change.py"))
+# report
+# print(read_file("./dataset/bug_info/top1000/bug_reports/10000000000_1_change/report.txt"))
+# repaired
+# print(read_file("./dataset/test_cases/top1000/test_cases/repaired_source/10000000000_1_change/10000000000_1_change.py"))
+
+# all needed file of a bug case
+# buggycodex repaired
+# bug_report
+# original
+# unit test
+# report
+# repaired
+case_path = "./dataset/test_cases/top1000/test_cases/unit_tests/"
+
+for file in os.listdir(case_path):
+    if file == ".DS_Store":
+        continue
+    # print(f"---{file}---")
+    # test_case_path = f"./dataset/test_cases/top1000/test_cases/unit_tests/{file}/{file}.py"
+    # print(test_case_path)
+    id = file
+    # original
+    unit_tests = read_file(f"./dataset/test_cases/top1000/test_cases/unit_tests/{file}/{file}.py")
+    # buggycodex repaired
+    buggycodex_repaired = read_file(f"./dataset/test_cases/top1000/test_cases/buggycodex_repaired_source/{file}/{file}.py")
+    # original
+    source = read_file(f"./dataset/test_cases/top1000/test_cases/source_code/{file}/{file}.py")
+    # report
+    report = read_file(f"./dataset/bug_info/top1000/bug_reports/{file}/report.txt")
+    # repaired
+    repaired = read_file(f"./dataset/test_cases/top1000/test_cases/repaired_source/{file}/{file}.py")
+
+    # print(unit_tests)
+    # print(buggycodex_repaired)
+    # print(source)
+    # print(report)
+    # print(repaired)
+    
+    print(f"Processing {file}")
+    process_file(id, report, source, buggycodex_repaired, repaired, unit_tests)
+    # if we need to use new input
+    # print(extract_output(response))
+    # print(answer_eval(extract_output(response), original))
+    # if it can extract answer correctly, move the question and answer into test cases csv file
+    # if answer_eval(extract_output(response), original) == 1:
+        # 1. write test case input and output to csv
+    # write_test_case("test_cases.csv", generate_input(test_cases[id]), generate_output(test_cases[id]))
+    # 2. write id and results of test case to csv
+    # write_result("test_cases_results.csv", id, extract_output(response))
+
+[FILEPATH] entry/compile_input.py [/FILEPATH]
+import os
+import pandas as pd
+import numpy as np
+import re
+import csv
+import json
+import ast
+import pdb
+import os
+
+## read input_test from test_cases.csv
+df = pd.read_csv("test_cases.csv")
+# print(df)
+inputs = list(df.iloc[:, 0])
+# print(inputs)
+for index, input in enumerate(inputs):
+    with open(f"./input_test/{index}.txt", "w") as file:
+        file.write(input)
+
+[FILEPATH] entry/compile_results.py [/FILEPATH]
+import os
+import pandas as pd
+import numpy as np
+import re
+import csv
+import json
+import ast
+import pdb
+import os
+
+## read input_test from test_cases.csv
+df = pd.read_csv("test_cases_results.csv")
+# print(df)
+results = list(df.iloc[:, 1])
+# print(inputs)
+with open(f"./input_test/results.txt", "w") as file:
+    for result in results:
+        file.write(result)
+        file.write("\n")
+
+[FILEPATH] entry/main.py [/FILEPATH]
+import os
+import pandas as pd
+import numpy as np
+import re
+import csv
+import json
+import ast
+from baseb import generate_prompt, extract_output, answer_eval
+import pdb
+import os
+from litellm import completion
+# Question 3 Code ------------------------------------------ 
+id = 3
+question_name = 'q' + str(id)
+
+# Prompt 1 Code -------------------------------------------- 
+filepath = f"{question_name}.py"
+file_content = open(filepath, "r").read()
+buggy_code, buggy_code_end = re.split(r"\n\n.*\n\n", file_content, maxsplit=1)
+prompt = generate_prompt("", buggy_code, "", "", "", "", "", "", "get_auto_test_case_test", "func") ## change func to question
+print(prompt)
+
+# Output 1 Code -------------------------------------------- 
+prompt_count = 1
+llm = "gpt-4-1106-preview"
+
+filename = "combined_prompt_new_test.txt" 
+with open(filename, 'w') as file: 
+    file.write(prompt) 
+
+response = completion(prompt, model=llm, num_retries=5, max_tokens=512)
+# print("--------------")
+# print(prompt)
+# print("--------------")
+# print(response)
+# original: 4
+original = "6"
+with open(f"./output_test/{id}.txt", "w") as file:
+    file.write(response.choices[0].message.content)
+print(f"Prompt {prompt_count}:")
+print(f"Response: {response.choices[0].message.content}")
+# print(extract_output(response))
+print(answer_eval(extract_output(response), original))
+# if it can extract answer correctly, move the question and answer into test cases csv file
+if answer_eval(extract_output(response), original) == 1:
+    # 1. write test case input and output to csv
+    write_test_case("test_cases.csv", generate_input(test_cases[id]), generate_output(test_cases[id]))
+    # 2. write id and results of test case to csv
+    write_result("test_cases_results.csv", id, extract_output(response))
+

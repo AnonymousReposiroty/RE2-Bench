@@ -1,0 +1,281 @@
+[THOUGHT]
+Given input: f = [1, 0, -1]. This is a list, so the code takes the first branch (line 41). 
+
+First loop (line 49): for coeff in f:
+- f is the list [1, 0, -1].
+- The loop runs three times.
+- Iteration 1: coeff = 1
+- Iteration 2: coeff = 0
+- Iteration 3: coeff = -1
+So coeff state: [1, 0, -1].
+f state: since f does not change during the loop, its value is [1, 0, -1] at each iteration. So we repeat it three times: [[1,0,-1], [1,0,-1], [1,0,-1]].
+
+After the loop, f becomes a Poly representing x^2 - 1.
+
+Later, after preprocessing, we reach line 167: elif f.length() == 2: 
+For f = Poly(x^2 - 1), f.length() is 2 and degree is 2, so roots_fun is set to roots_quadratic.
+Then line 169: for r in roots_fun(f):
+roots_quadratic(f) returns the roots of x^2 - 1, which are -1 and 1 (order likely [-1, 1]).
+So the loop runs two times.
+Iteration 1: r = -1
+Iteration 2: r = 1
+So r state: [-1, 1].
+roots_fun(f) evaluates to the list [-1, 1]. Since it is the same for both iterations, we repeat it twice: [[-1, 1], [-1, 1]].
+
+Thus, the annotations are:
+Line 49: coeff=[1,0,-1], f=[[1,0,-1],[1,0,-1],[1,0,-1]]
+Line 171: r=[-1,1], roots_fun(f)=[[-1,1],[-1,1]]
+[/THOUGHT]
+
+[ANSWER]
+1 from __future__ import print_function, division
+2 import math
+3 from sympy.core.symbol import Dummy, Symbol, symbols
+4 from sympy.core import S, I, pi
+5 from sympy.core.compatibility import ordered
+6 from sympy.core.mul import expand_2arg, Mul
+7 from sympy.core.power import Pow
+8 from sympy.core.relational import Eq
+9 from sympy.core.sympify import sympify
+10 from sympy.core.numbers import Rational, igcd, comp
+11 from sympy.core.exprtools import factor_terms
+12 from sympy.core.logic import fuzzy_not
+13 from sympy.ntheory import divisors, isprime, nextprime
+14 from sympy.functions import exp, sqrt, im, cos, acos, Piecewise
+15 from sympy.functions.elementary.miscellaneous import root
+16 from sympy.polys.polytools import Poly, cancel, factor, gcd_list, discriminant
+17 from sympy.polys.specialpolys import cyclotomic_poly
+18 from sympy.polys.polyerrors import (PolynomialError, GeneratorsNeeded,
+19     DomainError)
+20 from sympy.polys.polyquinticconst import PolyQuintic
+21 from sympy.polys.rationaltools import together
+22 from sympy.simplify import simplify, powsimp
+23 from sympy.utilities import public
+24 from sympy.core.compatibility import reduce, range
+25 from sympy.solvers.solvers import solve as _solve
+26 from sympy.polys.polytools import to_rational_coeffs
+27 
+28 def roots(f, *gens, **flags):
+29     from sympy.polys.polytools import to_rational_coeffs
+30     flags = dict(flags)
+31 
+32     auto = flags.pop('auto', True)
+33     cubics = flags.pop('cubics', True)
+34     trig = flags.pop('trig', False)
+35     quartics = flags.pop('quartics', True)
+36     quintics = flags.pop('quintics', False)
+37     multiple = flags.pop('multiple', False)
+38     filter = flags.pop('filter', None)
+39     predicate = flags.pop('predicate', None)
+40 
+41     if isinstance(f, list):
+42         if gens:
+43             raise ValueError('redundant generators given')
+44 
+45         x = Dummy('x')
+46 
+47         poly, i = {}, len(f) - 1
+48 
+49         for coeff in f:## [STATE]coeff=[1,0,-1][/STATE] [STATE]f=[[1,0,-1],[1,0,-1],[1,0,-1]][/STATE]
+50             poly[i], i = sympify(coeff), i - 1
+51 
+52         f = Poly(poly, x, field=True)
+53     else:
+54         try:
+55             f = Poly(f, *gens, **flags)
+56             if f.length == 2 and f.degree() != 1:
+57 
+58                 n = f.degree()
+59                 npow_bases = []
+60                 expr = f.as_expr()
+61                 con = expr.as_independent(*gens)[0]
+62                 for p in Mul.make_args(con):
+63                     if p.is_Pow and not p.exp % n:
+64                         npow_bases.append(p.base**(p.exp/n))
+65                     else:
+66                         other.append(p)
+67                     if npow_bases:
+68                         b = Mul(*npow_bases)
+69                         B = Dummy()
+70                         d = roots(Poly(expr - con + B**n*Mul(*others), *gens,
+71                             **flags), *gens, **flags)
+72                         rv = {}
+73                         for k, v in d.items():
+74                             rv[k.subs(B, b)] = v
+75                         return rv
+76 
+77         except GeneratorsNeeded:
+78             if multiple:
+79                 return []
+80             else:
+81                 return {}
+82 
+83     if f.is_multivariate:
+84         raise PolynomialError('multivariate polynomials are not supported')
+85 
+86     def _update_dict(result, root, k):
+87         if root in result:
+88             result[root] += k
+89         else:
+90             result[root] = k
+91 
+92     def _try_decompose(f):
+93         factors, roots = f.decompose(), []
+94 
+95         for root in _try_heuristics(factors[0]):
+96             roots.append(root)
+97 
+98         for factor in factors[1:]:
+99             previous, roots = list(roots), []
+100 
+101             for root in previous:
+102                 g = factor - Poly(root, f.gen)
+103 
+104                 for root in _try_heuristics(g):
+105                     roots.append(root)
+106 
+107         return roots
+108 
+109     def _try_heuristics(f):
+110         if f.is_ground:
+111             return []
+112         if f.is_monomial:
+113             return [S(0)]*f.degree()
+114 
+115         if f.length() == 2:
+116             if f.degree() == 1:
+117                 return list(map(cancel, roots_linear(f)))
+118             else:
+119                 return roots_binomial(f)
+120 
+121         result = []
+122 
+123         for i in [-1, 1]:
+124             if not f.eval(i):
+125                 f = f.quo(Poly(f.gen - i, f.gen))
+126                 result.append(i)
+127                 break
+128 
+129         n = f.degree()
+130 
+131         if n == 1:
+132             result += list(map(cancel, roots_linear(f)))
+133         elif n == 2:
+134             result += list(map(cancel, roots_quadratic(f)))
+135         elif f.is_cyclotomic:
+136             result += roots_cyclotomic(f)
+137         elif n == 3 and cubics:
+138             result += roots_cubic(f, trig=trig)
+139         elif n == 4 and quartics:
+140             result += roots_quartic(f)
+141         elif n == 5 and quintics:
+142             result += roots_quintic(f)
+143 
+144         return result
+145 
+146     (k,), f = f.terms_gcd()
+147 
+148     if not k:
+149         zeros = {}
+150     else:
+151         zeros = {S(0): k}
+152 
+153     coeff, f = preprocess_roots(f)
+154 
+155     if auto and f.get_domain().is_Ring:
+156         f = f.to_field()
+157 
+158     rescale_x = None
+159     translate_x = None
+160 
+161     result = {}
+162 
+163     if not f.is_ground:
+164         if not f.get_domain().is_Exact:
+165             for r in f.nroots():
+166                 _update_dict(result, r, 1)
+167         elif f.degree() == 1:
+168             result[roots_linear(f)[0]] = 1
+169         elif f.length() == 2:
+170             roots_fun = roots_quadratic if f.degree() == 2 else roots_binomial
+171             for r in roots_fun(f): ## [STATE]r=[-1,1][/STATE] [STATE]roots_fun(f)=[[-1,1],[-1,1]][/STATE]
+172                 _update_dict(result, r, 1)
+173         else:
+174             _, factors = Poly(f.as_expr()).factor_list()
+175             if len(factors) == 1 and f.degree() == 2:
+176                 for r in roots_quadratic(f):
+177                     _update_dict(result, r, 1)
+178             else:
+179                 if len(factors) == 1 and factors[0][1] == 1:
+180                     if f.get_domain().is_EX:
+181                         res = to_rational_coeffs(f)
+182                         if res:
+183                             if res[0] is None:
+184                                 translate_x, f = res[2:]
+185                             else:
+186                                 rescale_x, f = res[1], res[-1]
+187                             result = roots(f)
+188                             if not result:
+189                                 for root in _try_decompose(f):
+190                                     _update_dict(result, root, 1)
+191                         else:
+192                             for r in _try_heuristics(f):
+193                                 _update_dict(result, r, 1)
+194                     else:
+195                         for root in _try_decompose(f):
+196                             _update_dict(result, root, 1)
+197                 else:
+198                     for factor, k in factors:
+199                         for r in _try_heuristics(Poly(factor, f.gen, field=True)):
+200                             _update_dict(result, r, k)
+201 
+202     if coeff is not S.One:
+203         _result, result, = result, {}
+204 
+205         for root, k in _result.items():
+206             result[coeff*root] = k
+207 
+208     result.update(zeros)
+209 
+210     if filter not in [None, 'C']:
+211         handlers = {
+212             'Z': lambda r: r.is_Integer,
+213             'Q': lambda r: r.is_Rational,
+214             'R': lambda r: r.is_real,
+215             'I': lambda r: r.is_imaginary,
+216         }
+217 
+218         try:
+219             query = handlers[filter]
+220         except KeyError:
+221             raise ValueError("Invalid filter: %s" % filter)
+222 
+223         for zero in dict(result).keys():
+224             if not query(zero):
+225                 del result[zero]
+226 
+227     if predicate is not None:
+228         for zero in dict(result).keys():
+229             if not predicate(zero):
+230                 del result[zero]
+231     if rescale_x:
+232         result1 = {}
+233         for k, v in result.items():
+234             result1[k*rescale_x] = v
+235         result = result1
+236     if translate_x:
+237         result1 = {}
+238         for k, v in result.items():
+239             result1[k + translate_x] = v
+240         result = result1
+241 
+242     if not multiple:
+243         return result
+244     else:
+245         zeros = []
+246 
+247         for zero in ordered(result):
+248             zeros.extend([zero]*result[zero])
+249 
+250         return zeros
+[/ANSWER]

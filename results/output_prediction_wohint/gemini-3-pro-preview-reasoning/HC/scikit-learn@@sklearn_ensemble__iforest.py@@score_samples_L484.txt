@@ -1,0 +1,83 @@
+To predict the output of `score_samples`, we follow the execution path using the provided object state and input arguments.
+
+**1. Input Analysis**
+*   **Object State (`self`)**: A fitted `IsolationForest`.
+    *   `n_estimators`: 3
+    *   `_max_samples`: 2 (derived from `max_samples=1.0` and `_n_samples=2`, or explicitly set).
+    *   `estimators_`: 3 `ExtraTreeRegressor` objects.
+    *   `_decision_path_lengths`: Arrays containing depth information for nodes in each tree.
+        *   Tree 0: `[1]` (Single node, likely root-only).
+        *   Tree 1: `[1, 2, 2]` (Three nodes: Root + 2 children).
+        *   Tree 2: `[1]` (Single node).
+    *   `_average_path_length_per_tree`: Correction factors for unbuilt subtrees.
+        *   Tree 0: `[0.]`
+        *   Tree 1: `[1., 0., 0.]`
+        *   Tree 2: `[0.]`
+*   **Argument (`X`)**: A 2x2 array `[[2, 1], [1, 1]]`. `n_samples` = 2.
+
+**2. Simulation of `score_samples(X)`**
+*   The method validates `X` (converted to 2D numpy array) and calls `self._score_samples(X)`.
+*   `_score_samples` calls `self._compute_chunked_score_samples(X)` and negates the result.
+*   `_compute_chunked_score_samples` calculates `scores`.
+
+**3. Inside `_compute_score_samples(X)`**
+*   **Parameters**:
+    *   `n_samples` = 2.
+    *   `subsample_features` = False (since `max_features`=2 equals `X.shape[1]`). features passed as `None`.
+*   **Denominator Calculation**:
+    *   `average_path_length_max_samples` = `_average_path_length([self._max_samples])`.
+    *   `_max_samples` = 2.
+    *   Using the standard Isolation Forest formula logic (or sklearn implementation):
+        *   For $n=2$, the average path length $c(n)$ of an unsuccessful search in a BST is $1.0$.
+        *   Formula: $c(2) = 2H(1) - 2(1)/2 = 2(1) - 1 = 1$.
+        *   So, `average_path_length_max_samples` = 1.0.
+    *   `denominator` = `len(estimators_)` * 1.0 = 3 * 1.0 = **3.0**.
+
+*   **Tree Depth Calculation (`_parallel_compute_tree_depths`)**:
+    We determine the path length for each sample in each tree by looking at the leaf node it falls into. The depth of a sample is the sum of `decision_path_lengths[node]` and `average_path_length_per_tree[node]`.
+
+    *   **Tree 0**:
+        *   Structure: `[1]` (Node 0). `avg`=`[0.]`.
+        *   This is a root-only tree (failed to split or max_depth reached).
+        *   All samples fall into Node 0.
+        *   Depth contribution = `decision_path_lengths[0]` + `avg[0]` = 1 + 0 = **1.0**.
+
+    *   **Tree 1**:
+        *   Structure: `decision_path`=`[1, 2, 2]`. `avg`=`[1., 0., 0.]`.
+        *   Nodes: Root (0), Left (1), Right (2).
+        *   The tree splits. With `X` having distinct rows `[2, 1]` and `[1, 1]` and `max_features=2`, a split is possible (on feature 0).
+        *   Row `X[0]` (`[2, 1]`) and `X[1]` (`[1, 1]`) will be separated by any threshold in $(1, 2)$ on feature 0.
+        *   Each sample falls into one of the leaves (index 1 or 2).
+        *   For both leaves (indices 1 and 2): `decision_path_lengths` is 2, `avg` is 0.
+        *   Depth contribution = 2 + 0 = **2.0**.
+
+    *   **Tree 2**:
+        *   Structure: `[1]`. `avg`=`[0.]`.
+        *   Same as Tree 0.
+        *   Depth contribution = 1 + 0 = **1.0**.
+
+*   **Aggregation for `X`**:
+    *   `depths` (accumulator) for both Sample 0 and Sample 1:
+        *   Sum = $1.0$ (Tree 0) + $2.0$ (Tree 1) + $1.0$ (Tree 2) = **4.0**.
+
+*   **Score Calculation**:
+    *   Formula: $S = 2^{-\frac{E(h(x))}{c(n)}}$.
+    *   Here, calculation vectorizes as: `scores = 2 ** (- (depths / denominator))`.
+    *   `depths` = 4.0. `denominator` = 3.0.
+    *   Ratio = $4/3 \approx 1.3333$.
+    *   $Score = 2^{-1.3333...}$.
+    *   Calculation: $2^{-4/3} = \frac{1}{\sqrt[3]{2^4}} = \frac{1}{2 \cdot \sqrt[3]{2}} \approx \frac{1}{2.5198} \approx 0.39685$.
+    *   Values: `[0.39685026, 0.39685026]`.
+
+**4. Final Output Construction**
+*   `_score_samples` returns `-scores`.
+*   Result: `[-0.39685026, -0.39685026]`.
+
+[OUTPUT]
+```json
+[
+    -0.39685026,
+    -0.39685026
+]
+```
+[/OUTPUT]

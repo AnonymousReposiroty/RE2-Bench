@@ -1,0 +1,722 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. You need to predict output variable values, and print output between [OUTPUT] and [/OUTPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[PYTHON]
+from typing import TYPE_CHECKING, overload, Literal
+from collections.abc import Iterable, Mapping
+from .basic import Basic, Atom
+from .singleton import S
+from .evalf import EvalfMixin, pure_complex, DEFAULT_MAXPREC
+from .decorators import call_highest_priority, sympify_method_args, sympify_return
+from .sorting import default_sort_key
+from .mul import Mul
+from .add import Add
+from typing import Any, Hashable
+from typing_extensions import Self
+from .exprtools import decompose_power
+from sympy.functions.elementary.exponential import exp
+from sympy.functions.elementary.exponential import exp, log
+from sympy.polys.polytools import factor
+
+@sympify_method_args
+class Expr(Basic, EvalfMixin):
+    __slots__: tuple[str, ...] = ()
+    if TYPE_CHECKING:
+
+        def __new__(cls, *args: Basic) -> Self:
+            ...
+
+        @overload
+        def subs(self, arg1: Mapping[Basic | complex, Expr | complex], arg2: None=None) -> Expr:
+            ...
+
+        @overload
+        def subs(self, arg1: Iterable[tuple[Basic | complex, Expr | complex]], arg2: None=None, **kwargs: Any) -> Expr:
+            ...
+
+        @overload
+        def subs(self, arg1: Expr | complex, arg2: Expr | complex) -> Expr:
+            ...
+
+        @overload
+        def subs(self, arg1: Mapping[Basic | complex, Basic | complex], arg2: None=None, **kwargs: Any) -> Basic:
+            ...
+
+        @overload
+        def subs(self, arg1: Iterable[tuple[Basic | complex, Basic | complex]], arg2: None=None, **kwargs: Any) -> Basic:
+            ...
+
+        @overload
+        def subs(self, arg1: Basic | complex, arg2: Basic | complex, **kwargs: Any) -> Basic:
+            ...
+
+        def subs(self, arg1: Mapping[Basic | complex, Basic | complex] | Basic | complex, arg2: Basic | complex | None=None, **kwargs: Any) -> Basic:
+            ...
+
+        def simplify(self, **kwargs) -> Expr:
+            ...
+
+        def evalf(self, n: int | None=15, subs: dict[Basic, Basic | float] | None=None, maxn: int=100, chop: bool | int=False, strict: bool=False, quad: str | None=None, verbose: bool=False) -> Expr:
+            ...
+        n = evalf
+    is_scalar = True
+    _op_priority = 10.0
+
+    def as_terms(self) -> tuple[list[tuple[Expr, Any]], list[Expr]]:
+        from .exprtools import decompose_power
+        gens_set, terms = (set(), [])
+        for term in Add.make_args(self):
+            coeff, _term = term.as_coeff_Mul()
+            coeff_complex = complex(coeff)
+            cpart, ncpart = ({}, [])
+            if _term is not S.One:
+                for factor in Mul.make_args(_term):
+                    if factor.is_number:
+                        try:
+                            coeff_complex *= complex(factor)
+                        except (TypeError, ValueError):
+                            pass
+                        else:
+                            continue
+                    if factor.is_commutative:
+                        base, exp = decompose_power(factor)
+                        cpart[base] = exp
+                        gens_set.add(base)
+                    else:
+                        ncpart.append(factor)
+            coeff_tuple = (coeff_complex.real, coeff_complex.imag)
+            ncpart_tuple = tuple(ncpart)
+            terms.append((term, (coeff_tuple, cpart, ncpart_tuple)))
+        gens = sorted(gens_set, key=default_sort_key)
+        k, indices = (len(gens), {})
+        for i, g in enumerate(gens):
+            indices[g] = i
+        result = []
+        for term, (coeff_tuple, cpart, ncpart_tuple) in terms:
+            monom = [0] * k
+            for base, exp in cpart.items():
+                monom[indices[base]] = exp
+            result.append((term, (coeff_tuple, tuple(monom), ncpart_tuple)))
+        return (result, gens)
+    __round__ = round
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.concrete.expr_with_limits.is_number
+
+@property
+def is_number(self):
+    """Return True if the Sum has no free symbols, else False."""
+    return not self.free_symbols
+
+sympy.sympy.core.assumptions.getit
+
+def getit(self):
+    try:
+        return self._assumptions[fact]
+    except KeyError:
+        if self._assumptions is self.default_assumptions:
+            self._assumptions = self.default_assumptions.copy()
+        return _ask(fact, self)
+
+sympy.sympy.core.basic.__hash__
+
+def __hash__(self) -> int:
+    # hash cannot be cached using cache_it because infinite recurrence
+    # occurs as hash is needed for setting cache dictionary keys
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+sympy.sympy.core.basic.__eq__
+
+def __eq__(self, other):
+    """Return a boolean indicating whether a == b on the basis of
+    their symbolic trees.
+
+    This is the same as a.compare(b) == 0 but faster.
+
+    Notes
+    =====
+
+    If a class that overrides __eq__() needs to retain the
+    implementation of __hash__() from a parent class, the
+    interpreter must be told this explicitly by setting
+    __hash__ : Callable[[object], int] = <ParentClass>.__hash__.
+    Otherwise the inheritance of __hash__() will be blocked,
+    just as if __hash__ had been explicitly set to None.
+
+    References
+    ==========
+
+    from https://docs.python.org/dev/reference/datamodel.html#object.__hash__
+    """
+    if self is other:
+        return True
+
+    if not isinstance(other, Basic):
+        return self._do_eq_sympify(other)
+
+    # check for pure number expr
+    if  not (self.is_Number and other.is_Number) and (
+            type(self) != type(other)):
+        return False
+    a, b = self._hashable_content(), other._hashable_content()
+    if a != b:
+        return False
+    # check number *in* an expression
+    for a, b in zip(a, b):
+        if not isinstance(a, Basic):
+            continue
+        if a.is_Number and type(a) != type(b):
+            return False
+    return True
+
+sympy.sympy.core.decorators._func
+
+@wraps(func)
+def _func(self, other):
+    # XXX: The check for _op_priority here should be removed. It is
+    # needed to stop mutable matrices from being sympified to
+    # immutable matrices which breaks things in quantum...
+    if not hasattr(other, '_op_priority'):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return retval
+    if not isinstance(other, expectedcls):
+        return retval
+    return func(self, other)
+
+sympy.sympy.core.expr.as_coeff_Mul
+
+def as_coeff_Mul(self, rational: bool = False) -> tuple['Number', Expr]:
+    """Efficiently extract the coefficient of a product."""
+    return S.One, self
+
+sympy.sympy.core.expr.__complex__
+
+def __complex__(self) -> complex:
+    result = self.evalf()
+    re, im = result.as_real_imag()
+    return complex(float(re), float(im))
+
+sympy.sympy.core.expr.is_number
+
+@property
+def is_number(self):
+    """Returns True if ``self`` has no free symbols and no
+    undefined functions (AppliedUndef, to be precise). It will be
+    faster than ``if not self.free_symbols``, however, since
+    ``is_number`` will fail as soon as it hits a free symbol
+    or undefined function.
+
+    Examples
+    ========
+
+    >>> from sympy import Function, Integral, cos, sin, pi
+    >>> from sympy.abc import x
+    >>> f = Function('f')
+
+    >>> x.is_number
+    False
+    >>> f(1).is_number
+    False
+    >>> (2*x).is_number
+    False
+    >>> (2 + Integral(2, x)).is_number
+    False
+    >>> (2 + Integral(2, (x, 1, 2))).is_number
+    True
+
+    Not all numbers are Numbers in the SymPy sense:
+
+    >>> pi.is_number, pi.is_Number
+    (True, False)
+
+    If something is a number it should evaluate to a number with
+    real and imaginary parts that are Numbers; the result may not
+    be comparable, however, since the real and/or imaginary part
+    of the result may not have precision.
+
+    >>> cos(1).is_number and cos(1).is_comparable
+    True
+
+    >>> z = cos(1)**2 + sin(1)**2 - 1
+    >>> z.is_number
+    True
+    >>> z.is_comparable
+    False
+
+    See Also
+    ========
+
+    sympy.core.basic.Basic.is_comparable
+    """
+    return all(obj.is_number for obj in self.args)
+
+sympy.sympy.core.exprtools.decompose_power
+
+def decompose_power(expr: Expr) -> tuple[Expr, int]:
+    """
+    Decompose power into symbolic base and integer exponent.
+
+    Examples
+    ========
+
+    >>> from sympy.core.exprtools import decompose_power
+    >>> from sympy.abc import x, y
+    >>> from sympy import exp
+
+    >>> decompose_power(x)
+    (x, 1)
+    >>> decompose_power(x**2)
+    (x, 2)
+    >>> decompose_power(exp(2*y/3))
+    (exp(y/3), 2)
+
+    """
+    base, exp = expr.as_base_exp()
+
+    if exp.is_Number:
+        if exp.is_Rational:
+            if not exp.is_Integer:
+                base = Pow(base, Rational(1, exp.q))  # type: ignore
+            e = exp.p  # type: ignore
+        else:
+            base, e = expr, 1
+    else:
+        exp, tail = exp.as_coeff_Mul(rational=True)
+
+        if exp is S.NegativeOne:
+            base, e = Pow(base, tail), -1
+        elif exp is not S.One:
+            tail = _keep_coeff(Rational(1, exp.q), tail)
+            base, e = Pow(base, tail), exp.p
+        else:
+            base, e = expr, 1
+
+    return base, e
+
+sympy.sympy.core.function.__eq__
+
+def __eq__(self, other):
+    if not isinstance(other, Subs):
+        return False
+    return self._hashable_content() == other._hashable_content()
+
+sympy.sympy.core.function.__hash__
+
+def __hash__(self):
+    return super().__hash__()
+
+sympy.sympy.core.mul.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False) -> tuple['Number', Expr]:
+    """
+    Efficiently extract the coefficient of a product.
+    """
+    coeff, args = self.args[0], self.args[1:]
+
+    if coeff.is_Number:
+        if not rational or coeff.is_Rational:
+            if len(args) == 1:
+                return coeff, args[0] # type: ignore
+            else:
+                return coeff, self._new_rawargs(*args) # type: ignore
+        elif coeff.is_extended_negative:
+            return S.NegativeOne, self._new_rawargs(*((-coeff,) + args))
+    return S.One, self
+
+sympy.sympy.core.numbers.__eq__
+
+def __eq__(self, other):
+    return other is S.Infinity or other == float('inf')
+
+sympy.sympy.core.numbers.__lt__
+
+def __lt__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p < other.p)
+    return Rational.__lt__(self, other)
+
+sympy.sympy.core.numbers.__gt__
+
+def __gt__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if other.is_Integer:
+        return _sympify(self.p > other.p)
+    return Rational.__gt__(self, other)
+
+sympy.sympy.core.numbers.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False):
+    """Efficiently extract the coefficient of a product."""
+    if not rational:
+        return self, S.One
+    return S.One, self
+
+sympy.sympy.core.operations.make_args
+
+@classmethod
+def make_args(cls: type[Basic], expr: Basic) -> tuple[Basic, ...]:
+    """
+    Return a sequence of elements `args` such that cls(*args) == expr
+
+    Examples
+    ========
+
+    >>> from sympy import Symbol, Mul, Add
+    >>> x, y = map(Symbol, 'xy')
+
+    >>> Mul.make_args(x*y)
+    (x, y)
+    >>> Add.make_args(x*y)
+    (x*y,)
+    >>> set(Add.make_args(x*y + y)) == set([y, x*y])
+    True
+
+    """
+    if isinstance(expr, cls):
+        return expr.args
+    else:
+        return (sympify(expr),)
+
+sympy.sympy.core.sorting.default_sort_key
+
+def default_sort_key(item, order=None):
+    """Return a key that can be used for sorting.
+
+    The key has the structure:
+
+    (class_key, (len(args), args), exponent.sort_key(), coefficient)
+
+    This key is supplied by the sort_key routine of Basic objects when
+    ``item`` is a Basic object or an object (other than a string) that
+    sympifies to a Basic object. Otherwise, this function produces the
+    key.
+
+    The ``order`` argument is passed along to the sort_key routine and is
+    used to determine how the terms *within* an expression are ordered.
+    (See examples below) ``order`` options are: 'lex', 'grlex', 'grevlex',
+    and reversed values of the same (e.g. 'rev-lex'). The default order
+    value is None (which translates to 'lex').
+
+    Examples
+    ========
+
+    >>> from sympy import S, I, default_sort_key, sin, cos, sqrt
+    >>> from sympy.core.function import UndefinedFunction
+    >>> from sympy.abc import x
+
+    The following are equivalent ways of getting the key for an object:
+
+    >>> x.sort_key() == default_sort_key(x)
+    True
+
+    Here are some examples of the key that is produced:
+
+    >>> default_sort_key(UndefinedFunction('f'))
+    ((0, 0, 'UndefinedFunction'), (1, ('f',)), ((1, 0, 'Number'),
+        (0, ()), (), 1), 1)
+    >>> default_sort_key('1')
+    ((0, 0, 'str'), (1, ('1',)), ((1, 0, 'Number'), (0, ()), (), 1), 1)
+    >>> default_sort_key(S.One)
+    ((1, 0, 'Number'), (0, ()), (), 1)
+    >>> default_sort_key(2)
+    ((1, 0, 'Number'), (0, ()), (), 2)
+
+    While sort_key is a method only defined for SymPy objects,
+    default_sort_key will accept anything as an argument so it is
+    more robust as a sorting key. For the following, using key=
+    lambda i: i.sort_key() would fail because 2 does not have a sort_key
+    method; that's why default_sort_key is used. Note, that it also
+    handles sympification of non-string items likes ints:
+
+    >>> a = [2, I, -I]
+    >>> sorted(a, key=default_sort_key)
+    [2, -I, I]
+
+    The returned key can be used anywhere that a key can be specified for
+    a function, e.g. sort, min, max, etc...:
+
+    >>> a.sort(key=default_sort_key); a[0]
+    2
+    >>> min(a, key=default_sort_key)
+    2
+
+    Notes
+    =====
+
+    The key returned is useful for getting items into a canonical order
+    that will be the same across platforms. It is not directly useful for
+    sorting lists of expressions:
+
+    >>> a, b = x, 1/x
+
+    Since ``a`` has only 1 term, its value of sort_key is unaffected by
+    ``order``:
+
+    >>> a.sort_key() == a.sort_key('rev-lex')
+    True
+
+    If ``a`` and ``b`` are combined then the key will differ because there
+    are terms that can be ordered:
+
+    >>> eq = a + b
+    >>> eq.sort_key() == eq.sort_key('rev-lex')
+    False
+    >>> eq.as_ordered_terms()
+    [x, 1/x]
+    >>> eq.as_ordered_terms('rev-lex')
+    [1/x, x]
+
+    But since the keys for each of these terms are independent of ``order``'s
+    value, they do not sort differently when they appear separately in a list:
+
+    >>> sorted(eq.args, key=default_sort_key)
+    [1/x, x]
+    >>> sorted(eq.args, key=lambda i: default_sort_key(i, order='rev-lex'))
+    [1/x, x]
+
+    The order of terms obtained when using these keys is the order that would
+    be obtained if those terms were *factors* in a product.
+
+    Although it is useful for quickly putting expressions in canonical order,
+    it does not sort expressions based on their complexity defined by the
+    number of operations, power of variables and others:
+
+    >>> sorted([sin(x)*cos(x), sin(x)], key=default_sort_key)
+    [sin(x)*cos(x), sin(x)]
+    >>> sorted([x, x**2, sqrt(x), x**3], key=default_sort_key)
+    [sqrt(x), x, x**2, x**3]
+
+    See Also
+    ========
+
+    ordered, sympy.core.expr.Expr.as_ordered_factors, sympy.core.expr.Expr.as_ordered_terms
+
+    """
+    from .basic import Basic
+    from .singleton import S
+
+    if isinstance(item, Basic):
+        return item.sort_key(order=order)
+
+    if iterable(item, exclude=str):
+        if isinstance(item, dict):
+            args = item.items()
+            unordered = True
+        elif isinstance(item, set):
+            args = item
+            unordered = True
+        else:
+            # e.g. tuple, list
+            args = list(item)
+            unordered = False
+
+        args = [default_sort_key(arg, order=order) for arg in args]
+
+        if unordered:
+            # e.g. dict, set
+            args = sorted(args)
+
+        cls_index, args = 10, (len(args), tuple(args))
+    else:
+        if not isinstance(item, str):
+            try:
+                item = sympify(item, strict=True)
+            except SympifyError:
+                # e.g. lambda x: x
+                pass
+            else:
+                if isinstance(item, Basic):
+                    # e.g int -> Integer
+                    return default_sort_key(item)
+                # e.g. UndefinedFunction
+
+        # e.g. str
+        cls_index, args = 0, (1, (str(item),))
+
+    return (cls_index, 0, item.__class__.__name__
+            ), args, S.One.sort_key(), S.One
+
+sympy.sympy.functions.special.hyper.is_number
+
+@property
+def is_number(self):
+    """ Returns true if expression has numeric data only. """
+    return not self.free_symbols
+
+sympy.sympy.logic.boolalg.__bool__
+
+def __bool__(self):
+    return False
+
+sympy.sympy.matrices.expressions.matexpr.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False):
+    """Efficiently extract the coefficient of a product."""
+    return S.One, self
+
+sympy.sympy.physics.vector.frame.__hash__
+
+def __hash__(self):
+    return (self._id[0].__hash__(), self._id[1]).__hash__()
+
+sympy.sympy.polys.rootoftools.is_commutative
+
+@property
+def is_commutative(self):
+    return True
+
+sympy.sympy.stats.rv.is_commutative
+
+@property
+def is_commutative(self):
+    return self.symbol.is_commutative
+
+sympy.sympy.vector.basisdependent.as_coeff_Mul
+
+def as_coeff_Mul(self, rational=False):
+    """Efficiently extract the coefficient of a product."""
+    return (S.One, self)
+
+
+[/PYTHON]
+What will be the output of `as_terms`, given the following input:
+[INPUT]
+```
+{
+    "self": "-w**2 - x**2 + y**2 + z**2",
+    "args": {},
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]

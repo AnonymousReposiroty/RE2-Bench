@@ -1,0 +1,554 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from sympy.core import S, Add, Mul, Pow, Eq, Expr, expand_mul, expand_multinomial
+from sympy.core.exprtools import decompose_power, decompose_power_rat
+
+def _parallel_dict_from_expr_no_gens(exprs, opt):
+    if opt.domain is not None:
+
+        def _is_coeff(factor):
+            return factor in opt.domain
+    elif opt.extension is True:
+
+        def _is_coeff(factor):
+            return factor.is_algebraic
+    elif opt.greedy is not False:
+
+        def _is_coeff(factor):
+            return factor is S.ImaginaryUnit
+    else:
+
+        def _is_coeff(factor):
+            return factor.is_number
+    gens, reprs = (set(), [])
+    for expr in exprs:
+        terms = []
+        if expr.is_Equality:
+            expr = expr.lhs - expr.rhs
+        for term in Add.make_args(expr):
+            coeff, elements = ([], {})
+            for factor in Mul.make_args(term):
+                if not _not_a_coeff(factor) and (factor.is_Number or _is_coeff(factor)):
+                    coeff.append(factor)
+                else:
+                    if opt.series is False:
+                        base, exp = decompose_power(factor)
+                        if exp < 0:
+                            exp, base = (-exp, Pow(base, -S.One))
+                    else:
+                        base, exp = decompose_power_rat(factor)
+                    elements[base] = elements.setdefault(base, 0) + exp
+                    gens.add(base)
+            terms.append((coeff, elements))
+        reprs.append(terms)
+    gens = _sort_gens(gens, opt=opt)
+    k, indices = (len(gens), {})
+    for i, g in enumerate(gens):
+        indices[g] = i
+    polys = []
+    for terms in reprs:
+        poly = {}
+        for coeff, term in terms:
+            monom = [0] * k
+            for base, exp in term.items():
+                monom[indices[base]] = exp
+            monom = tuple(monom)
+            if monom in poly:
+                poly[monom] += Mul(*coeff)
+            else:
+                poly[monom] = Mul(*coeff)
+        polys.append(poly)
+    return (polys, tuple(gens))
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.basic.__hash__
+
+def __hash__(self) -> int:
+    # hash cannot be cached using cache_it because infinite recurrence
+    # occurs as hash is needed for setting cache dictionary keys
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+sympy.sympy.core.basic.__eq__
+
+def __eq__(self, other):
+    """Return a boolean indicating whether a == b on the basis of
+    their symbolic trees.
+
+    This is the same as a.compare(b) == 0 but faster.
+
+    Notes
+    =====
+
+    If a class that overrides __eq__() needs to retain the
+    implementation of __hash__() from a parent class, the
+    interpreter must be told this explicitly by setting
+    __hash__ : Callable[[object], int] = <ParentClass>.__hash__.
+    Otherwise the inheritance of __hash__() will be blocked,
+    just as if __hash__ had been explicitly set to None.
+
+    References
+    ==========
+
+    from https://docs.python.org/dev/reference/datamodel.html#object.__hash__
+    """
+    if self is other:
+        return True
+
+    if not isinstance(other, Basic):
+        return self._do_eq_sympify(other)
+
+    # check for pure number expr
+    if  not (self.is_Number and other.is_Number) and (
+            type(self) != type(other)):
+        return False
+    a, b = self._hashable_content(), other._hashable_content()
+    if a != b:
+        return False
+    # check number *in* an expression
+    for a, b in zip(a, b):
+        if not isinstance(a, Basic):
+            continue
+        if a.is_Number and type(a) != type(b):
+            return False
+    return True
+
+sympy.sympy.core.cache.wrapper
+
+@wraps(func)
+def wrapper(*args, **kwargs):
+    try:
+        retval = cfunc(*args, **kwargs)
+    except TypeError as e:
+        if not e.args or not e.args[0].startswith('unhashable type:'):
+            raise
+        retval = func(*args, **kwargs)
+    return retval
+
+sympy.sympy.core.decorators._func
+
+@wraps(func)
+def _func(self, other):
+    # XXX: The check for _op_priority here should be removed. It is
+    # needed to stop mutable matrices from being sympified to
+    # immutable matrices which breaks things in quantum...
+    if not hasattr(other, '_op_priority'):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return retval
+    if not isinstance(other, expectedcls):
+        return retval
+    return func(self, other)
+
+sympy.sympy.core.decorators.__sympifyit_wrapper
+
+@wraps(func)
+def __sympifyit_wrapper(a, b):
+    try:
+        # If an external class has _op_priority, it knows how to deal
+        # with SymPy objects. Otherwise, it must be converted.
+        if not hasattr(b, '_op_priority'):
+            b = sympify(b, strict=True)
+        return func(a, b)
+    except SympifyError:
+        return retval
+
+sympy.sympy.core.exprtools.decompose_power
+
+def decompose_power(expr: Expr) -> tuple[Expr, int]:
+    """
+    Decompose power into symbolic base and integer exponent.
+
+    Examples
+    ========
+
+    >>> from sympy.core.exprtools import decompose_power
+    >>> from sympy.abc import x, y
+    >>> from sympy import exp
+
+    >>> decompose_power(x)
+    (x, 1)
+    >>> decompose_power(x**2)
+    (x, 2)
+    >>> decompose_power(exp(2*y/3))
+    (exp(y/3), 2)
+
+    """
+    base, exp = expr.as_base_exp()
+
+    if exp.is_Number:
+        if exp.is_Rational:
+            if not exp.is_Integer:
+                base = Pow(base, Rational(1, exp.q))  # type: ignore
+            e = exp.p  # type: ignore
+        else:
+            base, e = expr, 1
+    else:
+        exp, tail = exp.as_coeff_Mul(rational=True)
+
+        if exp is S.NegativeOne:
+            base, e = Pow(base, tail), -1
+        elif exp is not S.One:
+            tail = _keep_coeff(Rational(1, exp.q), tail)
+            base, e = Pow(base, tail), exp.p
+        else:
+            base, e = expr, 1
+
+    return base, e
+
+sympy.sympy.core.exprtools.decompose_power_rat
+
+def decompose_power_rat(expr: Expr) -> tuple[Expr, Rational]:
+    """
+    Decompose power into symbolic base and rational exponent;
+    if the exponent is not a Rational, then separate only the
+    integer coefficient.
+
+    Examples
+    ========
+
+    >>> from sympy.core.exprtools import decompose_power_rat
+    >>> from sympy.abc import x
+    >>> from sympy import sqrt, exp
+
+    >>> decompose_power_rat(sqrt(x))
+    (x, 1/2)
+    >>> decompose_power_rat(exp(-3*x/2))
+    (exp(x/2), -3)
+
+    """
+    base, exp = expr.as_base_exp()
+    if not exp.is_Rational:
+        base, exp_i = decompose_power(expr)
+        exp = Integer(exp_i)
+    return base, exp # type: ignore
+
+sympy.sympy.core.function.__eq__
+
+def __eq__(self, other):
+    if not isinstance(other, Subs):
+        return False
+    return self._hashable_content() == other._hashable_content()
+
+sympy.sympy.core.function.__hash__
+
+def __hash__(self):
+    return super().__hash__()
+
+sympy.sympy.core.numbers.__hash__
+
+def __hash__(self):
+    return super().__hash__()
+
+sympy.sympy.core.numbers.__add__
+
+def __add__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(self.p + other)
+        elif isinstance(other, Integer):
+            return Integer(self.p + other.p)
+        elif isinstance(other, Rational):
+            return Rational._new(self.p*other.q + other.p, other.q, 1)
+        return Rational.__add__(self, other)
+    else:
+        return Add(self, other)
+
+sympy.sympy.core.numbers.__radd__
+
+def __radd__(self, other):
+    if global_parameters.evaluate:
+        if isinstance(other, int):
+            return Integer(other + self.p)
+        elif isinstance(other, Rational):
+            return Rational._new(other.p + self.p*other.q, other.q, 1)
+        return Rational.__radd__(self, other)
+    return Rational.__radd__(self, other)
+
+sympy.sympy.core.numbers.__neg__
+
+@staticmethod
+def __neg__():
+    return S.NegativeOne
+
+sympy.sympy.core.operations.make_args
+
+@classmethod
+def make_args(cls: type[Basic], expr: Basic) -> tuple[Basic, ...]:
+    """
+    Return a sequence of elements `args` such that cls(*args) == expr
+
+    Examples
+    ========
+
+    >>> from sympy import Symbol, Mul, Add
+    >>> x, y = map(Symbol, 'xy')
+
+    >>> Mul.make_args(x*y)
+    (x, y)
+    >>> Add.make_args(x*y)
+    (x*y,)
+    >>> set(Add.make_args(x*y + y)) == set([y, x*y])
+    True
+
+    """
+    if isinstance(expr, cls):
+        return expr.args
+    else:
+        return (sympify(expr),)
+
+sympy.sympy.core.relational.lhs
+
+@property
+def lhs(self) -> Basic:
+    """The left-hand side of the relation."""
+    return self._args[0]
+
+sympy.sympy.core.relational.rhs
+
+@property
+def rhs(self) -> Basic:
+    """The right-hand side of the relation."""
+    return self._args[1]
+
+sympy.sympy.physics.vector.frame.__hash__
+
+def __hash__(self):
+    return (self._id[0].__hash__(), self._id[1]).__hash__()
+
+sympy.sympy.polys.polyoptions.getter
+
+@property
+def getter(self):
+    try:
+        return self[cls.option]
+    except KeyError:
+        return cls.default()
+
+sympy.sympy.polys.polyutils._not_a_coeff
+
+def _not_a_coeff(expr):
+    """Do not treat NaN and infinities as valid polynomial coefficients. """
+    if type(expr) in illegal_types or expr in finf:
+        return True
+    if isinstance(expr, float) and float(expr) != expr:
+        return True  # nan
+    return  # could be
+
+sympy.sympy.polys.polyutils._is_coeff
+
+def _is_coeff(factor):
+    return factor.is_number
+
+sympy.sympy.polys.polyutils._sort_gens
+
+def _sort_gens(gens, **args):
+    """Sort generators in a reasonably intelligent way. """
+    opt = build_options(args)
+
+    gens_order, wrt = {}, None
+
+    if opt is not None:
+        gens_order, wrt = {}, opt.wrt
+
+        for i, gen in enumerate(opt.sort):
+            gens_order[gen] = i + 1
+
+    def order_key(gen):
+        gen = str(gen)
+
+        if wrt is not None:
+            try:
+                return (-len(wrt) + wrt.index(gen), gen, 0)
+            except ValueError:
+                pass
+
+        name, index = _re_gen.match(gen).groups()
+
+        if index:
+            index = int(index)
+        else:
+            index = 0
+
+        try:
+            return ( gens_order[name], name, index)
+        except KeyError:
+            pass
+
+        try:
+            return (_gens_order[name], name, index)
+        except KeyError:
+            pass
+
+        return (_max_order, name, index)
+
+    try:
+        gens = sorted(gens, key=order_key)
+    except TypeError:  # pragma: no cover
+        pass
+
+    return tuple(gens)
+
+
+[/PYTHON]
+What will be the input of `_parallel_dict_from_expr_no_gens`, given the following output:
+[OUTPUT]
+```
+{
+    "output": [
+        [
+            {
+                "(1,)": "1"
+            }
+        ],
+        [
+            "cos(phi)"
+        ]
+    ]
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {},
+    "args": {
+        "exprs": XXX,
+        "opt": {
+            "fraction": XXX
+        }
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

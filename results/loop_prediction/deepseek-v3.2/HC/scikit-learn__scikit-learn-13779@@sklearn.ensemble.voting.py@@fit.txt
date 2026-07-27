@@ -1,0 +1,91 @@
+[THOUGHT]
+The input provides `self.estimators` as null, which will cause the code to raise an `AttributeError` at line 32 because `self.estimators is None`. The loop at line 65 is inside the `fit` method, but since an error occurs earlier, the loop never executes. Therefore, variables `k`, `e`, and `zip(self.estimators, self.estimators_)` remain undefined in the execution context. However, according to the annotation requirement, we need to predict the state of variables in loops based on tracing the code. Since the loop is never reached, the variables are not assigned any values through iterations. But the loop is defined, so we consider the loop would run zero times. Thus, `k` and `e` would be empty lists, and `zip(self.estimators, self.estimators_)` would be an empty zip object, but we need to represent it as a list for state annotation.
+
+Given `self.estimators` is `null` (None), and `self.estimators_` is not defined because the parallel fitting step (lines 59-62) is not reached, `zip(self.estimators, self.estimators_)` would attempt to zip `None` with `self.estimators_`, but since an error occurs before that, the zip is not evaluated. However, for annotation, we should consider the intended loop: it would iterate zero times because `self.estimators` is None, so `zip(None, ...)` would raise an error, but the loop is not reached. In practice, the error at line 32-35 stops execution. Therefore, the loop does not run at all. So, `k` and `e` are never assigned, and the zip expression is not evaluated. But to replace "??", we need to provide lists. Since there are zero iterations, the lists should be empty.
+
+Thus:
+- `k`: [] (empty list)
+- `e`: [] (empty list)
+- `zip(self.estimators, self.estimators_)`: [] (empty list, because zip of nothing yields nothing)
+
+However, note that `self.estimators` is None, so `zip(None, ...)` is invalid, but again, the loop isn't reached. For annotation, we represent the zip result as an empty list.
+
+But wait, the error occurs because `self.estimators` is None, so the condition `if self.estimators is None or len(self.estimators) == 0:` at line 32 is True, raising AttributeError. Thus, the loop is never entered. So the state lists are empty.
+
+[/THOUGHT]
+
+[ANSWER]
+1 import numpy as np
+2 from abc import abstractmethod
+3 from ..base import ClassifierMixin
+4 from ..base import RegressorMixin
+5 from ..base import TransformerMixin
+6 from ..base import clone
+7 from ..preprocessing import LabelEncoder
+8 from ..utils._joblib import Parallel, delayed
+9 from ..utils.validation import has_fit_parameter, check_is_fitted
+10 from ..utils.metaestimators import _BaseComposition
+11 from ..utils import Bunch
+12 
+13 class _BaseVoting(_BaseComposition, TransformerMixin):
+14     _required_parameters = ['estimators']
+15 
+16     @property
+17     def named_estimators(self):
+18         return Bunch(**dict(self.estimators))
+19 
+20     @property
+21     def _weights_not_none(self):
+22         if self.weights is None:
+23             return None
+24         return [w for est, w in zip(self.estimators,
+25                                     self.weights) if est[1] is not None]
+26 
+27     def _predict(self, X):
+28         return np.asarray([clf.predict(X) for clf in self.estimators_]).T
+29 
+30     @abstractmethod
+31     def fit(self, X, y, sample_weight=None):
+32         if self.estimators is None or len(self.estimators) == 0:
+33             raise AttributeError('Invalid `estimators` attribute, `estimators`'
+34                                  ' should be a list of (string, estimator)'
+35                                  ' tuples')
+36 
+37         if (self.weights is not None and
+38                 len(self.weights) != len(self.estimators)):
+39             raise ValueError('Number of `estimators` and weights must be equal'
+40                              '; got %d weights, %d estimators'
+41                              % (len(self.weights), len(self.estimators)))
+42 
+43         if sample_weight is not None:
+44             for name, step in self.estimators:
+45                 if step is None:
+46                     continue
+47                 if not has_fit_parameter(step, 'sample_weight'):
+48                     raise ValueError('Underlying estimator \'%s\' does not'
+49                                      ' support sample weights.' % name)
+50 
+51         names, clfs = zip(*self.estimators)
+52         self._validate_names(names)
+53 
+54         n_isnone = np.sum([clf is None for _, clf in self.estimators])
+55         if n_isnone == len(self.estimators):
+56             raise ValueError('All estimators are None. At least one is '
+57                              'required!')
+58 
+59         self.estimators_ = Parallel(n_jobs=self.n_jobs)(
+60                 delayed(_parallel_fit_estimator)(clone(clf), X, y,
+61                                                  sample_weight=sample_weight)
+62                 for clf in clfs if clf is not None)
+63 
+64         self.named_estimators_ = Bunch()
+65         for k, e in zip(self.estimators, self.estimators_):## [STATE]k=[]][/STATE] [STATE]e=[]][/STATE] [STATE]zip(self.estimators, self.estimators_)=[]][/STATE]
+66             self.named_estimators_[k[0]] = e
+67         return self
+68 
+69     def set_params(self, **params):
+70         return self._set_params('estimators', **params)
+71 
+72     def get_params(self, deep=True):
+73         return self._get_params('estimators', deep=deep)
+[/ANSWER]

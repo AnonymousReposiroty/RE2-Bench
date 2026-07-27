@@ -1,0 +1,90 @@
+To predict the output, I will simulate the execution of `factor_terms` with the input string `"2*x/(a**2*x**2 - a**2*y**2)"`.
+
+1.  **`sympify(expr)`**: The input string is converted into a SymPy expression.
+    -   The numerator is `2*x`.
+    -   The denominator is `a**2*x**2 - a**2*y**2`.
+    -   The expression represents $\frac{2x}{a^2 x^2 - a^2 y^2}$.
+
+2.  **`do(expr)`**: The internal recursive function `do` is called on the expression.
+
+    *   The top-level expression is a `Mul` object (representing the fraction): $2 \cdot x \cdot (a^2 x^2 - a^2 y^2)^{-1}$.
+    *   It's an instance of `Basic` and not an `Atom`.
+    *   It's not iterable.
+    *   It has `args_cnc` attribute (standard for `Mul` and `Add`).
+
+    The `do` function checks specific types.
+    *   `if expr.is_Pow or expr.is_Function or is_iterable ...`
+        Since the expression is likely treated as a `Mul`, let's look at its arguments. The arguments of the `Mul` are `2`, `x`, and `(a**2*x**2 - a**2*y**2)**(-1)`.
+        The logic inside `do` iterates over args recursively: `newargs = tuple([do(i) for i in args])`.
+
+        Let's look at the third argument: `(a**2*x**2 - a**2*y**2)**(-1)`. This is a `Pow`.
+        - Inside `do` for this `Pow`:
+            - It recursively calls `do` on the base `a**2*x**2 - a**2*y**2`.
+
+        - Inside `do` for the base `a**2*x**2 - a**2*y**2` (which is an `Add`):
+            - `cont, p = expr.as_content_primitive(...)`
+                - This extracts the common content. Here, $a^2$ is common to both terms.
+                - `cont` = $a^2$
+                - `p` = $x^2 - y^2$
+            - `if p.is_Add:` (True)
+                - `list_args` = `[do(a) for a in Add.make_args(p)]`
+                    - The args of $x^2 - y^2$ are $x^2$ and $-y^2$. `do` on these just returns them.
+                - It checks for negative extraction (not applicable here).
+                - `p = gcd_terms(p, ...)`
+                    - `gcd_terms` on $x^2 - y^2$ doesn't find common terms to factor out further within the Add structure itself that `as_content_primitive` didn't catch, or similar simplification. It effectively returns $x^2 - y^2$.
+            - `rv = _keep_coeff(cont, p, ...)`
+                - This reconstructs the expression as `cont * p`, i.e., $a^2(x^2 - y^2)$.
+
+        - Back to `do` for the `Pow` `(a**2(x^2 - y^2))**(-1)`:
+            - `args` were processed. The base became `a**2 * (x**2 - y**2)`.
+            - The `Pow` becomes $(a^2 (x^2 - y^2))^{-1}$.
+            - SymPy automatic simplification for `Pow` might distribute the exponent if it's a multiplication, resulting in $a^{-2} (x^2 - y^2)^{-1}$.
+
+    - Back to the top-level `Mul` `2 * x * a**(-2) * (x**2 - y**2)**(-1)`.
+    - `do` calls `as_content_primitive` on the whole `Mul`.
+        - Content of $\frac{2x}{a^2(x^2 - y^2)}$?
+        - `as_content_primitive` handles coefficients. The numeric content is 1 (or 2 depending on definition). The rational part handles coefficients.
+        - However, `factor_terms` is primarily looking inside `Add` terms to pull out factors.
+        - Since the top level is a `Mul`, `as_content_primitive` generally separates the numeric scalar content from the rest ("primitive").
+        - For `Mul`, `as_content_primitive` basically returns `(1, self)` unless there's a explicit accumulation of numbers.
+        - But critically, the recursive step on the arguments `do(i)` has already transformed the denominator term.
+        - The denominator term `(a**2*x**2 - a**2*y**2)**(-1)` was transformed into `a**-2 * (x**2 - y**2)**(-1)`.
+    - The `Mul` reconstructs itself with the new arguments: `2`, `x`, `a**-2`, `(x**2 - y**2)**(-1)`.
+    - This results in $\frac{2x}{a^2(x^2 - y^2)}$.
+
+    The function `factor_terms` is designed to factor out common terms from `Add` expressions. In this case, inside the denominator, $a^2$ is a common factor of $a^2x^2$ and $-a^2y^2$.
+    Original: `2*x/(a**2*x**2 - a**2*y**2)`
+    Factored Denominator: `a**2 * (x**2 - y**2)`
+    Resulting Expression: `2*x/(a**2*(x**2 - y**2))`
+
+    Let's double check simulation steps.
+    Input: `2*x/(a**2*x**2 - a**2*y**2)`
+    Representation: `Mul(2, x, Pow(Add(Mul(Pow(a, 2), Pow(x, 2)), Mul(Integer(-1), Pow(a, 2), Pow(y, 2))), Integer(-1)))`
+    
+    Call `do` on this Mul.
+    It iterates `args`. The interesting arg is the Pow.
+    Call `do` on `Pow(Add(...), -1)`.
+    It iterates args. Interesting arg is `Add(...)`.
+    Call `do` on `Add(Mul(a^2, x^2), Mul(-1, a^2, y^2))`.
+    It calls `as_content_primitive`.
+    `as_content_primitive` on `a^2 x^2 - a^2 y^2` returns `(a**2, x**2 - y**2)`.
+    `cont` = `a**2`. `p` = `x**2 - y**2`.
+    We reconstruct `Mul(a**2, x**2 - y**2)`.
+    
+    Back up to Pow. We now have `Pow(Mul(a**2, x**2 - y**2), -1)`.
+    SymPy flattens this automatically to `Mul(Pow(a, -2), Pow(x**2 - y**2, -1))`.
+    
+    Back up to top `Mul`.
+    Old args: `2`, `x`, `Pow(old_add, -1)`.
+    New args: `2`, `x`, `Pow(a, -2)`, `Pow(x**2 - y**2, -1)`.
+    
+    Total expression: `2 * x * a**(-2) * (x**2 - y**2)**(-1)`.
+    String representation: `2*x/(a**2*(x**2 - y**2))`
+
+[OUTPUT]
+```
+{
+    "output": "2*x/(a**2*(x**2 - y**2))"
+}
+```
+[/OUTPUT]

@@ -1,0 +1,1 @@
+from seaborn._core.rules import variable_type

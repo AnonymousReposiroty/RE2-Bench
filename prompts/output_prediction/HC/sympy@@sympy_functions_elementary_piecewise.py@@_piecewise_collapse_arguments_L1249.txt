@@ -1,0 +1,826 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+from sympy.core import S, diff, Tuple, Dummy, Mul
+from sympy.core.relational import Lt, Gt, Eq, Ne, Relational, _canonical, _canonical_coeff
+from sympy.logic.boolalg import And, Boolean, distribute_and_over_or, Not, true, false, Or, ITE, simplify_logic, to_cnf, distribute_or_over_and
+
+def _piecewise_collapse_arguments(_args):
+    newargs = []
+    current_cond = set()
+    for expr, cond in _args:
+        cond = cond.replace(lambda _: _.is_Relational, _canonical_coeff)
+        if isinstance(expr, Piecewise):
+            unmatching = []
+            for i, (e, c) in enumerate(expr.args):
+                if c in current_cond:
+                    continue
+                if c == cond:
+                    if c != True:
+                        if unmatching:
+                            expr = Piecewise(*unmatching + [(e, c)])
+                        else:
+                            expr = e
+                    break
+                else:
+                    unmatching.append((e, c))
+        got = False
+        for i in [cond] + (list(cond.args) if isinstance(cond, And) else []):
+            if i in current_cond:
+                got = True
+                break
+        if got:
+            continue
+        if isinstance(cond, And):
+            nonredundant = []
+            for c in cond.args:
+                if isinstance(c, Relational):
+                    if c.negated.canonical in current_cond:
+                        continue
+                    if isinstance(c, (Lt, Gt)) and c.weak in current_cond:
+                        cond = False
+                        break
+                nonredundant.append(c)
+            else:
+                cond = cond.func(*nonredundant)
+        elif isinstance(cond, Relational):
+            if cond.negated.canonical in current_cond:
+                cond = S.true
+        current_cond.add(cond)
+        if newargs:
+            if newargs[-1].expr == expr:
+                orcond = Or(cond, newargs[-1].cond)
+                if isinstance(orcond, (And, Or)):
+                    orcond = distribute_and_over_or(orcond)
+                newargs[-1] = ExprCondPair(expr, orcond)
+                continue
+            elif newargs[-1].cond == cond:
+                continue
+        newargs.append(ExprCondPair(expr, cond))
+    return newargs
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.core.basic.replace
+
+def replace(self, query, value, map=False, simultaneous=True, exact=None) -> Basic:
+    """
+    Replace matching subexpressions of ``self`` with ``value``.
+
+    If ``map = True`` then also return the mapping {old: new} where ``old``
+    was a sub-expression found with query and ``new`` is the replacement
+    value for it. If the expression itself does not match the query, then
+    the returned value will be ``self.xreplace(map)`` otherwise it should
+    be ``self.subs(ordered(map.items()))``.
+
+    Traverses an expression tree and performs replacement of matching
+    subexpressions from the bottom to the top of the tree. The default
+    approach is to do the replacement in a simultaneous fashion so
+    changes made are targeted only once. If this is not desired or causes
+    problems, ``simultaneous`` can be set to False.
+
+    In addition, if an expression containing more than one Wild symbol
+    is being used to match subexpressions and the ``exact`` flag is None
+    it will be set to True so the match will only succeed if all non-zero
+    values are received for each Wild that appears in the match pattern.
+    Setting this to False accepts a match of 0; while setting it True
+    accepts all matches that have a 0 in them. See example below for
+    cautions.
+
+    The list of possible combinations of queries and replacement values
+    is listed below:
+
+    Examples
+    ========
+
+    Initial setup
+
+    >>> from sympy import log, sin, cos, tan, Wild, Mul, Add
+    >>> from sympy.abc import x, y
+    >>> f = log(sin(x)) + tan(sin(x**2))
+
+    1.1. type -> type
+        obj.replace(type, newtype)
+
+        When object of type ``type`` is found, replace it with the
+        result of passing its argument(s) to ``newtype``.
+
+        >>> f.replace(sin, cos)
+        log(cos(x)) + tan(cos(x**2))
+        >>> sin(x).replace(sin, cos, map=True)
+        (cos(x), {sin(x): cos(x)})
+        >>> (x*y).replace(Mul, Add)
+        x + y
+
+    1.2. type -> func
+        obj.replace(type, func)
+
+        When object of type ``type`` is found, apply ``func`` to its
+        argument(s). ``func`` must be written to handle the number
+        of arguments of ``type``.
+
+        >>> f.replace(sin, lambda arg: sin(2*arg))
+        log(sin(2*x)) + tan(sin(2*x**2))
+        >>> (x*y).replace(Mul, lambda *args: sin(2*Mul(*args)))
+        sin(2*x*y)
+
+    2.1. pattern -> expr
+        obj.replace(pattern(wild), expr(wild))
+
+        Replace subexpressions matching ``pattern`` with the expression
+        written in terms of the Wild symbols in ``pattern``.
+
+        >>> a, b = map(Wild, 'ab')
+        >>> f.replace(sin(a), tan(a))
+        log(tan(x)) + tan(tan(x**2))
+        >>> f.replace(sin(a), tan(a/2))
+        log(tan(x/2)) + tan(tan(x**2/2))
+        >>> f.replace(sin(a), a)
+        log(x) + tan(x**2)
+        >>> (x*y).replace(a*x, a)
+        y
+
+        Matching is exact by default when more than one Wild symbol
+        is used: matching fails unless the match gives non-zero
+        values for all Wild symbols:
+
+        >>> (2*x + y).replace(a*x + b, b - a)
+        y - 2
+        >>> (2*x).replace(a*x + b, b - a)
+        2*x
+
+        When set to False, the results may be non-intuitive:
+
+        >>> (2*x).replace(a*x + b, b - a, exact=False)
+        2/x
+
+    2.2. pattern -> func
+        obj.replace(pattern(wild), lambda wild: expr(wild))
+
+        All behavior is the same as in 2.1 but now a function in terms of
+        pattern variables is used rather than an expression:
+
+        >>> f.replace(sin(a), lambda a: sin(2*a))
+        log(sin(2*x)) + tan(sin(2*x**2))
+
+    3.1. func -> func
+        obj.replace(filter, func)
+
+        Replace subexpression ``e`` with ``func(e)`` if ``filter(e)``
+        is True.
+
+        >>> g = 2*sin(x**3)
+        >>> g.replace(lambda expr: expr.is_Number, lambda expr: expr**2)
+        4*sin(x**9)
+
+    The expression itself is also targeted by the query but is done in
+    such a fashion that changes are not made twice.
+
+        >>> e = x*(x*y + 1)
+        >>> e.replace(lambda x: x.is_Mul, lambda x: 2*x)
+        2*x*(2*x*y + 1)
+
+    When matching a single symbol, `exact` will default to True, but
+    this may or may not be the behavior that is desired:
+
+    Here, we want `exact=False`:
+
+    >>> from sympy import Function
+    >>> f = Function('f')
+    >>> e = f(1) + f(0)
+    >>> q = f(a), lambda a: f(a + 1)
+    >>> e.replace(*q, exact=False)
+    f(1) + f(2)
+    >>> e.replace(*q, exact=True)
+    f(0) + f(2)
+
+    But here, the nature of matching makes selecting
+    the right setting tricky:
+
+    >>> e = x**(1 + y)
+    >>> (x**(1 + y)).replace(x**(1 + a), lambda a: x**-a, exact=False)
+    x
+    >>> (x**(1 + y)).replace(x**(1 + a), lambda a: x**-a, exact=True)
+    x**(-x - y + 1)
+    >>> (x**y).replace(x**(1 + a), lambda a: x**-a, exact=False)
+    x
+    >>> (x**y).replace(x**(1 + a), lambda a: x**-a, exact=True)
+    x**(1 - y)
+
+    It is probably better to use a different form of the query
+    that describes the target expression more precisely:
+
+    >>> (1 + x**(1 + y)).replace(
+    ... lambda x: x.is_Pow and x.exp.is_Add and x.exp.args[0] == 1,
+    ... lambda x: x.base**(1 - (x.exp - 1)))
+    ...
+    x**(1 - y) + 1
+
+    See Also
+    ========
+
+    subs: substitution of subexpressions as defined by the objects
+          themselves.
+    xreplace: exact node replacement in expr tree; also capable of
+              using matching rules
+
+    """
+
+    try:
+        query = _sympify(query)
+    except SympifyError:
+        pass
+    try:
+        value = _sympify(value)
+    except SympifyError:
+        pass
+    if isinstance(query, type):
+        _query = lambda expr: isinstance(expr, query)
+
+        if isinstance(value, type) or callable(value):
+            _value = lambda expr, result: value(*expr.args)
+        else:
+            raise TypeError(
+                "given a type, replace() expects another "
+                "type or a callable")
+    elif isinstance(query, Basic):
+        _query = lambda expr: expr.match(query)
+        if exact is None:
+            from .symbol import Wild
+            exact = (len(query.atoms(Wild)) > 1)
+
+        if isinstance(value, Basic):
+            if exact:
+                _value = lambda expr, result: (value.subs(result)
+                    if all(result.values()) else expr)
+            else:
+                _value = lambda expr, result: value.subs(result)
+        elif callable(value):
+            # match dictionary keys get the trailing underscore stripped
+            # from them and are then passed as keywords to the callable;
+            # if ``exact`` is True, only accept match if there are no null
+            # values amongst those matched.
+            if exact:
+                _value = lambda expr, result: (value(**
+                    {str(k)[:-1]: v for k, v in result.items()})
+                    if all(val for val in result.values()) else expr)
+            else:
+                _value = lambda expr, result: value(**
+                    {str(k)[:-1]: v for k, v in result.items()})
+        else:
+            raise TypeError(
+                "given an expression, replace() expects "
+                "another expression or a callable")
+    elif callable(query):
+        _query = query
+
+        if callable(value):
+            _value = lambda expr, result: value(expr)
+        else:
+            raise TypeError(
+                "given a callable, replace() expects "
+                "another callable")
+    else:
+        raise TypeError(
+            "first argument to replace() must be a "
+            "type, an expression or a callable")
+
+    def walk(rv, F):
+        """Apply ``F`` to args and then to result.
+        """
+        args = getattr(rv, 'args', None)
+        if args is not None:
+            if args:
+                newargs = tuple([walk(a, F) for a in args])
+                if args != newargs:
+                    rv = rv.func(*newargs)
+                    if simultaneous:
+                        # if rv is something that was already
+                        # matched (that was changed) then skip
+                        # applying F again
+                        for i, e in enumerate(args):
+                            if rv == e and e != newargs[i]:
+                                return rv
+            rv = F(rv)
+        return rv
+
+    mapping = {}  # changes that took place
+
+    def rec_replace(expr):
+        result = _query(expr)
+        if result or result == {}:
+            v = _value(expr, result)
+            if v is not None and v != expr:
+                if map:
+                    mapping[expr] = v
+                expr = v
+        return expr
+
+    rv = walk(self, rec_replace)
+    return (rv, mapping) if map else rv # type: ignore
+
+sympy.sympy.core.basic.__hash__
+
+def __hash__(self) -> int:
+    # hash cannot be cached using cache_it because infinite recurrence
+    # occurs as hash is needed for setting cache dictionary keys
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+sympy.sympy.core.basic.__eq__
+
+def __eq__(self, other):
+    """Return a boolean indicating whether a == b on the basis of
+    their symbolic trees.
+
+    This is the same as a.compare(b) == 0 but faster.
+
+    Notes
+    =====
+
+    If a class that overrides __eq__() needs to retain the
+    implementation of __hash__() from a parent class, the
+    interpreter must be told this explicitly by setting
+    __hash__ : Callable[[object], int] = <ParentClass>.__hash__.
+    Otherwise the inheritance of __hash__() will be blocked,
+    just as if __hash__ had been explicitly set to None.
+
+    References
+    ==========
+
+    from https://docs.python.org/dev/reference/datamodel.html#object.__hash__
+    """
+    if self is other:
+        return True
+
+    if not isinstance(other, Basic):
+        return self._do_eq_sympify(other)
+
+    # check for pure number expr
+    if  not (self.is_Number and other.is_Number) and (
+            type(self) != type(other)):
+        return False
+    a, b = self._hashable_content(), other._hashable_content()
+    if a != b:
+        return False
+    # check number *in* an expression
+    for a, b in zip(a, b):
+        if not isinstance(a, Basic):
+            continue
+        if a.is_Number and type(a) != type(b):
+            return False
+    return True
+
+sympy.sympy.core.basic.__ne__
+
+def __ne__(self, other):
+    """``a != b``  -> Compare two symbolic trees and see whether they are different
+
+    this is the same as:
+
+    ``a.compare(b) != 0``
+
+    but faster
+    """
+    return not self == other
+
+sympy.sympy.core.basic.args
+
+@property
+def args(self) -> tuple[Basic, ...]:
+    """Returns a tuple of arguments of 'self'.
+
+    Examples
+    ========
+
+    >>> from sympy import cot
+    >>> from sympy.abc import x, y
+
+    >>> cot(x).args
+    (x,)
+
+    >>> cot(x).args[0]
+    x
+
+    >>> (x*y).args
+    (x, y)
+
+    >>> (x*y).args[1]
+    y
+
+    Notes
+    =====
+
+    Never use self._args, always use self.args.
+    Only use _args in __new__ when creating a new function.
+    Do not override .args() from Basic (so that it is easy to
+    change the interface in the future if needed).
+    """
+    return self._args
+
+sympy.sympy.core.containers.__eq__
+
+def __eq__(self, other):
+    if isinstance(other, Basic):
+        return super().__eq__(other)
+    return self.args == other
+
+sympy.sympy.core.function.func
+
+@property
+def func(self):
+    return self.__class__
+
+sympy.sympy.core.numbers.__eq__
+
+def __eq__(self, other):
+    try:
+        other = _sympify(other)
+    except SympifyError:
+        return NotImplemented
+    if self is other:
+        return True
+    if other.is_Number and self.is_irrational:
+        return False
+
+    return False    # NumberSymbol != non-(Number|self)
+
+sympy.sympy.core.operations.__new__
+
+def __new__(cls, *args, evaluate=None, **options):
+    args = (_sympify_(arg) for arg in args)
+
+    if evaluate is None:
+        evaluate = global_parameters.evaluate
+
+    if not evaluate:
+        obj = super().__new__(cls, *args, evaluate=False, **options)
+        obj._argset = frozenset(args)
+        return obj
+
+    try:
+        # /!\ args is a generator and _new_args_filter
+        # must be careful to handle as such; this
+        # is done so short-circuiting can be done
+        # without having to sympify all values
+        _args = frozenset(cls._new_args_filter(args))
+    except ShortCircuit:
+        return sympify(cls.zero)
+    if not _args:
+        return sympify(cls.identity)
+    elif len(_args) == 1:
+        return set(_args).pop()
+    else:
+        # XXX in almost every other case for __new__, *_args is
+        # passed along, but the expectation here is for _args
+        obj = super(AssocOp, cls).__new__(cls, *ordered(_args))
+        obj._argset = _args
+        return obj
+
+sympy.sympy.core.relational.weak
+
+@property
+def weak(self):
+    return Le(*self.args)
+
+sympy.sympy.core.relational.negated
+
+@property
+def negated(self):
+    """Return the negated relationship.
+
+    Examples
+    ========
+
+    >>> from sympy import Eq
+    >>> from sympy.abc import x
+    >>> Eq(x, 1)
+    Eq(x, 1)
+    >>> _.negated
+    Ne(x, 1)
+    >>> x < 1
+    x < 1
+    >>> _.negated
+    x >= 1
+
+    Notes
+    =====
+
+    This works more or less identical to ``~``/``Not``. The difference is
+    that ``negated`` returns the relationship even if ``evaluate=False``.
+    Hence, this is useful in code when checking for e.g. negated relations
+    to existing ones as it will not be affected by the `evaluate` flag.
+
+    """
+    ops = {Eq: Ne, Ge: Lt, Gt: Le, Le: Gt, Lt: Ge, Ne: Eq}
+    # If there ever will be new Relational subclasses, the following line
+    # will work until it is properly sorted out
+    # return ops.get(self.func, lambda a, b, evaluate=False: ~(self.func(a,
+    #      b, evaluate=evaluate)))(*self.args, evaluate=False)
+    return Relational.__new__(ops.get(self.func), *self.args)
+
+sympy.sympy.core.relational.canonical
+
+@property
+def canonical(self):
+    """Return a canonical form of the relational by putting a
+    number on the rhs, canonically removing a sign or else
+    ordering the args canonically. No other simplification is
+    attempted.
+
+    Examples
+    ========
+
+    >>> from sympy.abc import x, y
+    >>> x < 2
+    x < 2
+    >>> _.reversed.canonical
+    x < 2
+    >>> (-y < x).canonical
+    x > -y
+    >>> (-y > x).canonical
+    x < -y
+    >>> (-y < -x).canonical
+    x < y
+
+    The canonicalization is recursively applied:
+
+    >>> from sympy import Eq
+    >>> Eq(x < y, y > x).canonical
+    True
+    """
+    args = tuple([i.canonical if isinstance(i, Relational) else i for i in self.args])
+    if args != self.args:
+        r = self.func(*args)
+        if not isinstance(r, Relational):
+            return r
+    else:
+        r = self
+    if r.rhs.is_number:
+        if r.rhs.is_Number and r.lhs.is_Number and r.lhs > r.rhs:
+            r = r.reversed
+    elif r.lhs.is_number or tuple(ordered(args)) != args:
+        r = r.reversed
+
+    LHS_CEMS = getattr(r.lhs, 'could_extract_minus_sign', None)
+    RHS_CEMS = getattr(r.rhs, 'could_extract_minus_sign', None)
+
+    if isinstance(r.lhs, BooleanAtom) or isinstance(r.rhs, BooleanAtom):
+        return r
+
+    # Check if first value has negative sign
+    if LHS_CEMS and LHS_CEMS():
+        return r.reversedsign
+    elif not r.rhs.is_number and RHS_CEMS and RHS_CEMS():
+        # Right hand side has a minus, but not lhs.
+        # How does the expression with reversed signs behave?
+        # This is so that expressions of the type
+        # Eq(x, -y) and Eq(-x, y)
+        # have the same canonical representation
+        expr1, _ = ordered([r.lhs, -r.rhs])
+        if expr1 != r.lhs:
+            return r.reversed.reversedsign
+
+    return r
+
+sympy.sympy.functions.elementary.piecewise.__new__
+
+def __new__(cls, expr, cond):
+    expr = as_Basic(expr)
+    if cond == True:
+        return Tuple.__new__(cls, expr, true)
+    elif cond == False:
+        return Tuple.__new__(cls, expr, false)
+    elif isinstance(cond, Basic) and cond.has(Piecewise):
+        cond = piecewise_fold(cond)
+        if isinstance(cond, Piecewise):
+            cond = cond.rewrite(ITE)
+
+    if not isinstance(cond, Boolean):
+        raise TypeError(filldedent('''
+            Second argument must be a Boolean,
+            not `%s`''' % func_name(cond)))
+    return Tuple.__new__(cls, expr, cond)
+
+sympy.sympy.functions.elementary.piecewise.expr
+
+@property
+def expr(self):
+    """
+    Returns the expression of this pair.
+    """
+    return self.args[0]
+
+sympy.sympy.functions.elementary.piecewise.cond
+
+@property
+def cond(self):
+    """
+    Returns the condition of this pair.
+    """
+    return self.args[1]
+
+sympy.sympy.functions.elementary.piecewise.__iter__
+
+def __iter__(self):
+    yield self.expr
+    yield self.cond
+
+sympy.sympy.geometry.point.__eq__
+
+def __eq__(self, other):
+    if not isinstance(other, Point) or len(self.args) != len(other.args):
+        return False
+    return self.args == other.args
+
+sympy.sympy.logic.boolalg.distribute_and_over_or
+
+def distribute_and_over_or(expr):
+    """
+    Given a sentence ``expr`` consisting of conjunctions and disjunctions
+    of literals, return an equivalent sentence in CNF.
+
+    Examples
+    ========
+
+    >>> from sympy.logic.boolalg import distribute_and_over_or, And, Or, Not
+    >>> from sympy.abc import A, B, C
+    >>> distribute_and_over_or(Or(A, And(Not(B), Not(C))))
+    (A | ~B) & (A | ~C)
+
+    """
+    return _distribute((expr, And, Or))
+
+sympy.sympy.logic.boolalg.__hash__
+
+def __hash__(self):
+    return hash(True)
+
+sympy.sympy.logic.boolalg.__eq__
+
+def __eq__(self, other):
+    if other is True:
+        return False
+    if other is False:
+        return True
+    return super().__eq__(other)
+
+sympy.sympy.sets.sets.__eq__
+
+def __eq__(self, other):
+    if isinstance(other, (set, frozenset)):
+        return self._args_set == other
+    return super().__eq__(other)
+
+
+[/PYTHON]
+What will be the output of `_piecewise_collapse_arguments`, given the following input:
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "_args": [
+            "(1, x < 0)",
+            "(3, True)"
+        ]
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[STRUCTURE]
+```
+{
+    "output": XXX        
+}
+```
+[/STRUCTURE]
+
+[THOUGHT]

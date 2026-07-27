@@ -1,0 +1,319 @@
+<<FUNCTION_NAME>>
+
+get_fontconfig_pattern
+
+<<CODE>>
+
+import os
+import matplotlib as mpl
+from matplotlib import _api, _afm, cbook, ft2font
+from matplotlib._fontconfig_pattern import (
+    parse_fontconfig_pattern, generate_fontconfig_pattern)
+from matplotlib.rcsetup import _validators
+
+class FontProperties:
+    """
+    A class for storing and manipulating font properties.
+
+    The font properties are the six properties described in the
+    `W3C Cascading Style Sheet, Level 1
+    <http://www.w3.org/TR/1998/REC-CSS2-19980512/>`_ font
+    specification and *math_fontfamily* for math fonts:
+
+    - family: A list of font names in decreasing order of priority.
+      The items may include a generic font family name, either 'sans-serif',
+      'serif', 'cursive', 'fantasy', or 'monospace'.  In that case, the actual
+      font to be used will be looked up from the associated rcParam during the
+      search process in `.findfont`. Default: :rc:`font.family`
+
+    - style: Either 'normal', 'italic' or 'oblique'.
+      Default: :rc:`font.style`
+
+    - variant: Either 'normal' or 'small-caps'.
+      Default: :rc:`font.variant`
+
+    - stretch: A numeric value in the range 0-1000 or one of
+      'ultra-condensed', 'extra-condensed', 'condensed',
+      'semi-condensed', 'normal', 'semi-expanded', 'expanded',
+      'extra-expanded' or 'ultra-expanded'. Default: :rc:`font.stretch`
+
+    - weight: A numeric value in the range 0-1000 or one of
+      'ultralight', 'light', 'normal', 'regular', 'book', 'medium',
+      'roman', 'semibold', 'demibold', 'demi', 'bold', 'heavy',
+      'extra bold', 'black'. Default: :rc:`font.weight`
+
+    - size: Either a relative value of 'xx-small', 'x-small',
+      'small', 'medium', 'large', 'x-large', 'xx-large' or an
+      absolute font size, e.g., 10. Default: :rc:`font.size`
+
+    - math_fontfamily: The family of fonts used to render math text.
+      Supported values are: 'dejavusans', 'dejavuserif', 'cm',
+      'stix', 'stixsans' and 'custom'. Default: :rc:`mathtext.fontset`
+
+    Alternatively, a font may be specified using the absolute path to a font
+    file, by using the *fname* kwarg.  However, in this case, it is typically
+    simpler to just pass the path (as a `pathlib.Path`, not a `str`) to the
+    *font* kwarg of the `.Text` object.
+
+    The preferred usage of font sizes is to use the relative values,
+    e.g.,  'large', instead of absolute font sizes, e.g., 12.  This
+    approach allows all text sizes to be made larger or smaller based
+    on the font manager's default font size.
+
+    This class accepts a single positional string as fontconfig_ pattern_,
+    or alternatively individual properties as keyword arguments::
+
+        FontProperties(pattern)
+        FontProperties(*, family=None, style=None, variant=None, ...)
+
+    This support does not depend on fontconfig; we are merely borrowing its
+    pattern syntax for use here.
+
+    .. _fontconfig: https://www.freedesktop.org/wiki/Software/fontconfig/
+    .. _pattern:
+       https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
+
+    Note that Matplotlib's internal font manager and fontconfig use a
+    different algorithm to lookup fonts, so the results of the same pattern
+    may be different in Matplotlib than in other applications that use
+    fontconfig.
+    """
+
+    @_cleanup_fontproperties_init
+    def __init__(self, family=None, style=None, variant=None, weight=None, stretch=None, size=None, fname=None, math_fontfamily=None):
+        self.set_family(family)
+        self.set_style(style)
+        self.set_variant(variant)
+        self.set_weight(weight)
+        self.set_stretch(stretch)
+        self.set_file(fname)
+        self.set_size(size)
+        self.set_math_fontfamily(math_fontfamily)
+        if isinstance(family, str) and style is None and (variant is None) and (weight is None) and (stretch is None) and (size is None) and (fname is None):
+            self.set_fontconfig_pattern(family)
+
+    def get_fontconfig_pattern(self):
+        """
+        Get a fontconfig_ pattern_ suitable for looking up the font as
+        specified with fontconfig's ``fc-match`` utility.
+
+        This support does not depend on fontconfig; we are merely borrowing its
+        pattern syntax for use here.
+        """
+        return generate_fontconfig_pattern(self)
+
+    def set_family(self, family):
+        """
+        Change the font family.  Can be either an alias (generic name
+        is CSS parlance), such as: 'serif', 'sans-serif', 'cursive',
+        'fantasy', or 'monospace', a real font name or a list of real
+        font names.  Real font names are not supported when
+        :rc:`text.usetex` is `True`. Default: :rc:`font.family`
+        """
+        family = mpl._val_or_rc(family, 'font.family')
+        if isinstance(family, str):
+            family = [family]
+        self._family = family
+
+    def set_style(self, style):
+        """
+        Set the font style.
+
+        Parameters
+        ----------
+        style : {'normal', 'italic', 'oblique'}, default: :rc:`font.style`
+        """
+        style = mpl._val_or_rc(style, 'font.style')
+        _api.check_in_list(['normal', 'italic', 'oblique'], style=style)
+        self._slant = style
+
+    def set_variant(self, variant):
+        """
+        Set the font variant.
+
+        Parameters
+        ----------
+        variant : {'normal', 'small-caps'}, default: :rc:`font.variant`
+        """
+        variant = mpl._val_or_rc(variant, 'font.variant')
+        _api.check_in_list(['normal', 'small-caps'], variant=variant)
+        self._variant = variant
+
+    def set_weight(self, weight):
+        """
+        Set the font weight.
+
+        Parameters
+        ----------
+        weight : int or {'ultralight', 'light', 'normal', 'regular', 'book', 'medium', 'roman', 'semibold', 'demibold', 'demi', 'bold', 'heavy', 'extra bold', 'black'}, default: :rc:`font.weight`
+            If int, must be in the range  0-1000.
+        """
+        weight = mpl._val_or_rc(weight, 'font.weight')
+        if weight in weight_dict:
+            self._weight = weight
+            return
+        try:
+            weight = int(weight)
+        except ValueError:
+            pass
+        else:
+            if 0 <= weight <= 1000:
+                self._weight = weight
+                return
+        raise ValueError(f'weight={weight!r} is invalid')
+
+    def set_stretch(self, stretch):
+        """
+        Set the font stretch or width.
+
+        Parameters
+        ----------
+        stretch : int or {'ultra-condensed', 'extra-condensed', 'condensed', 'semi-condensed', 'normal', 'semi-expanded', 'expanded', 'extra-expanded', 'ultra-expanded'}, default: :rc:`font.stretch`
+            If int, must be in the range  0-1000.
+        """
+        stretch = mpl._val_or_rc(stretch, 'font.stretch')
+        if stretch in stretch_dict:
+            self._stretch = stretch
+            return
+        try:
+            stretch = int(stretch)
+        except ValueError:
+            pass
+        else:
+            if 0 <= stretch <= 1000:
+                self._stretch = stretch
+                return
+        raise ValueError(f'stretch={stretch!r} is invalid')
+
+    def set_size(self, size):
+        """
+        Set the font size.
+
+        Parameters
+        ----------
+        size : float or {'xx-small', 'x-small', 'small', 'medium', 'large', 'x-large', 'xx-large'}, default: :rc:`font.size`
+            If a float, the font size in points. The string values denote
+            sizes relative to the default font size.
+        """
+        size = mpl._val_or_rc(size, 'font.size')
+        try:
+            size = float(size)
+        except ValueError:
+            try:
+                scale = font_scalings[size]
+            except KeyError as err:
+                raise ValueError('Size is invalid. Valid font size are ' + ', '.join(map(str, font_scalings))) from err
+            else:
+                size = scale * FontManager.get_default_size()
+        if size < 1.0:
+            _log.info('Fontsize %1.2f < 1.0 pt not allowed by FreeType. Setting fontsize = 1 pt', size)
+            size = 1.0
+        self._size = size
+
+    def set_file(self, file):
+        """
+        Set the filename of the fontfile to use.  In this case, all
+        other properties will be ignored.
+        """
+        self._file = os.fspath(file) if file is not None else None
+
+    def set_fontconfig_pattern(self, pattern):
+        """
+        Set the properties by parsing a fontconfig_ *pattern*.
+
+        This support does not depend on fontconfig; we are merely borrowing its
+        pattern syntax for use here.
+        """
+        for key, val in parse_fontconfig_pattern(pattern).items():
+            if type(val) is list:
+                getattr(self, 'set_' + key)(val[0])
+            else:
+                getattr(self, 'set_' + key)(val)
+
+    def set_math_fontfamily(self, fontfamily):
+        """
+        Set the font family for text in math mode.
+
+        If not set explicitly, :rc:`mathtext.fontset` will be used.
+
+        Parameters
+        ----------
+        fontfamily : str
+            The name of the font family.
+
+            Available font families are defined in the
+            :ref:`default matplotlibrc file <customizing-with-matplotlibrc-files>`.
+
+        See Also
+        --------
+        .text.Text.get_math_fontfamily
+        """
+        if fontfamily is None:
+            fontfamily = mpl.rcParams['mathtext.fontset']
+        else:
+            valid_fonts = _validators['mathtext.fontset'].valid.values()
+            _api.check_in_list(valid_fonts, math_fontfamily=fontfamily)
+        self._math_fontfamily = fontfamily
+    set_name = set_family
+    get_slant = get_style
+    set_slant = set_style
+    get_size_in_points = get_size
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {'_family': ['Noto Sans CJK SC'], '_slant': 'normal', '_variant': 'normal', '_weight': 'normal', '_stretch': 'normal', '_file': None, '_size': 12.0, '_math_fontfamily': 'cm'}, 'args': {}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+Noto Sans CJK SC:style=normal:variant=normal:weight=normal:stretch=normal:size=12.0
+
+<<LLM_RESPONSE>>
+
+[THOUGHT]
+Let me trace through the execution of `get_fontconfig_pattern()` which calls `generate_fontconfig_pattern(self)`.
+
+Looking at `generate_fontconfig_pattern`, it:
+1. Builds a list `kvs` by extracting values from getter methods for: "style", "variant", "weight", "stretch", "file", "size"
+2. Returns a string by concatenating:
+   - Family names from `get_family()` joined by commas (passed through `_family_escape`)
+   - Key-value pairs in the format `:key=value` (passed through `_value_escape`), but only if value is not None
+
+From the output: `"Noto Sans CJK SC:style=normal:variant=normal:weight=normal:stretch=normal:size=12.0"`
+
+Breaking down:
+- **Family part**: "Noto Sans CJK SC" comes before the first colon
+  - This means `get_family()` returns `["Noto Sans CJK SC"]`
+  - So `_family` should be `["Noto Sans CJK SC"]`
+
+- **Key-value pairs**: `:style=normal:variant=normal:weight=normal:stretch=normal:size=12.0`
+  - `style=normal` → `get_style()` returns "normal" → `_slant` = "normal"
+  - `variant=normal` → `get_variant()` returns "normal" → `_variant` = "normal"
+  - `weight=normal` → `get_weight()` returns "normal" → `_weight` = "normal"
+  - `stretch=normal` → `get_stretch()` returns "normal" → `_stretch` = "normal"
+  - `size=12.0` → `get_size()` returns 12.0 → `_size` = 12.0
+  - `file` is absent from output → `get_file()` returns None → `_file` = null
+
+For `_math_fontfamily`: This attribute is not used by `generate_fontconfig_pattern`, so any reasonable value works. Based on the `set_math_fontfamily` method, a default matplotlib mathtext fontset like "dejavu" is appropriate.
+
+The getter methods are assumed to return their corresponding private attributes (e.g., `get_style()` returns `_slant`, `get_family()` returns `_family`, etc.).
+</THOUGHT]
+
+[INPUT]
+```
+{
+    "self": {
+        "_family": ["Noto Sans CJK SC"],
+        "_slant": "normal",
+        "_variant": "normal",
+        "_weight": "normal",
+        "_stretch": "normal",
+        "_file": null,
+        "_size": 12.0,
+        "_math_fontfamily": "dejavu"
+    },
+    "args": {},
+    "kwargs": {}
+}
+```
+[/INPUT]

@@ -1,0 +1,1679 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+from sympy.core.containers import Tuple
+from sympy.core.relational import Equality, Relational
+from sympy.core.singleton import S
+from sympy.core.symbol import Symbol, Dummy
+from sympy.core.sympify import sympify
+from sympy.functions.elementary.piecewise import piecewise_fold, Piecewise
+from sympy.utilities.exceptions import sympy_deprecation_warning
+
+def _common_new(cls, function, *symbols, discrete, **assumptions):
+    function = sympify(function)
+    if isinstance(function, Equality):
+        limits, orientation = _process_limits(*symbols, discrete=discrete)
+        if not (limits and all((len(limit) == 3 for limit in limits))):
+            sympy_deprecation_warning('\n                Creating a indefinite integral with an Eq() argument is\n                deprecated.\n\n                This is because indefinite integrals do not preserve equality\n                due to the arbitrary constants. If you want an equality of\n                indefinite integrals, use Eq(Integral(a, x), Integral(b, x))\n                explicitly.\n                ', deprecated_since_version='1.6', active_deprecations_target='deprecated-indefinite-integral-eq', stacklevel=5)
+        lhs = function.lhs
+        rhs = function.rhs
+        return Equality(cls(lhs, *symbols, **assumptions), cls(rhs, *symbols, **assumptions))
+    if function is S.NaN:
+        return S.NaN
+    if symbols:
+        limits, orientation = _process_limits(*symbols, discrete=discrete)
+        for i, li in enumerate(limits):
+            if len(li) == 4:
+                function = function.subs(li[0], li[-1])
+                limits[i] = Tuple(*li[:-1])
+    else:
+        free = function.free_symbols
+        if len(free) != 1:
+            raise ValueError('specify dummy variables for %s' % function)
+        limits, orientation = ([Tuple(s) for s in free], 1)
+    while cls == type(function):
+        limits = list(function.limits) + limits
+        function = function.function
+    reps = {}
+    symbols_of_integration = {i[0] for i in limits}
+    for p in function.atoms(Piecewise):
+        if not p.has(*symbols_of_integration):
+            reps[p] = Dummy()
+    function = function.xreplace(reps)
+    function = piecewise_fold(function)
+    function = function.xreplace({v: k for k, v in reps.items()})
+    return (function, limits, orientation)
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+sympy.sympy.concrete.expr_with_limits.function
+
+@property
+def function(self):
+    """Return the function applied across limits.
+
+    Examples
+    ========
+
+    >>> from sympy import Integral
+    >>> from sympy.abc import x
+    >>> Integral(x**2, (x,)).function
+    x**2
+
+    See Also
+    ========
+
+    limits, variables, free_symbols
+    """
+    return self._args[0]
+
+sympy.sympy.concrete.expr_with_limits.limits
+
+@property
+def limits(self):
+    """Return the limits of expression.
+
+    Examples
+    ========
+
+    >>> from sympy import Integral
+    >>> from sympy.abc import x, i
+    >>> Integral(x**i, (i, 1, 3)).limits
+    ((i, 1, 3),)
+
+    See Also
+    ========
+
+    function, variables, free_symbols
+    """
+    return self._args[1:]
+
+sympy.sympy.concrete.expr_with_limits.free_symbols
+
+@property
+def free_symbols(self):
+    """
+    This method returns the symbols in the object, excluding those
+    that take on a specific value (i.e. the dummy symbols).
+
+    Examples
+    ========
+
+    >>> from sympy import Sum
+    >>> from sympy.abc import x, y
+    >>> Sum(x, (x, y, 1)).free_symbols
+    {y}
+    """
+    # don't test for any special values -- nominal free symbols
+    # should be returned, e.g. don't return set() if the
+    # function is zero -- treat it like an unevaluated expression.
+    function, limits = self.function, self.limits
+    # mask off non-symbol integration variables that have
+    # more than themself as a free symbol
+    reps = {i[0]: i[0] if i[0].free_symbols == {i[0]} else Dummy()
+        for i in self.limits}
+    function = function.xreplace(reps)
+    isyms = function.free_symbols
+    for xab in limits:
+        v = reps[xab[0]]
+        if len(xab) == 1:
+            isyms.add(v)
+            continue
+        # take out the target symbol
+        if v in isyms:
+            isyms.remove(v)
+        # add in the new symbols
+        for i in xab[1:]:
+            isyms.update(i.free_symbols)
+    reps = {v: k for k, v in reps.items()}
+    return {reps.get(_, _) for _ in isyms}
+
+sympy.sympy.concrete.expr_with_limits.<genexpr>
+
+if not (limits and all(len(limit) == 3 for limit in limits)):
+    sympy_deprecation_warning(
+        """
+        Creating a indefinite integral with an Eq() argument is
+        deprecated.
+
+        This is because indefinite integrals do not preserve equality
+        due to the arbitrary constants. If you want an equality of
+        indefinite integrals, use Eq(Integral(a, x), Integral(b, x))
+        explicitly.
+        """,
+        deprecated_since_version="1.6",
+        active_deprecations_target="deprecated-indefinite-integral-eq",
+        stacklevel=5,
+    )
+
+
+
+sympy.sympy.concrete.expr_with_limits.<listcomp>
+
+    limits, orientation = [Tuple(s) for s in free], 1
+
+# denest any nested calls
+
+
+sympy.sympy.concrete.expr_with_limits.<setcomp>
+
+symbols_of_integration = {i[0] for i in limits}
+
+
+sympy.sympy.concrete.expr_with_limits.<dictcomp>
+
+function = function.xreplace({v: k for k, v in reps.items()})
+
+
+
+sympy.sympy.concrete.expr_with_limits._process_limits
+
+def _process_limits(*symbols, discrete=None):
+    """Process the list of symbols and convert them to canonical limits,
+    storing them as Tuple(symbol, lower, upper). The orientation of
+    the function is also returned when the upper limit is missing
+    so (x, 1, None) becomes (x, None, 1) and the orientation is changed.
+    In the case that a limit is specified as (symbol, Range), a list of
+    length 4 may be returned if a change of variables is needed; the
+    expression that should replace the symbol in the expression is
+    the fourth element in the list.
+    """
+    limits = []
+    orientation = 1
+    if discrete is None:
+        err_msg = 'discrete must be True or False'
+    elif discrete:
+        err_msg = 'use Range, not Interval or Relational'
+    else:
+        err_msg = 'use Interval or Relational, not Range'
+    for V in symbols:
+        if isinstance(V, (Relational, BooleanFunction)):
+            if discrete:
+                raise TypeError(err_msg)
+            variable = V.atoms(Symbol).pop()
+            V = (variable, V.as_set())
+        elif isinstance(V, Symbol) or getattr(V, '_diff_wrt', False):
+            if isinstance(V, Idx):
+                if V.lower is None or V.upper is None:
+                    limits.append(Tuple(V))
+                else:
+                    limits.append(Tuple(V, V.lower, V.upper))
+            else:
+                limits.append(Tuple(V))
+            continue
+        if is_sequence(V) and not isinstance(V, Set):
+            if len(V) == 2 and isinstance(V[1], Set):
+                V = list(V)
+                if isinstance(V[1], Interval):  # includes Reals
+                    if discrete:
+                        raise TypeError(err_msg)
+                    V[1:] = V[1].inf, V[1].sup
+                elif isinstance(V[1], Range):
+                    if not discrete:
+                        raise TypeError(err_msg)
+                    lo = V[1].inf
+                    hi = V[1].sup
+                    dx = abs(V[1].step)  # direction doesn't matter
+                    if dx == 1:
+                        V[1:] = [lo, hi]
+                    else:
+                        if lo is not S.NegativeInfinity:
+                            V = [V[0]] + [0, (hi - lo)//dx, dx*V[0] + lo]
+                        else:
+                            V = [V[0]] + [0, S.Infinity, -dx*V[0] + hi]
+                else:
+                    # more complicated sets would require splitting, e.g.
+                    # Union(Interval(1, 3), interval(6,10))
+                    raise NotImplementedError(
+                        'expecting Range' if discrete else
+                        'Relational or single Interval' )
+            V = sympify(flatten(V))  # list of sympified elements/None
+            if isinstance(V[0], (Symbol, Idx)) or getattr(V[0], '_diff_wrt', False):
+                newsymbol = V[0]
+                if len(V) == 3:
+                    # general case
+                    if V[2] is None and V[1] is not None:
+                        orientation *= -1
+                    V = [newsymbol] + [i for i in V[1:] if i is not None]
+
+                lenV = len(V)
+                if not isinstance(newsymbol, Idx) or lenV == 3:
+                    if lenV == 4:
+                        limits.append(Tuple(*V))
+                        continue
+                    if lenV == 3:
+                        if isinstance(newsymbol, Idx):
+                            # Idx represents an integer which may have
+                            # specified values it can take on; if it is
+                            # given such a value, an error is raised here
+                            # if the summation would try to give it a larger
+                            # or smaller value than permitted. None and Symbolic
+                            # values will not raise an error.
+                            lo, hi = newsymbol.lower, newsymbol.upper
+                            try:
+                                if lo is not None and not bool(V[1] >= lo):
+                                    raise ValueError("Summation will set Idx value too low.")
+                            except TypeError:
+                                pass
+                            try:
+                                if hi is not None and not bool(V[2] <= hi):
+                                    raise ValueError("Summation will set Idx value too high.")
+                            except TypeError:
+                                pass
+                        limits.append(Tuple(*V))
+                        continue
+                    if lenV == 1 or (lenV == 2 and V[1] is None):
+                        limits.append(Tuple(newsymbol))
+                        continue
+                    elif lenV == 2:
+                        limits.append(Tuple(newsymbol, V[1]))
+                        continue
+
+        raise ValueError('Invalid limits given: %s' % str(symbols))
+
+    return limits, orientation
+
+sympy.sympy.concrete.products.__new__
+
+def __new__(cls, function, *symbols, **assumptions):
+    obj = ExprWithIntLimits.__new__(cls, function, *symbols, **assumptions)
+    return obj
+
+sympy.sympy.concrete.products.term
+
+@property
+def term(self):
+    return self._args[0]
+
+sympy.sympy.concrete.summations.__new__
+
+def __new__(cls, function, *symbols, **assumptions) -> Sum:
+    obj = AddWithLimits.__new__(cls, function, *symbols, **assumptions)
+    if not hasattr(obj, 'limits'):
+        return obj
+    if any(len(l) != 3 or None in l for l in obj.limits):
+        raise ValueError('Sum requires values for lower and upper bounds.')
+
+    return obj
+
+sympy.sympy.core._print_helpers.__str__
+
+def __str__(self):
+    from sympy.printing.str import sstr
+    return sstr(self, order=None)
+
+sympy.sympy.core.basic.xreplace
+
+def xreplace(self, rule, hack2=False):
+    return rule.get(self, self)
+
+sympy.sympy.core.basic.__hash__
+
+def __hash__(self) -> int:
+    # hash cannot be cached using cache_it because infinite recurrence
+    # occurs as hash is needed for setting cache dictionary keys
+    h = self._mhash
+    if h is None:
+        h = hash((type(self).__name__,) + self._hashable_content())
+        self._mhash = h
+    return h
+
+sympy.sympy.core.basic.atoms
+
+def atoms(self, *types: Tbasic | type[Tbasic]) -> set[Basic] | set[Tbasic]:
+    """Returns the atoms that form the current object.
+
+    By default, only objects that are truly atomic and cannot
+    be divided into smaller pieces are returned: symbols, numbers,
+    and number symbols like I and pi. It is possible to request
+    atoms of any type, however, as demonstrated below.
+
+    Examples
+    ========
+
+    >>> from sympy import I, pi, sin
+    >>> from sympy.abc import x, y
+    >>> (1 + x + 2*sin(y + I*pi)).atoms()
+    {1, 2, I, pi, x, y}
+
+    If one or more types are given, the results will contain only
+    those types of atoms.
+
+    >>> from sympy import Number, NumberSymbol, Symbol
+    >>> (1 + x + 2*sin(y + I*pi)).atoms(Symbol)
+    {x, y}
+
+    >>> (1 + x + 2*sin(y + I*pi)).atoms(Number)
+    {1, 2}
+
+    >>> (1 + x + 2*sin(y + I*pi)).atoms(Number, NumberSymbol)
+    {1, 2, pi}
+
+    >>> (1 + x + 2*sin(y + I*pi)).atoms(Number, NumberSymbol, I)
+    {1, 2, I, pi}
+
+    Note that I (imaginary unit) and zoo (complex infinity) are special
+    types of number symbols and are not part of the NumberSymbol class.
+
+    The type can be given implicitly, too:
+
+    >>> (1 + x + 2*sin(y + I*pi)).atoms(x) # x is a Symbol
+    {x, y}
+
+    Be careful to check your assumptions when using the implicit option
+    since ``S(1).is_Integer = True`` but ``type(S(1))`` is ``One``, a special type
+    of SymPy atom, while ``type(S(2))`` is type ``Integer`` and will find all
+    integers in an expression:
+
+    >>> from sympy import S
+    >>> (1 + x + 2*sin(y + I*pi)).atoms(S(1))
+    {1}
+
+    >>> (1 + x + 2*sin(y + I*pi)).atoms(S(2))
+    {1, 2}
+
+    Finally, arguments to atoms() can select more than atomic atoms: any
+    SymPy type (loaded in core/__init__.py) can be listed as an argument
+    and those types of "atoms" as found in scanning the arguments of the
+    expression recursively:
+
+    >>> from sympy import Function, Mul
+    >>> from sympy.core.function import AppliedUndef
+    >>> f = Function('f')
+    >>> (1 + f(x) + 2*sin(y + I*pi)).atoms(Function)
+    {f(x), sin(y + I*pi)}
+    >>> (1 + f(x) + 2*sin(y + I*pi)).atoms(AppliedUndef)
+    {f(x)}
+
+    >>> (1 + x + 2*sin(y + I*pi)).atoms(Mul)
+    {I*pi, 2*sin(y + I*pi)}
+
+    """
+    nodes = _preorder_traversal(self)
+    if types:
+        types2 = tuple([t if isinstance(t, type) else type(t) for t in types])
+        return {node for node in nodes if isinstance(node, types2)}
+    else:
+        return {node for node in nodes if not node.args}
+
+sympy.sympy.core.basic.free_symbols
+
+@property
+def free_symbols(self) -> set[Basic]:
+    """Return from the atoms of self those which are free symbols.
+
+    Not all free symbols are ``Symbol`` (see examples)
+
+    For most expressions, all symbols are free symbols. For some classes
+    this is not true. e.g. Integrals use Symbols for the dummy variables
+    which are bound variables, so Integral has a method to return all
+    symbols except those. Derivative keeps track of symbols with respect
+    to which it will perform a derivative; those are
+    bound variables, too, so it has its own free_symbols method.
+
+    Any other method that uses bound variables should implement a
+    free_symbols method.
+
+    Examples
+    ========
+
+    >>> from sympy import Derivative, Integral, IndexedBase
+    >>> from sympy.abc import x, y, n
+    >>> (x + 1).free_symbols
+    {x}
+    >>> Integral(x, y).free_symbols
+    {x, y}
+
+    Not all free symbols are actually symbols:
+
+    >>> IndexedBase('F')[0].free_symbols
+    {F, F[0]}
+
+    The symbols of differentiation are not included unless they
+    appear in the expression being differentiated.
+
+    >>> Derivative(x + y, y).free_symbols
+    {x, y}
+    >>> Derivative(x, y).free_symbols
+    {x}
+    >>> Derivative(x, (y, n)).free_symbols
+    {n, x}
+
+    If you want to know if a symbol is in the variables of the
+    Derivative you can do so as follows:
+
+    >>> Derivative(x, y).has_free(y)
+    True
+    """
+    empty: set[Basic] = set()
+    return empty.union(*(a.free_symbols for a in self.args))
+
+sympy.sympy.core.basic.subs
+
+def subs(self, arg1: Mapping[Basic | complex, Basic | complex]
+        | Iterable[tuple[Basic | complex, Basic | complex]] | Basic | complex,
+         arg2: Basic | complex | None = None, **kwargs: Any) -> Basic:
+    """
+    Substitutes old for new in an expression after sympifying args.
+
+    `args` is either:
+      - two arguments, e.g. foo.subs(old, new)
+      - one iterable argument, e.g. foo.subs(iterable). The iterable may be
+         o an iterable container with (old, new) pairs. In this case the
+           replacements are processed in the order given with successive
+           patterns possibly affecting replacements already made.
+         o a dict or set whose key/value items correspond to old/new pairs.
+           In this case the old/new pairs will be sorted by op count and in
+           case of a tie, by number of args and the default_sort_key. The
+           resulting sorted list is then processed as an iterable container
+           (see previous).
+
+    If the keyword ``simultaneous`` is True, the subexpressions will not be
+    evaluated until all the substitutions have been made.
+
+    Examples
+    ========
+
+    >>> from sympy import pi, exp, limit, oo
+    >>> from sympy.abc import x, y
+    >>> (1 + x*y).subs(x, pi)
+    pi*y + 1
+    >>> (1 + x*y).subs({x:pi, y:2})
+    1 + 2*pi
+    >>> (1 + x*y).subs([(x, pi), (y, 2)])
+    1 + 2*pi
+    >>> reps = [(y, x**2), (x, 2)]
+    >>> (x + y).subs(reps)
+    6
+    >>> (x + y).subs(reversed(reps))
+    x**2 + 2
+
+    >>> (x**2 + x**4).subs(x**2, y)
+    y**2 + y
+
+    To replace only the x**2 but not the x**4, use xreplace:
+
+    >>> (x**2 + x**4).xreplace({x**2: y})
+    x**4 + y
+
+    To delay evaluation until all substitutions have been made,
+    set the keyword ``simultaneous`` to True:
+
+    >>> (x/y).subs([(x, 0), (y, 0)])
+    0
+    >>> (x/y).subs([(x, 0), (y, 0)], simultaneous=True)
+    nan
+
+    This has the added feature of not allowing subsequent substitutions
+    to affect those already made:
+
+    >>> ((x + y)/y).subs({x + y: y, y: x + y})
+    1
+    >>> ((x + y)/y).subs({x + y: y, y: x + y}, simultaneous=True)
+    y/(x + y)
+
+    In order to obtain a canonical result, unordered iterables are
+    sorted by count_op length, number of arguments and by the
+    default_sort_key to break any ties. All other iterables are left
+    unsorted.
+
+    >>> from sympy import sqrt, sin, cos
+    >>> from sympy.abc import a, b, c, d, e
+
+    >>> A = (sqrt(sin(2*x)), a)
+    >>> B = (sin(2*x), b)
+    >>> C = (cos(2*x), c)
+    >>> D = (x, d)
+    >>> E = (exp(x), e)
+
+    >>> expr = sqrt(sin(2*x))*sin(exp(x)*x)*cos(2*x) + sin(2*x)
+
+    >>> expr.subs(dict([A, B, C, D, E]))
+    a*c*sin(d*e) + b
+
+    The resulting expression represents a literal replacement of the
+    old arguments with the new arguments. This may not reflect the
+    limiting behavior of the expression:
+
+    >>> (x**3 - 3*x).subs({x: oo})
+    nan
+
+    >>> limit(x**3 - 3*x, x, oo)
+    oo
+
+    If the substitution will be followed by numerical
+    evaluation, it is better to pass the substitution to
+    evalf as
+
+    >>> (1/x).evalf(subs={x: 3.0}, n=21)
+    0.333333333333333333333
+
+    rather than
+
+    >>> (1/x).subs({x: 3.0}).evalf(21)
+    0.333333333333333314830
+
+    as the former will ensure that the desired level of precision is
+    obtained.
+
+    See Also
+    ========
+    replace: replacement capable of doing wildcard-like matching,
+             parsing of match, and conditional replacements
+    xreplace: exact node replacement in expr tree; also capable of
+              using matching rules
+    sympy.core.evalf.EvalfMixin.evalf: calculates the given formula to a desired level of precision
+
+    """
+    from .containers import Dict
+    from .symbol import Dummy, Symbol
+    from .numbers import _illegal
+
+    items: Iterable[tuple[Basic | complex, Basic | complex]]
+
+    unordered = False
+    if arg2 is None:
+
+        if isinstance(arg1, set):
+            items = arg1
+            unordered = True
+        elif isinstance(arg1, (Dict, Mapping)):
+            unordered = True
+            items = arg1.items() # type: ignore
+        elif not iterable(arg1):
+            raise ValueError(filldedent("""
+               When a single argument is passed to subs
+               it should be a dictionary of old: new pairs or an iterable
+               of (old, new) tuples."""))
+        else:
+            items = arg1 # type: ignore
+    else:
+        items = [(arg1, arg2)] # type: ignore
+
+    def sympify_old(old) -> Basic:
+        if isinstance(old, str):
+            # Use Symbol rather than parse_expr for old
+            return Symbol(old)
+        elif isinstance(old, type):
+            # Allow a type e.g. Function('f') or sin
+            return sympify(old, strict=False)
+        else:
+            return sympify(old, strict=True)
+
+    def sympify_new(new) -> Basic:
+        if isinstance(new, (str, type)):
+            # Allow a type or parse a string input
+            return sympify(new, strict=False)
+        else:
+            return sympify(new, strict=True)
+
+    sequence = [(sympify_old(s1), sympify_new(s2)) for s1, s2 in items]
+
+    # skip if there is no change
+    sequence = [(s1, s2) for s1, s2 in sequence if not _aresame(s1, s2)]
+
+    simultaneous = kwargs.pop('simultaneous', False)
+
+    if unordered:
+        from .sorting import _nodes, default_sort_key
+        sequence_dict = dict(sequence)
+        # order so more complex items are first and items
+        # of identical complexity are ordered so
+        # f(x) < f(y) < x < y
+        # \___ 2 __/    \_1_/  <- number of nodes
+        #
+        # For more complex ordering use an unordered sequence.
+        k = list(ordered(sequence_dict, default=False, keys=(
+            lambda x: -_nodes(x),
+            default_sort_key,
+            )))
+        sequence = [(k, sequence_dict[k]) for k in k]
+        # do infinities first
+        if not simultaneous:
+            redo = [i for i, seq in enumerate(sequence) if seq[1] in _illegal]
+            for i in reversed(redo):
+                sequence.insert(0, sequence.pop(i))
+
+    if simultaneous:  # XXX should this be the default for dict subs?
+        reps = {}
+        rv = self
+        kwargs['hack2'] = True
+        m = Dummy('subs_m')
+        for old, new in sequence:
+            com = new.is_commutative
+            if com is None:
+                com = True
+            d = Dummy('subs_d', commutative=com)
+            # using d*m so Subs will be used on dummy variables
+            # in things like Derivative(f(x, y), x) in which x
+            # is both free and bound
+            rv = rv._subs(old, d*m, **kwargs)
+            if not isinstance(rv, Basic):
+                break
+            reps[d] = new
+        reps[m] = S.One  # get rid of m
+        return rv.xreplace(reps)
+    else:
+        rv = self
+        for old, new in sequence:
+            rv = rv._subs(old, new, **kwargs)
+            if not isinstance(rv, Basic):
+                break
+        return rv
+
+sympy.sympy.core.cache.wrapper
+
+@wraps(func)
+def wrapper(*args, **kwargs):
+    try:
+        retval = cfunc(*args, **kwargs)
+    except TypeError as e:
+        if not e.args or not e.args[0].startswith('unhashable type:'):
+            raise
+        retval = func(*args, **kwargs)
+    return retval
+
+sympy.sympy.core.containers.__new__
+
+def __new__(cls, *args, **kwargs):
+    if kwargs.get('sympify', True):
+        args = (sympify(arg) for arg in args)
+    obj = Basic.__new__(cls, *args)
+    return obj
+
+sympy.sympy.core.containers.__getitem__
+
+def __getitem__(self, i):
+    if isinstance(i, slice):
+        indices = i.indices(len(self))
+        return Tuple(*(self.args[j] for j in range(*indices)))
+    return self.args[i]
+
+sympy.sympy.core.containers.__len__
+
+def __len__(self):
+    return len(self.args)
+
+sympy.sympy.core.containers.__iter__
+
+def __iter__(self):
+    return iter(self.args)
+
+sympy.sympy.core.function.free_symbols
+
+@property
+def free_symbols(self):
+    ret = self.expr.free_symbols
+    # Add symbolic counts to free_symbols
+    for _, count in self.variable_count:
+        ret.update(count.free_symbols)
+    return ret
+
+sympy.sympy.core.function.__eq__
+
+def __eq__(self, other):
+    return (isinstance(other, self.__class__) and
+        self.class_key() == other.class_key() and
+        self._kwargs == other._kwargs)
+
+sympy.sympy.core.relational.lhs
+
+@property
+def lhs(self) -> Basic:
+    """The left-hand side of the relation."""
+    return self._args[0]
+
+sympy.sympy.core.relational.rhs
+
+@property
+def rhs(self) -> Basic:
+    """The right-hand side of the relation."""
+    return self._args[1]
+
+sympy.sympy.core.relational.__new__
+
+def __new__(cls, lhs, rhs, **options) -> Equality | BooleanFalse | BooleanTrue: # type: ignore
+    evaluate = options.pop('evaluate', global_parameters.evaluate)
+    lhs = _sympify(lhs)
+    rhs = _sympify(rhs)
+    if evaluate:
+        val = is_eq(lhs, rhs)
+        if val is None:
+            return cls(lhs, rhs, evaluate=False)
+        else:
+            return _sympify(val)
+
+    return Relational.__new__(cls, lhs, rhs)
+
+sympy.sympy.core.symbol.free_symbols
+
+@property
+def free_symbols(self) -> set[Basic]:
+    return {self}
+
+sympy.sympy.core.symbol.__new__
+
+def __new__(cls, name: str | None = None,
+                 dummy_index: int | None = None,
+                 **assumptions: bool | None) -> Self:
+    if dummy_index is not None:
+        assert name is not None, "If you specify a dummy_index, you must also provide a name"
+
+    if name is None:
+        name = "Dummy_" + str(Dummy._count)
+
+    if dummy_index is None:
+        dummy_index = Dummy._base_dummy_index + Dummy._count
+        Dummy._count += 1
+
+    cls._sanitize(assumptions, cls)
+    obj = Symbol.__xnew__(cls, name, **assumptions)
+
+    obj.dummy_index = dummy_index
+
+    return obj
+
+sympy.sympy.core.sympify.sympify
+
+def sympify(a, locals=None, convert_xor=True, strict=False, rational=False,
+        evaluate=None):
+    """
+    Converts an arbitrary expression to a type that can be used inside SymPy.
+
+    Explanation
+    ===========
+
+    It will convert Python ints into instances of :class:`~.Integer`, floats
+    into instances of :class:`~.Float`, etc. It is also able to coerce
+    symbolic expressions which inherit from :class:`~.Basic`. This can be
+    useful in cooperation with SAGE.
+
+    .. warning::
+        Note that this function uses ``eval``, and thus shouldn't be used on
+        unsanitized input.
+
+    If the argument is already a type that SymPy understands, it will do
+    nothing but return that value. This can be used at the beginning of a
+    function to ensure you are working with the correct type.
+
+    Examples
+    ========
+
+    >>> from sympy import sympify
+
+    >>> sympify(2).is_integer
+    True
+    >>> sympify(2).is_real
+    True
+
+    >>> sympify(2.0).is_real
+    True
+    >>> sympify("2.0").is_real
+    True
+    >>> sympify("2e-45").is_real
+    True
+
+    If the expression could not be converted, a SympifyError is raised.
+
+    >>> sympify("x***2")
+    Traceback (most recent call last):
+    ...
+    SympifyError: SympifyError: "could not parse 'x***2'"
+
+    When attempting to parse non-Python syntax using ``sympify``, it raises a
+    ``SympifyError``:
+
+    >>> sympify("2x+1")
+    Traceback (most recent call last):
+    ...
+    SympifyError: Sympify of expression 'could not parse '2x+1'' failed
+
+    To parse non-Python syntax, use ``parse_expr`` from ``sympy.parsing.sympy_parser``.
+
+    >>> from sympy.parsing.sympy_parser import parse_expr
+    >>> parse_expr("2x+1", transformations="all")
+    2*x + 1
+
+    For more details about ``transformations``: see :func:`~sympy.parsing.sympy_parser.parse_expr`
+
+    Locals
+    ------
+
+    The sympification happens with access to everything that is loaded
+    by ``from sympy import *``; anything used in a string that is not
+    defined by that import will be converted to a symbol. In the following,
+    the ``bitcount`` function is treated as a symbol and the ``O`` is
+    interpreted as the :class:`~.Order` object (used with series) and it raises
+    an error when used improperly:
+
+    >>> s = 'bitcount(42)'
+    >>> sympify(s)
+    bitcount(42)
+    >>> sympify("O(x)")
+    O(x)
+    >>> sympify("O + 1")
+    Traceback (most recent call last):
+    ...
+    TypeError: unbound method...
+
+    In order to have ``bitcount`` be recognized it can be defined in a
+    namespace dictionary and passed as locals:
+
+    >>> ns = {}
+    >>> exec('bitcount = lambda n: int(n).bit_length()', ns)
+    >>> sympify(s, locals=ns)
+    6
+
+    In order to have the ``O`` interpreted as a Symbol, identify it as such
+    in the namespace dictionary. This can be done in a variety of ways; all
+    three of the following are possibilities:
+
+    >>> from sympy import Symbol
+    >>> ns["O"] = Symbol("O")  # method 1
+    >>> exec('from sympy.abc import O', ns)  # method 2
+    >>> ns.update(dict(O=Symbol("O")))  # method 3
+    >>> sympify("O + 1", locals=ns)
+    O + 1
+
+    If you want *all* single-letter and Greek-letter variables to be symbols
+    then you can use the clashing-symbols dictionaries that have been defined
+    there as private variables: ``_clash1`` (single-letter variables),
+    ``_clash2`` (the multi-letter Greek names) or ``_clash`` (both single and
+    multi-letter names that are defined in ``abc``).
+
+    >>> from sympy.abc import _clash1
+    >>> set(_clash1)  # if this fails, see issue #23903
+    {'E', 'I', 'N', 'O', 'Q', 'S'}
+    >>> sympify('I & Q', _clash1)
+    I & Q
+
+    Strict
+    ------
+
+    If the option ``strict`` is set to ``True``, only the types for which an
+    explicit conversion has been defined are converted. In the other
+    cases, a SympifyError is raised.
+
+    >>> print(sympify(None))
+    None
+    >>> sympify(None, strict=True)
+    Traceback (most recent call last):
+    ...
+    SympifyError: SympifyError: None
+
+    .. deprecated:: 1.6
+
+       ``sympify(obj)`` automatically falls back to ``str(obj)`` when all
+       other conversion methods fail, but this is deprecated. ``strict=True``
+       will disable this deprecated behavior. See
+       :ref:`deprecated-sympify-string-fallback`.
+
+    Evaluation
+    ----------
+
+    If the option ``evaluate`` is set to ``False``, then arithmetic and
+    operators will be converted into their SymPy equivalents and the
+    ``evaluate=False`` option will be added. Nested ``Add`` or ``Mul`` will
+    be denested first. This is done via an AST transformation that replaces
+    operators with their SymPy equivalents, so if an operand redefines any
+    of those operations, the redefined operators will not be used. If
+    argument a is not a string, the mathematical expression is evaluated
+    before being passed to sympify, so adding ``evaluate=False`` will still
+    return the evaluated result of expression.
+
+    >>> sympify('2**2 / 3 + 5')
+    19/3
+    >>> sympify('2**2 / 3 + 5', evaluate=False)
+    2**2/3 + 5
+    >>> sympify('4/2+7', evaluate=True)
+    9
+    >>> sympify('4/2+7', evaluate=False)
+    4/2 + 7
+    >>> sympify(4/2+7, evaluate=False)
+    9.00000000000000
+
+    Extending
+    ---------
+
+    To extend ``sympify`` to convert custom objects (not derived from ``Basic``),
+    just define a ``_sympy_`` method to your class. You can do that even to
+    classes that you do not own by subclassing or adding the method at runtime.
+
+    >>> from sympy import Matrix
+    >>> class MyList1(object):
+    ...     def __iter__(self):
+    ...         yield 1
+    ...         yield 2
+    ...         return
+    ...     def __getitem__(self, i): return list(self)[i]
+    ...     def _sympy_(self): return Matrix(self)
+    >>> sympify(MyList1())
+    Matrix([
+    [1],
+    [2]])
+
+    If you do not have control over the class definition you could also use the
+    ``converter`` global dictionary. The key is the class and the value is a
+    function that takes a single argument and returns the desired SymPy
+    object, e.g. ``converter[MyList] = lambda x: Matrix(x)``.
+
+    >>> class MyList2(object):   # XXX Do not do this if you control the class!
+    ...     def __iter__(self):  #     Use _sympy_!
+    ...         yield 1
+    ...         yield 2
+    ...         return
+    ...     def __getitem__(self, i): return list(self)[i]
+    >>> from sympy.core.sympify import converter
+    >>> converter[MyList2] = lambda x: Matrix(x)
+    >>> sympify(MyList2())
+    Matrix([
+    [1],
+    [2]])
+
+    Notes
+    =====
+
+    The keywords ``rational`` and ``convert_xor`` are only used
+    when the input is a string.
+
+    convert_xor
+    -----------
+
+    >>> sympify('x^y',convert_xor=True)
+    x**y
+    >>> sympify('x^y',convert_xor=False)
+    x ^ y
+
+    rational
+    --------
+
+    >>> sympify('0.1',rational=False)
+    0.1
+    >>> sympify('0.1',rational=True)
+    1/10
+
+    Sometimes autosimplification during sympification results in expressions
+    that are very different in structure than what was entered. Until such
+    autosimplification is no longer done, the ``kernS`` function might be of
+    some use. In the example below you can see how an expression reduces to
+    $-1$ by autosimplification, but does not do so when ``kernS`` is used.
+
+    >>> from sympy.core.sympify import kernS
+    >>> from sympy.abc import x
+    >>> -2*(-(-x + 1/x)/(x*(x - 1/x)**2) - 1/(x*(x - 1/x))) - 1
+    -1
+    >>> s = '-2*(-(-x + 1/x)/(x*(x - 1/x)**2) - 1/(x*(x - 1/x))) - 1'
+    >>> sympify(s)
+    -1
+    >>> kernS(s)
+    -2*(-(-x + 1/x)/(x*(x - 1/x)**2) - 1/(x*(x - 1/x))) - 1
+
+    Parameters
+    ==========
+
+    a :
+        - any object defined in SymPy
+        - standard numeric Python types: ``int``, ``long``, ``float``, ``Decimal``
+        - strings (like ``"0.09"``, ``"2e-19"`` or ``'sin(x)'``)
+        - booleans, including ``None`` (will leave ``None`` unchanged)
+        - dicts, lists, sets or tuples containing any of the above
+
+    convert_xor : bool, optional
+        If true, treats ``^`` as exponentiation.
+        If False, treats ``^`` as XOR itself.
+        Used only when input is a string.
+
+    locals : any object defined in SymPy, optional
+        In order to have strings be recognized it can be imported
+        into a namespace dictionary and passed as locals.
+
+    strict : bool, optional
+        If the option strict is set to ``True``, only the types for which
+        an explicit conversion has been defined are converted. In the
+        other cases, a SympifyError is raised.
+
+    rational : bool, optional
+        If ``True``, converts floats into :class:`~.Rational`.
+        If ``False``, it lets floats remain as it is.
+        Used only when input is a string.
+
+    evaluate : bool, optional
+        If False, then arithmetic and operators will be converted into
+        their SymPy equivalents. If True the expression will be evaluated
+        and the result will be returned.
+
+    """
+    # XXX: If a is a Basic subclass rather than instance (e.g. sin rather than
+    # sin(x)) then a.__sympy__ will be the property. Only on the instance will
+    # a.__sympy__ give the *value* of the property (True). Since sympify(sin)
+    # was used for a long time we allow it to pass. However if strict=True as
+    # is the case in internal calls to _sympify then we only allow
+    # is_sympy=True.
+    #
+    # https://github.com/sympy/sympy/issues/20124
+    is_sympy = getattr(a, '__sympy__', None)
+    if is_sympy is True:
+        return a
+    elif is_sympy is not None:
+        if not strict:
+            return a
+        else:
+            raise SympifyError(a)
+
+    if isinstance(a, CantSympify):
+        raise SympifyError(a)
+
+    cls = getattr(a, "__class__", None)
+
+    #Check if there exists a converter for any of the types in the mro
+    for superclass in getmro(cls):
+        #First check for user defined converters
+        conv = _external_converter.get(superclass)
+        if conv is None:
+            #if none exists, check for SymPy defined converters
+            conv = _sympy_converter.get(superclass)
+        if conv is not None:
+            return conv(a)
+
+    if cls is type(None):
+        if strict:
+            raise SympifyError(a)
+        else:
+            return a
+
+    if evaluate is None:
+        evaluate = global_parameters.evaluate
+
+    # Support for basic numpy datatypes
+    if _is_numpy_instance(a):
+        import numpy as np
+        if np.isscalar(a):
+            return _convert_numpy_types(a, locals=locals,
+                convert_xor=convert_xor, strict=strict, rational=rational,
+                evaluate=evaluate)
+
+    _sympy_ = getattr(a, "_sympy_", None)
+    if _sympy_ is not None:
+        return a._sympy_()
+
+    if not strict:
+        # Put numpy array conversion _before_ float/int, see
+        # <https://github.com/sympy/sympy/issues/13924>.
+        flat = getattr(a, "flat", None)
+        if flat is not None:
+            shape = getattr(a, "shape", None)
+            if shape is not None:
+                from sympy.tensor.array import Array
+                return Array(a.flat, a.shape)  # works with e.g. NumPy arrays
+
+    if not isinstance(a, str):
+        if _is_numpy_instance(a):
+            import numpy as np
+            assert not isinstance(a, np.number)
+            if isinstance(a, np.ndarray):
+                # Scalar arrays (those with zero dimensions) have sympify
+                # called on the scalar element.
+                if a.ndim == 0:
+                    try:
+                        return sympify(a.item(),
+                                       locals=locals,
+                                       convert_xor=convert_xor,
+                                       strict=strict,
+                                       rational=rational,
+                                       evaluate=evaluate)
+                    except SympifyError:
+                        pass
+        elif hasattr(a, '__float__'):
+            # float and int can coerce size-one numpy arrays to their lone
+            # element.  See issue https://github.com/numpy/numpy/issues/10404.
+            return sympify(float(a))
+        elif hasattr(a, '__int__'):
+            return sympify(int(a))
+
+    if strict:
+        raise SympifyError(a)
+
+    if iterable(a):
+        try:
+            return type(a)([sympify(x, locals=locals, convert_xor=convert_xor,
+                rational=rational, evaluate=evaluate) for x in a])
+        except TypeError:
+            # Not all iterables are rebuildable with their type.
+            pass
+
+    if not isinstance(a, str):
+        raise SympifyError('cannot sympify object of type %r' % type(a))
+
+    from sympy.parsing.sympy_parser import (parse_expr, TokenError,
+                                            standard_transformations)
+    from sympy.parsing.sympy_parser import convert_xor as t_convert_xor
+    from sympy.parsing.sympy_parser import rationalize as t_rationalize
+
+    transformations = standard_transformations
+
+    if rational:
+        transformations += (t_rationalize,)
+    if convert_xor:
+        transformations += (t_convert_xor,)
+
+    try:
+        a = a.replace('\n', '')
+        expr = parse_expr(a, local_dict=locals, transformations=transformations, evaluate=evaluate)
+    except (TokenError, SyntaxError) as exc:
+        raise SympifyError('could not parse %r' % a, exc)
+
+    return expr
+
+sympy.sympy.functions.elementary.piecewise.piecewise_fold
+
+def piecewise_fold(expr, evaluate=True):
+    """
+    Takes an expression containing a piecewise function and returns the
+    expression in piecewise form. In addition, any ITE conditions are
+    rewritten in negation normal form and simplified.
+
+    The final Piecewise is evaluated (default) but if the raw form
+    is desired, send ``evaluate=False``; if trivial evaluation is
+    desired, send ``evaluate=None`` and duplicate conditions and
+    processing of True and False will be handled.
+
+    Examples
+    ========
+
+    >>> from sympy import Piecewise, piecewise_fold, S
+    >>> from sympy.abc import x
+    >>> p = Piecewise((x, x < 1), (1, S(1) <= x))
+    >>> piecewise_fold(x*p)
+    Piecewise((x**2, x < 1), (x, True))
+
+    See Also
+    ========
+
+    Piecewise
+    piecewise_exclusive
+    """
+    if not isinstance(expr, Basic) or not expr.has(Piecewise):
+        return expr
+
+    new_args = []
+    if isinstance(expr, (ExprCondPair, Piecewise)):
+        for e, c in expr.args:
+            if not isinstance(e, Piecewise):
+                e = piecewise_fold(e)
+            # we don't keep Piecewise in condition because
+            # it has to be checked to see that it's complete
+            # and we convert it to ITE at that time
+            assert not c.has(Piecewise)  # pragma: no cover
+            if isinstance(c, ITE):
+                c = c.to_nnf()
+                c = simplify_logic(c, form='cnf')
+            if isinstance(e, Piecewise):
+                new_args.extend([(piecewise_fold(ei), And(ci, c))
+                    for ei, ci in e.args])
+            else:
+                new_args.append((e, c))
+    else:
+        # Given
+        #     P1 = Piecewise((e11, c1), (e12, c2), A)
+        #     P2 = Piecewise((e21, c1), (e22, c2), B)
+        #     ...
+        # the folding of f(P1, P2) is trivially
+        # Piecewise(
+        #   (f(e11, e21), c1),
+        #   (f(e12, e22), c2),
+        #   (f(Piecewise(A), Piecewise(B)), True))
+        # Certain objects end up rewriting themselves as thus, so
+        # we do that grouping before the more generic folding.
+        # The following applies this idea when f = Add or f = Mul
+        # (and the expression is commutative).
+        if expr.is_Add or expr.is_Mul and expr.is_commutative:
+            p, args = sift(expr.args, lambda x: x.is_Piecewise, binary=True)
+            pc = sift(p, lambda x: tuple([c for e,c in x.args]))
+            for c in list(ordered(pc)):
+                if len(pc[c]) > 1:
+                    pargs = [list(i.args) for i in pc[c]]
+                    # the first one is the same; there may be more
+                    com = common_prefix(*[
+                        [i.cond for i in j] for j in pargs])
+                    n = len(com)
+                    collected = []
+                    for i in range(n):
+                        collected.append((
+                            expr.func(*[ai[i].expr for ai in pargs]),
+                            com[i]))
+                    remains = []
+                    for a in pargs:
+                        if n == len(a):  # no more args
+                            continue
+                        if a[n].cond == True:  # no longer Piecewise
+                            remains.append(a[n].expr)
+                        else:  # restore the remaining Piecewise
+                            remains.append(
+                                Piecewise(*a[n:], evaluate=False))
+                    if remains:
+                        collected.append((expr.func(*remains), True))
+                    args.append(Piecewise(*collected, evaluate=False))
+                    continue
+                args.extend(pc[c])
+        else:
+            args = expr.args
+        # fold
+        folded = list(map(piecewise_fold, args))
+        for ec in product(*[
+                (i.args if isinstance(i, Piecewise) else
+                 [(i, true)]) for i in folded]):
+            e, c = zip(*ec)
+            new_args.append((expr.func(*e), And(*c)))
+
+    if evaluate is None:
+        # don't return duplicate conditions, otherwise don't evaluate
+        new_args = list(reversed([(e, c) for c, e in {
+            c: e for e, c in reversed(new_args)}.items()]))
+    rv = Piecewise(*new_args, evaluate=evaluate)
+    if evaluate is None and len(rv.args) == 1 and rv.args[0].cond == True:
+        return rv.args[0].expr
+    if any(s.expr.has(Piecewise) for p in rv.atoms(Piecewise) for s in p.args):
+        return piecewise_fold(rv)
+    return rv
+
+sympy.sympy.integrals.integrals.free_symbols
+
+@property
+def free_symbols(self):
+    """
+    This method returns the symbols that will exist when the
+    integral is evaluated. This is useful if one is trying to
+    determine whether an integral depends on a certain
+    symbol or not.
+
+    Examples
+    ========
+
+    >>> from sympy import Integral
+    >>> from sympy.abc import x, y
+    >>> Integral(x, (x, y, 1)).free_symbols
+    {y}
+
+    See Also
+    ========
+
+    sympy.concrete.expr_with_limits.ExprWithLimits.function
+    sympy.concrete.expr_with_limits.ExprWithLimits.limits
+    sympy.concrete.expr_with_limits.ExprWithLimits.variables
+    """
+    return super().free_symbols
+
+sympy.sympy.integrals.integrals.__new__
+
+def __new__(cls, function, *symbols, **assumptions) -> Integral:
+    """Create an unevaluated integral.
+
+    Explanation
+    ===========
+
+    Arguments are an integrand followed by one or more limits.
+
+    If no limits are given and there is only one free symbol in the
+    expression, that symbol will be used, otherwise an error will be
+    raised.
+
+    >>> from sympy import Integral
+    >>> from sympy.abc import x, y
+    >>> Integral(x)
+    Integral(x, x)
+    >>> Integral(y)
+    Integral(y, y)
+
+    When limits are provided, they are interpreted as follows (using
+    ``x`` as though it were the variable of integration):
+
+        (x,) or x - indefinite integral
+        (x, a) - "evaluate at" integral is an abstract antiderivative
+        (x, a, b) - definite integral
+
+    The ``as_dummy`` method can be used to see which symbols cannot be
+    targeted by subs: those with a prepended underscore cannot be
+    changed with ``subs``. (Also, the integration variables themselves --
+    the first element of a limit -- can never be changed by subs.)
+
+    >>> i = Integral(x, x)
+    >>> at = Integral(x, (x, x))
+    >>> i.as_dummy()
+    Integral(x, x)
+    >>> at.as_dummy()
+    Integral(_0, (_0, x))
+
+    """
+
+    #This will help other classes define their own definitions
+    #of behaviour with Integral.
+    if hasattr(function, '_eval_Integral'):
+        return function._eval_Integral(*symbols, **assumptions)
+
+    if isinstance(function, Poly):
+        sympy_deprecation_warning(
+            """
+            integrate(Poly) and Integral(Poly) are deprecated. Instead,
+            use the Poly.integrate() method, or convert the Poly to an
+            Expr first with the Poly.as_expr() method.
+            """,
+            deprecated_since_version="1.6",
+            active_deprecations_target="deprecated-integrate-poly")
+
+    obj = AddWithLimits.__new__(cls, function, *symbols, **assumptions)
+    return obj
+
+sympy.sympy.matrices.matrixbase.atoms
+
+def atoms(self, *types: Tbasic | type[Tbasic]) -> set[Basic] | set[Tbasic]:
+    """Returns the atoms that form the current object.
+
+    Examples
+    ========
+
+    >>> from sympy.abc import x, y
+    >>> from sympy import Matrix
+    >>> Matrix([[x]])
+    Matrix([[x]])
+    >>> _.atoms()
+    {x}
+    >>> Matrix([[x, y], [y, x]])
+    Matrix([
+    [x, y],
+    [y, x]])
+    >>> _.atoms()
+    {x, y}
+    """
+    types = tuple(t if isinstance(t, type) else type(t) for t in types)
+    if not types:
+        # XXX: .atoms(Atom) is not the same as .atoms()
+        # This should be changed.
+        return self._eval_atoms(Atom) # type: ignore
+    else:
+        return self._eval_atoms(*types)
+
+sympy.sympy.matrices.matrixbase.xreplace
+
+def xreplace(self, rule: Mapping[SBasic, SBasic]) -> Self:
+    """Return a new matrix with xreplace applied to each entry.
+
+    Examples
+    ========
+
+    >>> from sympy.abc import x, y
+    >>> from sympy import SparseMatrix, Matrix
+    >>> SparseMatrix(1, 1, [x])
+    Matrix([[x]])
+    >>> _.xreplace({x: y})
+    Matrix([[y]])
+    >>> Matrix(_).xreplace({y: x})
+    Matrix([[x]])
+    """
+    return self.applyfunc(lambda x: x.xreplace(rule))
+
+sympy.sympy.utilities.exceptions.sympy_deprecation_warning
+
+def sympy_deprecation_warning(message, *, deprecated_since_version,
+                              active_deprecations_target, stacklevel=3):
+    r'''
+    Warn that a feature is deprecated in SymPy.
+
+    See the :ref:`deprecation-policy` document for details on when and how
+    things should be deprecated in SymPy.
+
+    To mark an entire function or class as deprecated, you can use the
+    :func:`@deprecated <sympy.utilities.decorator.deprecated>` decorator.
+
+    Parameters
+    ==========
+
+    message : str
+         The deprecation message. This may span multiple lines and contain
+         code examples. Messages should be wrapped to 80 characters. The
+         message is automatically dedented and leading and trailing whitespace
+         stripped. Messages may include dynamic content based on the user
+         input, but avoid using ``str(expression)`` if an expression can be
+         arbitrary, as it might be huge and make the warning message
+         unreadable.
+
+    deprecated_since_version : str
+         The version of SymPy the feature has been deprecated since. For new
+         deprecations, this should be the version in `sympy/release.py
+         <https://github.com/sympy/sympy/blob/master/sympy/release.py>`_
+         without the ``.dev``. If the next SymPy version ends up being
+         different from this, the release manager will need to update any
+         ``SymPyDeprecationWarning``\s using the incorrect version. This
+         argument is required and must be passed as a keyword argument.
+         (example:  ``deprecated_since_version="1.10"``).
+
+    active_deprecations_target : str
+        The Sphinx target corresponding to the section for the deprecation in
+        the :ref:`active-deprecations` document (see
+        ``doc/src/explanation/active-deprecations.md``). This is used to
+        automatically generate a URL to the page in the warning message. This
+        argument is required and must be passed as a keyword argument.
+        (example: ``active_deprecations_target="deprecated-feature-abc"``)
+
+    stacklevel : int, default: 3
+        The ``stacklevel`` parameter that is passed to ``warnings.warn``. If
+        you create a wrapper that calls this function, this should be
+        increased so that the warning message shows the user line of code that
+        produced the warning. Note that in some cases there will be multiple
+        possible different user code paths that could result in the warning.
+        In that case, just choose the smallest common stacklevel.
+
+    Examples
+    ========
+
+    >>> from sympy.utilities.exceptions import sympy_deprecation_warning
+    >>> def is_this_zero(x, y=0):
+    ...     """
+    ...     Determine if x = 0.
+    ...
+    ...     Parameters
+    ...     ==========
+    ...
+    ...     x : Expr
+    ...       The expression to check.
+    ...
+    ...     y : Expr, optional
+    ...       If provided, check if x = y.
+    ...
+    ...       .. deprecated:: 1.1
+    ...
+    ...          The ``y`` argument to ``is_this_zero`` is deprecated. Use
+    ...          ``is_this_zero(x - y)`` instead.
+    ...
+    ...     """
+    ...     from sympy import simplify
+    ...
+    ...     if y != 0:
+    ...         sympy_deprecation_warning("""
+    ...     The y argument to is_zero() is deprecated. Use is_zero(x - y) instead.""",
+    ...             deprecated_since_version="1.1",
+    ...             active_deprecations_target='is-this-zero-y-deprecation')
+    ...     return simplify(x - y) == 0
+    >>> is_this_zero(0)
+    True
+    >>> is_this_zero(1, 1) # doctest: +SKIP
+    <stdin>:1: SymPyDeprecationWarning:
+    <BLANKLINE>
+    The y argument to is_zero() is deprecated. Use is_zero(x - y) instead.
+    <BLANKLINE>
+    See https://docs.sympy.org/latest/explanation/active-deprecations.html#is-this-zero-y-deprecation
+    for details.
+    <BLANKLINE>
+    This has been deprecated since SymPy version 1.1. It
+    will be removed in a future version of SymPy.
+    <BLANKLINE>
+      is_this_zero(1, 1)
+    True
+
+    See Also
+    ========
+
+    sympy.utilities.exceptions.SymPyDeprecationWarning
+    sympy.utilities.exceptions.ignore_warnings
+    sympy.utilities.decorator.deprecated
+    sympy.testing.pytest.warns_deprecated_sympy
+
+    '''
+    w = SymPyDeprecationWarning(message,
+                            deprecated_since_version=deprecated_since_version,
+                                active_deprecations_target=active_deprecations_target)
+    warnings.warn(w, stacklevel=stacklevel)
+
+
+[/PYTHON]
+What will be the input of `_common_new`, given the following output:
+[OUTPUT]
+```
+{
+    "output": [
+        "1",
+        [
+            "(x,)"
+        ],
+        1
+    ]
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {},
+    "args": {
+        "cls": XXX,
+        "function": XXX,
+        "discrete": XXX,
+        "symbols": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

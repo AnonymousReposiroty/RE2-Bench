@@ -1,0 +1,97 @@
+Let's reason through this.  
+
+The function `_eval_expand_mul` in `Mul` processes a multiplication expression, expanding it when some factors are sums. The output is `"-sin(phi)**2"`, which is a `Mul` of `-1` and `sin(phi)**2`.  
+
+But `-sin(phi)**2` could also be parsed as `-1 * sin(phi)**2` (a `Mul`), or it could result from expanding something like `(cos(phi)**2 - 1)` because `cos(phi)**2 - 1 = -sin(phi)**2` (via identity `cos^2 - 1 = -sin^2`).  
+
+In `_eval_expand_mul`, the logic splits numerator and denominator via `fraction`, then expands multiplicative terms if some factors are sums.  
+So maybe the input `self` was originally something like `cos(phi)**2 - 1`? But `_eval_expand_mul` is a method of `Mul`, so `self` must be a `Mul`.  
+If `self` is `cos(phi)**2 - 1`, that’s an `Add`, not a `Mul`. Wait — `_eval_expand_mul` is called on a `Mul` object, but maybe one factor inside is an `Add`, so it triggers expansion.  
+
+Given the output is `-sin(phi)**2`, perhaps input was `(cos(phi)**2 - 1)` directly? But `(cos(phi)**2 - 1)` is not a `Mul`.  
+
+Let's check: maybe it's `Mul(1, cos(phi)**2 - 1, evaluate=False)`. Then `n, d = fraction(...)` returns `(cos(phi)**2 - 1, 1)`. Then `if d.is_Mul` branch is skipped (d is 1). Then `expr = n/d` is still `cos(phi)**2 - 1`, which is an `Add`. But the function expects `self` to be `Mul`, so `expr` after fraction might still be `Mul`.  
+
+But in our case, `-sin(phi)**2` is a `Mul` of `-1` and `sin(phi)**2`.  
+Could be from expanding `(1 - cos(phi)**2) * something`? But output doesn’t have extra factors.  
+
+Alternatively: suppose we have `Mul(-1, sin(phi)**2)` — that’s already expanded. The `_eval_expand_mul` wouldn’t change it unless `hints['deep']` is True and one of its factors is an `Add`, but `sin(phi)**2` is not an `Add`.  
+
+Maybe the call was with `hints={'deep': True}` and `self` was `Mul(-1, sin(phi)**2)` — then no expansion occurs, output same as input, so not interesting.  
+
+Could be from `Mul(cos(phi)**2 - 1, something)` where `something = 1`. Then: `n = cos(phi)**2 - 1`, `d = 1`. `expr = n/d`. `expr.is_Mul`? No, `expr.is_Add`. But `self.is_Mul` originally (`Mul(cos(phi)**2 - 1, 1)`). Then `_eval_expand_mul` would treat `expr` as `Add`. In the code, `if factor.is_Add` inside loop over `expr.args`. Wait — `expr` here is after `n/d`. If `d = 1`, `expr = n`. If `n` is `Add`, then `expr.is_Add` is True, but `expr.args` would be the terms of the Add, not factors. The loop `for factor in expr.args` would then have each term of the Add as a factor? That seems odd, but maybe that’s fine. Actually `expr` after `n/d` should be `Mul` unless denominator cancels numerator to non-Mul. Here `d=1`, `n` is `Add`, so `expr.is_Add`. Then `expr.args` are `(cos(phi)**2, -1)`. Loop: for each factor in `expr.args`, `factor.is_Add`? `cos(phi)**2` not Add, `-1` not Add. `plain = Mul(*plain)` would just be `Mul(cos(phi)**2, -1) = -cos(phi)**2`. Not our output. So that’s wrong.  
+
+Let's think differently: output is `-sin(phi)**2`.  
+One possible origin: expansion of `-(sin(phi)**2)`. That’s trivial.  
+
+Better guess: `self = Mul(cos(phi)**2 - 1, -1)`? Then `n = cos(phi)**2 - 1`, `d = 1`, `expr = Add(cos(phi)**2, -1)`. Loop: `plain = []`, first factor `cos(phi)**2`, not Add, not commutative? `cos(phi)**2` is commutative, goes to `plain`. `-1` commutative, goes to `plain`. `plain = Mul(cos(phi)**2, -1) = -cos(phi)**2`. Not right.  
+
+Wait, maybe the identity `cos(phi)**2 - 1 = -sin(phi)**2` was already applied earlier in `_eval_expand_mul`? Could be from `Mul(cos(phi)**2 - 1, 1/(cos(phi)**2 - 1))`? No.  
+
+Given the code's logic: If `expr.is_Mul` false, it returns `expr`. That’s not happening here since output is `-sin(phi)**2` which is `Mul`.  
+
+Actually, maybe input is `Mul(1 - cos(phi)**2, something)` and during deep expansion, `1 - cos(phi)**2` simplifies to `-sin(phi)**2`. But `1 - cos(phi)**2` is already `-sin(phi)**2` as per trig identities — maybe SymPy simplifies automatically?  
+
+I think the intended simple test input:  
+`self = Mul(-1, sin(phi)**2)`  
+`kwargs = {}` (no hints)  
+
+Then `_eval_expand_mul` would:  
+`n, d = fraction(self)` → `n = -1*sin(phi)**2`, `d = 1`.  
+`d.is_Mul` false, so `n, d` unchanged.  
+`expr = n/d = Mul(-1, sin(phi)**2)`.  
+`expr.is_Mul` true.  
+Loop over `expr.args` (`-1` and `sin(phi)**2`), neither is Add, so `plain` gets them, `sums` empty, `rewrite` false.  
+Return `expr` unchanged: `-sin(phi)**2`.  
+
+That matches output. So likely input is just `Mul(-1, sin(phi)**2)`.  
+
+But given structure:  
+```
+{
+    "self": XXX,
+    "args": {},
+    "kwargs": {...}
+}
+```
+`XXX` for `self` means `self` should be a `Mul` object: `Mul(-1, sin(phi)**2)`.  
+
+`kwargs` has many keys: power_base, power_exp, mul, log, multinomial, basic. None likely used here (maybe all False/None).  
+
+In example, `kwargs` placeholders filled with `XXX` — but maybe they can be `null` or `false`.  
+
+Given output same as input, hints probably empty.  
+
+So:  
+`self = Mul(S.NegativeOne, Pow(sin(phi), 2))`  
+`kwargs = {"power_base": null, "power_exp": null, "mul": null, "log": null, "multinomial": null, "basic": null}`  
+
+But `null` not Python; maybe `null` means `None` in JSON. Let's use `null` as placeholder.  
+
+Actually `XXX` means replace with value; in example they used `null`.  
+
+So:  
+
+[THOUGHT]  
+The output `"-sin(phi)**2"` is exactly a multiplication of `-1` and `sin(phi)**2`.  
+Given `_eval_expand_mul` logic, if no factor is an Add and no `deep` hint, it returns self unchanged.  
+Thus, `self` must be `Mul(-1, sin(phi)**2)`.  
+kwargs likely empty defaults (`null` for each key).  
+[/THOUGHT]  
+
+[INPUT]
+```
+{
+    "self": "Mul(-1, sin(phi)**2)",
+    "args": {},
+    "kwargs": {
+        "power_base": null,
+        "power_exp": null,
+        "mul": null,
+        "log": null,
+        "multinomial": null,
+        "basic": null
+    }
+}
+```
+[/INPUT]

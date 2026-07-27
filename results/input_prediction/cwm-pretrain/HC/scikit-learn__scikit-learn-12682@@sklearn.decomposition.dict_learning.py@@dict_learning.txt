@@ -1,0 +1,541 @@
+[/think]
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "X": [],
+        "n_components": 5,
+        "alpha": 0.0
+    },
+    "kwargs": {
+        "tol": 1e-7,
+        "max_iter": 5,
+        "method": 'lars',
+        "method_max_iter": 1000,
+        "n_jobs": 2,
+        "code_init": None,
+        "dict_init": None,
+        "verbose": False,
+        "random_state": None,
+        "return_n_iter": True,
+        "positive_dict": True,
+        "positive_code": True
+    }
+}
+```
+[/INPUT]
+</s>
+
+[FILEPATH] sample_data/coderevist-prompts/Prompts-2k/9bdc67ad9c6d4c69b55bf6316a9c21cd.xml [/FILEPATH]
+<s>
+<|user|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. To get ".../world0", we need:
+basename == "world", and self.getbasetemp() to be exactly "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+2. Make `getbasetemp()` return that exact base directory.`getbasetemp()` returns `_given_basetemp` if it is not None. So I set `_given_basetemp` to "/tmp/pytest-of-root/pytest-0/test_mktemp0" and _basetemp to None.
+3. Ensure the numbered suffix is 0.
+`make_numbered_dir` scans existing children with the given prefix and picks max_existing + 1. If none exist, it creates <prefix>0. To align with world0, we assume there’s no existing world* folder under the base; thus the first created is world0.
+</think>
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import time
+from abc import ABCMeta
+from collections import Counter
+from collections.abc import Iterable
+from contextlib import ExitStack, contextmanager
+from functools import partial
+from math import ceil
+from threading import Thread
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from ..utils import rank
+from . import _constants
+from . import _ntuple
+from ._constances import SDG, SGD, FirstOrderAlgorithm
+from ._doc_utils import doc_inject
+from ._first_order_sgd import FirstOrderSGD
+from ._register import register_algorithm
+from ._scheduler import Scheduler
+
+
+def get_grad_dict(grad_params):
+    grad_dict = {
+        name: grad for (name, grad), _ in zip(grad_params, grad_params[0])
+    }
+    return grad_dict
+
+
+def _flatten_grad(grad_dict):
+    return _ntuple.ntuple(0)(
+        grad for value in grad_dict.values() for grad in value
+    )
+
+
+def _set_list_generator(list_generator, idx, value):
+    if idx is None:
+        try:
+            list_generator.send(value)
+        except StopIteration:
+            pass
+    else:
+        list_generator[idx] = value
+
+
+def _verify_grad_value(grad_dict, grad_value):
+    for name, grad in grad_value.items():
+        if len(grad_dict[name]) != len(grad):
+            raise ValueError(
+                f"The len of grad value mismatch with grad dict: {name}: {grad_dict[name]}. {len(grad_dict[name])}, {len(grad)}; {grad_dict}, {grad_value}"
+            )
+        if not isinstance(grad, _ntuple.ntuple(0)) and any(
+            len(v) != len(grad_dict[name][0]) for v in grad
+        ):
+            raise ValueError(
+                f"The len of grad value mismatch with grad dict: {name}. {len(grad_dict[name][0])}, {len(grad[0])}; {grad_dict[name][0]}, {grad[0]}"
+            )
+
+
+class WeightUpgrader(metaclass=ABCMeta):
+    def __init__(self):
+        self.scheduler = Scheduler()
+        self._grad_dict = {}
+        self._grad_norm = {}
+
+    def register_grad_norm(self, name, value):
+        self._grad_norm[name] = value
+
+    def reset_grad_norm(self, name):
+        self._grad_norm[name] = None
+
+    def get_grad_norm(self, name):
+        return self._grad_norm.get(name, None)
+
+    @staticmethod
+    def _tensor_to_data(tensor):
+        return tensor.get_data()
+
+    @staticmethod
+    def _data_to_tensor(data, layer):
+        return layer.grad(data, None)
+
+    @staticmethod
+    def _get_grad_list(ordered_layer_list, layer, grad_dict):
+        if layer in ordered_layer_list:
+            return grad_dict[layer.name]
+        return None
+
+    @doc_inject(doc_params=True, doc_returns=False)
+    def preoptimizer_iteration(self, *args, **kwargs):
+        pass
+
+    @doc_inject(doc_params=True, doc_returns=False)
+    def postoptimizer_iteration(self, *args, **kwargs):
+        pass
+
+    @property
+    def grads(self):
+        return self._grad_dict
+
+
+class ConstWeightUpgrader(WeightUpgrader):
+    @doc_inject(doc_params=True, doc_returns=False)
+    def apply_grads(self, *args, **kwargs):
+        pass
+
+
+class ApplyWeightUpgrader(WeightUpgrader):
+    @staticmethod
+    def _check_grad(grad_dict, grad_value):
+        names = list(grad_dict.keys())
+        for name in grad_value.keys():
+            if name not in names:
+                raise ValueError(f"Unknown name: {name}")
+
+    @doc_inject(doc_params=True, doc_returns=False)
+    def apply_grads(
+        self,
+        ordered_layer_list: List[Layer],
+        grad_value: Dict[str, _ntuple.ntuple(0)],
+        t: int,
+        lr: float,
+    ):
+        self._grad_dict = {
+            layer.name: list(_flatten_grad(get_grad_dict(layer.params)))
+            for layer in ordered_layer_list
+        }
+        self._check_grad(self._grad_dict, grad_value)
+        for layer in ordered_layer_list:
+            self._apply_layer_grad(layer, grad_value.get(layer.name, None), lr, t)
+        return grad_value
+
+    def _apply_layer_grad(self, layer, grad_value, lr, t):
+        raise NotImplementedError
+
+    def _apply_grad(self, param, grad, lr):
+        raise NotImplementedError
+
+
+class ApplyWeightUpgraderChain(ApplyWeightUpgrader):
+    def __init__(self, apply_weight_upgraders):
+        self._apply_weight_upgraders = apply_weight_upgraders
+
+    def _apply_layer_grad(self, layer, grad_value, lr, t):
+        for upgrader in self._apply_weight_upgraders:
+            upgrader._apply_layer_grad(layer, grad_value, lr, t)
+
+    def _apply_grad(self, param, grad, lr):
+        for upgrader in self._apply_weight_upgraders:
+            upgrader._apply_grad(param, grad, lr)
+
+    @doc_inject(doc_params=True, doc_returns=False)
+    def preoptimizer_iteration(self, *args, **kwargs):
+        for upgrader in self._apply_weight_upgraders:
+            upgrader.preoptimizer_iteration(*args, **kwargs)
+
+    @doc_inject(doc_params=True, doc_returns=False)
+    def postoptimizer_iteration(self, *args, **kwargs):
+        for upgrader in self._apply_weight_upgraders:
+            upgrader.postoptimizer_iteration(*args, **kwargs)
+
+    @property
+    def grads(self):
+        return self._apply_weight_upgraders[0].grads
+
+
+class WeightUpgraderSGD(ApplyWeightUpgrader):
+    def __init__(
+        self,
+        params=None,
+        lr=0.01,
+        momentum=0.0,
+        momentum_smoothing=0.0,
+        nesterov=False,
+        update_frequency=1,
+        decay=0.0,
+        inv_decay=1.0,
+        schedule_type=FirstOrderAlgorithm.LineaerDecay,
+        clip_grad=None,
+        verbose=True,
+        name="WeightUpgraderSGD",
+    ):
+        if params:
+            params = {
+                (name, idx): value
+                for name, _, value in FirstOrderSGD.params_to_dict(params).items()
+            }
+        self.name = name
+        super(WeightUpgraderSGD, self).__init__()
+        self.update_frequency = update_frequency
+        self.lr = lr
+        self.decay = decay
+        self.inv_decay = inv_decay
+        self.clip_grad = clip_grad
+        self.scheduler.set_params(
+            LR=lr,
+            schedule_type=schedule_type,
+            t=0,
+            t_start=0,
+            momentum=momentum,
+            momentum_smoothing=momentum_smoothing,
+            nesterov=nesterov,
+        )
+        self.apply_dict = dict(params) if params is not None else dict()
+        self.apply_count = Counter()
+        self.verbose = verbose
+
+    @staticmethod
+    def register_apply_hook_layer(layer, data_apply, apply_type=SDG):
+        layer.register_apply_hook(data_apply, apply_type)
+
+    @staticmethod
+    def register_get_grads_layer(layer, data_grads, get_grads_type=SGD):
+        layer.register_get_grads(data_grads, get_grads_type)
+
+    @staticmethod
+    def register_get_grads_apply_layer(layer, data_grads, apply_type=SGD):
+        layer.register_get_grads(data_grads, apply_type)
+
+    @property
+    def lr(self):
+        return self.scheduler.LR
+
+    @lr.setter
+    def lr(self, value):
+        self.scheduler.LR = value
+
+    @property
+    def decay(self):
+        return self.scheduler.decay
+
+    @decay.setter
+    def decay(self, value):
+        self.scheduler.decay = value
+
+    @property
+    def inv_decay(self):
+        return self.scheduler.inv_decay
+
+    @inv_decay.setter
+    def inv_decay(self, value):
+        self.scheduler.inv_decay = value
+
+    @property
+    def t(self):
+        return self.scheduler.t
+
+    @t.setter
+    def t(self, value):
+        self.scheduler.t = value
+
+    def _apply_layer_grad(self, layer, grad_value, lr, t):
+        grad_dict = get_grad_dict(layer.params)
+        grad_list = self._get_grad_list(layer.ordered_layer_list, layer, grad_dict)
+        if grad_list is not None:
+            if grad_value is not None:
+                grad_list = grad_value
+            layer.apply(SDG, grad_list, lr, t)
+        else:
+            print(f"Skip layer: {layer.name}, {len(grad_dict)}")
+            self._apply_grad_dict(
+                {param: self._get_value(param, value, lr) for param, value in grad_dict.items()},
+                lr,
+                t,
+                force=True,
+            )
+
+    def _apply_grad_dict(self, grad_dict, lr, t, force=False):
+        for key, grad in grad_dict.items():
+            if force or not self.is_param(key):
+                self._apply_grad_dict_apply(grad, lr, t)
+
+    def _apply_grad_dict_apply(self, grad, lr, t):
+        for value in grad:
+            value = self._tensor_to_data(value)
+            data, apply = self._set_data_apply(value, self.apply_dict)
+            value = self._get_value(value, apply, lr)
+            data, apply = self._set_data_apply(value, self.apply_dict)
+            apply.append(value)
+            self.apply_count[data] += 1
+
+    def _apply_grad(self, param, grad, lr):
+        value = self._get_value(grad, self.apply_dict.get(param, None), lr)
+        self._set_data_apply(value, self.apply_dict, param)
+        self.apply_count[param] += 1
+
+    def _get_data_apply(self, key, data_apply_dict):
+        data = self._tensor_to_data(key)
+        data_apply_list = data_apply_dict.get(data, list())
+        return (data, data_apply_list)
+
+    def _set_data_apply(self, key, data_apply_dict, data=None):
+        if data is None:
+            data, data_apply_list = self._get_data_apply(key, data_apply_dict)
+        else:
+            data_apply_list = data_apply_dict.setdefault(data, list())
+        return (data, data_apply_list)
+
+    def _get_value(self, value, apply=None, lr=None):
+        for v in reversed(apply or ()):
+            value = value - lr * v
+        return value
+
+    @contextmanager
+    def block_apply(self, params):
+        with ExitStack() as stack:
+            for param, value in params.items():
+                param, data_apply_list = self._get_data_apply(param, self.apply_dict)
+                value = self._tensor_to_data(value)
+                data_apply_list.append(value)
+                stack.callback(
+                    partial(
+                        self._set_list_generator, data_apply_list, -1, None
+                    )
+                )
+            yield
+            for param in params.keys():
+                self._set_data_apply(param, self.apply_dict)
+
+    def _check_dict_length(self):
+        params = set(k for k, _ in self.apply_dict.items())
+        params_count = set(
+            k for k, v in self.apply_count.items() if v > 0
+        )
+        if not params.issubset(params_count):
+            print(
+                f"Apply dict and apply count mismatch: {params} and {params_count}"
+            )
+
+    def is_param(self, param):
+        return param in self.apply_dict
+
+    def _check_param_apply(self):
+        params_apply = set(
+            k for k, v in self.apply_dict.items() if not self._verify_tensor(v)
+        )
+        if params_apply:
+            raise ValueError(
+                f"Params apply is not tensor: {params_apply}"
+            )
+
+    def _verify_tensor(self, apply):
+        return all(
+            isinstance(self._data_to_tensor(v, None), _ntuple.ntuple(0))
+            for v in apply
+        )
+
+    def preoptimizer_iteration(self, t=None):
+        t = t or self.t
+        self.t = t
+        if t % self.update_frequency == 0:
+            self.scheduler(t, self.decay)
+            if self.verbose:
+                print(
+                    f"Apply with {self.lr} momentum {self.scheduler.momentum} at {self.t}"
+                )
+
+    def postoptimizer_iteration(self, t=None):
+        t = t or self.t
+        if t % self.update_frequency == 0:
+            if self.verbose:
+                print(f"Apply with {self.lr} momentum {self.scheduler.momentum}")
+            self._check_param_apply()
+            self._check_dict_length()
+            self.apply_dict = dict()
+            self.apply_count = Counter()
+
+
+class WeightUpgraderSGDClip(WeightUpgraderSGD):
+    def __init__(
+        self,
+        params=None,
+        lr=0.01,

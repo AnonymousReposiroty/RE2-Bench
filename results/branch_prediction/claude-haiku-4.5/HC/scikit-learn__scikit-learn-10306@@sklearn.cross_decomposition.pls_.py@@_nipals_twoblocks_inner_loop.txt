@@ -1,0 +1,160 @@
+[THOUGHT]
+Let me trace through the execution of `_nipals_twoblocks_inner_loop` with the given inputs:
+
+Arguments:
+- X: 4x3 array
+- Y: 4x2 array (note: different shape from X)
+- mode: "B"
+- max_iter: 500
+- tol: 1e-06
+- norm_y_weights: True
+
+Initial state:
+- y_score = Y[:, [0]] → shape (4, 1)
+- x_weights_old = 0
+- ite = 1
+- X_pinv = None
+- Y_pinv = None
+- eps = machine epsilon for float type
+
+Now let's trace the while True loop:
+
+**First iteration:**
+
+Line 23: while True → enters loop
+
+Line 24: `if X_pinv is None:` → X_pinv is None, so this is **True (Y)**
+- X_pinv gets computed via pinv2
+
+Line 28-29: Not executed since mode == "B"
+
+Line 29: `if np.dot(x_weights.T, x_weights) < eps:` → This checks if the norm squared is very small. Given that x_weights is computed as pinv2(X) @ y_score and the values in the arrays are reasonable (not near zero), this will likely be **False (N)** - the norm squared won't be smaller than machine epsilon
+
+Line 34: `if Y_pinv is None:` → Y_pinv is None, so this is **True (Y)**
+- Y_pinv gets computed via pinv2
+
+Line 39: `if norm_y_weights:` → norm_y_weights is True, so this is **True (Y)**
+- y_weights gets normalized
+
+Line 43: `if np.dot(x_weights_diff.T, x_weights_diff) < tol or Y.shape[1] == 1:` 
+- x_weights_diff = x_weights - 0 (first iteration)
+- Y.shape[1] = 2, so the second part is False
+- The first part checks if the difference is less than 1e-06. In the first iteration, this would depend on convergence, but typically the algorithm doesn't converge in one iteration. Let me consider: for the first iteration with these values, the x_weights_diff would be non-trivial, so likely the dot product would be much larger than tol. This is **False (N)** for the first iteration
+
+Line 45: `if ite == max_iter:` → ite = 1, max_iter = 500, so this is **False (N)**
+
+Second iteration would happen:
+- x_weights_old = x_weights
+- ite = 2
+- Loop continues
+
+Line 24 (second iteration): `if X_pinv is None:` → X_pinv is now set, so this is **False (N)**
+
+Line 34 (second iteration): `if Y_pinv is None:` → Y_pinv is now set, so this is **False (N)**
+
+Line 39 (second iteration): `if norm_y_weights:` → still True, so **True (Y)**
+
+Line 43 (second iteration): We'd need to check convergence. Given the data and typical PLS convergence, it may converge within a few iterations. Let me think about this more carefully - the input data appears to be normalized/centered data. The convergence criterion is checking if the difference in x_weights is small. 
+
+Actually, looking more carefully at line 43, Y has shape (4, 2), so Y.shape[1] == 1 is **False**. For convergence, we need to know if the algorithm converges. Given typical behavior, this could go several iterations. However, we need to determine for each branch encounter.
+
+Let me reconsider the trace more carefully. The question asks for each time a branch is encountered.
+
+Branch encounters in order:
+1. Line 24, iteration 1: `if X_pinv is None:` → **Y**
+2. Line 29, iteration 1: `if np.dot(x_weights.T, x_weights) < eps:` → **N** (norm would be reasonable)
+3. Line 34, iteration 1: `if Y_pinv is None:` → **Y**
+4. Line 39, iteration 1: `if norm_y_weights:` → **Y**
+5. Line 43, iteration 1: `if np.dot(x_weights_diff.T, x_weights_diff) < tol or Y.shape[1] == 1:` → **N** (first iteration typically doesn't converge)
+6. Line 45, iteration 1: `if ite == max_iter:` → **N** (ite=1, max_iter=500)
+7. Line 24, iteration 2: `if X_pinv is None:` → **N**
+8. Line 29, iteration 2: `if np.dot(x_weights.T, x_weights) < eps:` → **N**
+9. Line 34, iteration 2: `if Y_pinv is None:` → **N**
+10. Line 39, iteration 2: `if norm_y_weights:` → **Y**
+11. Line 43, iteration 2: This depends on convergence...
+
+Given the small tolerance (1e-06) and typical PLS convergence behavior, I would expect the algorithm to converge within a reasonable number of iterations. However, without running the actual computation, it's hard to say exactly when. But typically PLS algorithms can converge quickly. Let me assume it converges by iteration 2 or 3. If convergence happens at iteration 2, then line 43 would be **Y**.
+
+Let me make reasonable assumptions:
+- The algorithm likely converges within a few iterations given the data structure
+- I'll assume it converges by iteration 2 or 3
+
+If convergence at iteration 2:
+5. Line 43, iteration 2: **Y** (convergence condition met)
+
+So the sequence would be:
+['Y', 'N', 'Y', 'Y', 'N', 'N', 'N', 'N', 'N', 'Y', 'Y']
+
+Wait, let me reconsider the order. Looking at the code structure again for each iteration:
+
+Iteration 1:
+- Line 24: if X_pinv is None → **Y**
+- Line 29: if np.dot(x_weights.T, x_weights) < eps → **N**
+- Line 34: if Y_pinv is None → **Y**
+- Line 39: if norm_y_weights → **Y**
+- Line 43: if convergence → **N** (first iteration)
+- Line 45: if ite == max_iter → **N**
+
+Iteration 2:
+- Line 24: if X_pinv is None → **N**
+- Line 29: if np.dot(x_weights.T, x_weights) < eps → **N**
+- Line 34: if Y_pinv is None → **N**
+- Line 39: if norm_y_weights → **Y**
+- Line 43: if convergence → likely **Y** (converges relatively quickly)
+
+So: ['Y', 'N', 'Y', 'Y', 'N', 'N', 'N', 'N', 'N', 'Y', 'Y']
+</THOUGHT>
+
+[ANSWER]
+1 import warnings
+2 from abc import ABCMeta, abstractmethod
+3 import numpy as np
+4 from scipy.linalg import pinv2, svd
+5 from scipy.sparse.linalg import svds
+6 from ..base import BaseEstimator, RegressorMixin, TransformerMixin
+7 from ..utils import check_array, check_consistent_length
+8 from ..utils.extmath import svd_flip
+9 from ..utils.validation import check_is_fitted, FLOAT_DTYPES
+10 from ..exceptions import ConvergenceWarning
+11 from ..externals import six
+12
+13 __all__ = ['PLSCanonical', 'PLSRegression', 'PLSSVD']
+14
+15 def _nipals_twoblocks_inner_loop(X, Y, mode="A", max_iter=500, tol=1e-06,
+16                                  norm_y_weights=False):
+17     y_score = Y[:, [0]]
+18     x_weights_old = 0
+19     ite = 1
+20     X_pinv = Y_pinv = None
+21     eps = np.finfo(X.dtype).eps
+22     while True:
+23         if mode == "B":
+24             if X_pinv is None: ## [BRANCH]taken=['Y', 'N'][/BRANCH]
+25                 X_pinv = pinv2(X, check_finite=False)
+26             x_weights = np.dot(X_pinv, y_score)
+27         else:
+28             x_weights = np.dot(X.T, y_score) / np.dot(y_score.T, y_score)
+29         if np.dot(x_weights.T, x_weights) < eps: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+30             x_weights += eps
+31         x_weights /= np.sqrt(np.dot(x_weights.T, x_weights)) + eps
+32         x_score = np.dot(X, x_weights)
+33         if mode == "B":
+34             if Y_pinv is None: ## [BRANCH]taken=['Y', 'N'][/BRANCH]
+35                 Y_pinv = pinv2(Y, check_finite=False)
+36             y_weights = np.dot(Y_pinv, x_score)
+37         else:
+38             y_weights = np.dot(Y.T, x_score) / np.dot(x_score.T, x_score)
+39         if norm_y_weights: ## [BRANCH]taken=['Y', 'Y'][/BRANCH]
+40             y_weights /= np.sqrt(np.dot(y_weights.T, y_weights)) + eps
+41         y_score = np.dot(Y, y_weights) / (np.dot(y_weights.T, y_weights) + eps)
+42         x_weights_diff = x_weights - x_weights_old
+43         if np.dot(x_weights_diff.T, x_weights_diff) < tol or Y.shape[1] == 1: ## [BRANCH]taken=['N', 'Y'][/BRANCH]
+44             break
+45         if ite == max_iter: ## [BRANCH]taken=['N'][/BRANCH]
+46             warnings.warn('Maximum number of iterations reached',
+47                           ConvergenceWarning)
+48             break
+49         x_weights_old = x_weights
+50         ite += 1
+51     return x_weights, y_weights, ite
+[/ANSWER]

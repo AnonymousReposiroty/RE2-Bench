@@ -1,0 +1,304 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided output (between [OUTPUT] and [/OUTPUT]) and predict the input of the function. Both input and output are presented in a JSON format. The input structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict input variable values to fill out placeholders XXX in the structure, and print input between [INPUT] and [/INPUT]. You should maintain the structure when printing inputs. Do not change anything else.  ONLY print the input, DO NOT print any reasoning process.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+[/PYTHON]
+What will be the input of `mktemp`, given the following output:
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": XXX,
+            "_trace": XXX,
+            "_basetemp": XXX
+        }
+    },
+    "args": {
+        "basename": XXX
+    },
+    "kwargs": XXX
+}
+```
+[/STRUCTURE]
+
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+[/EXAMPLE]
+[PYTHON]
+import numpy as np
+
+class Colormap:
+
+    def __init__(self, name, N=256, *, bad=None, under=None, over=None):
+        self.name = name
+        self.N = int(N)
+        self._rgba_bad = (0.0, 0.0, 0.0, 0.0) if bad is None else to_rgba(bad)
+        self._rgba_under = None if under is None else to_rgba(under)
+        self._rgba_over = None if over is None else to_rgba(over)
+        self._i_under = self.N
+        self._i_over = self.N + 1
+        self._i_bad = self.N + 2
+        self._isinit = False
+        self.n_variates = 1
+        self.colorbar_extend = False
+
+    def __call__(self, X, alpha=None, bytes=False):
+        rgba, mask = self._get_rgba_and_mask(X, alpha=alpha, bytes=bytes)
+        if not np.iterable(X):
+            rgba = tuple(rgba)
+        return rgba
+
+    def _get_rgba_and_mask(self, X, alpha=None, bytes=False):
+        self._ensure_inited()
+        xa = np.array(X, copy=True)
+        if not xa.dtype.isnative:
+            xa = xa.byteswap().view(xa.dtype.newbyteorder())
+        if xa.dtype.kind == 'f':
+            xa *= self.N
+            xa[xa == self.N] = self.N - 1
+        mask_under = xa < 0
+        mask_over = xa >= self.N
+        mask_bad = X.mask if np.ma.is_masked(X) else np.isnan(xa)
+        with np.errstate(invalid='ignore'):
+            xa = xa.astype(int)
+        xa[mask_under] = self._i_under
+        xa[mask_over] = self._i_over
+        xa[mask_bad] = self._i_bad
+        lut = self._lut
+        if bytes:
+            lut = (lut * 255).astype(np.uint8)
+        rgba = lut.take(xa, axis=0, mode='clip')
+        if alpha is not None:
+            alpha = np.clip(alpha, 0, 1)
+            if bytes:
+                alpha *= 255
+            if alpha.shape not in [(), xa.shape]:
+                raise ValueError(f'alpha is array-like but its shape {alpha.shape} does not match that of X {xa.shape}')
+            rgba[..., -1] = alpha
+            if (lut[-1] == 0).all():
+                rgba[mask_bad] = (0, 0, 0, 0)
+        return (rgba, mask_bad)
+
+    def _init(self):
+        raise NotImplementedError('Abstract class only')
+
+    def _ensure_inited(self):
+        if not self._isinit:
+            self._init()
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+matplotlib.lib.matplotlib.colors._get_rgba_and_mask
+
+def _get_rgba_and_mask(self, X, alpha=None, bytes=False):
+    r"""
+    Parameters
+    ----------
+    X : float or int or array-like
+        The data value(s) to convert to RGBA.
+        For floats, *X* should be in the interval ``[0.0, 1.0]`` to
+        return the RGBA values ``X*100`` percent along the Colormap line.
+        For integers, *X* should be in the interval ``[0, Colormap.N)`` to
+        return RGBA values *indexed* from the Colormap with index ``X``.
+    alpha : float or array-like or None
+        Alpha must be a scalar between 0 and 1, a sequence of such
+        floats with shape matching X, or None.
+    bytes : bool, default: False
+        If False (default), the returned RGBA values will be floats in the
+        interval ``[0, 1]`` otherwise they will be `numpy.uint8`\s in the
+        interval ``[0, 255]``.
+
+    Returns
+    -------
+    colors : np.ndarray
+        Array of RGBA values with a shape of ``X.shape + (4, )``.
+    mask : np.ndarray
+        Boolean array with True where the input is ``np.nan`` or masked.
+    """
+    self._ensure_inited()
+
+    xa = np.array(X, copy=True)
+    if not xa.dtype.isnative:
+        # Native byteorder is faster.
+        xa = xa.byteswap().view(xa.dtype.newbyteorder())
+    if xa.dtype.kind == "f":
+        xa *= self.N
+        # xa == 1 (== N after multiplication) is not out of range.
+        xa[xa == self.N] = self.N - 1
+    # Pre-compute the masks before casting to int (which can truncate
+    # negative values to zero or wrap large floats to negative ints).
+    mask_under = xa < 0
+    mask_over = xa >= self.N
+    # If input was masked, get the bad mask from it; else mask out nans.
+    mask_bad = X.mask if np.ma.is_masked(X) else np.isnan(xa)
+    with np.errstate(invalid="ignore"):
+        # We need this cast for unsigned ints as well as floats
+        xa = xa.astype(int)
+    xa[mask_under] = self._i_under
+    xa[mask_over] = self._i_over
+    xa[mask_bad] = self._i_bad
+
+    lut = self._lut
+    if bytes:
+        lut = (lut * 255).astype(np.uint8)
+
+    rgba = lut.take(xa, axis=0, mode='clip')
+
+    if alpha is not None:
+        alpha = np.clip(alpha, 0, 1)
+        if bytes:
+            alpha *= 255  # Will be cast to uint8 upon assignment.
+        if alpha.shape not in [(), xa.shape]:
+            raise ValueError(
+                f"alpha is array-like but its shape {alpha.shape} does "
+                f"not match that of X {xa.shape}")
+        rgba[..., -1] = alpha
+        # If the "bad" color is all zeros, then ignore alpha input.
+        if (lut[-1] == 0).all():
+            rgba[mask_bad] = (0, 0, 0, 0)
+
+    return rgba, mask_bad
+
+
+[/PYTHON]
+What will be the input of `__call__`, given the following output:
+[OUTPUT]
+```
+{
+    "output": "array([[[0.9555248 , 0.30292964, 0.21822376, 1.        ],\n        [0.95995386, 0.32027682, 0.22929642, 1.        ],\n        [0.97324106, 0.37231834, 0.26251442, 1.        ],\n        [0.98523645, 0.45259516, 0.32710496, 1.        ],\n        [0.98782007, 0.55594002, 0.43044983, 1.        ],\n        [0.98823529, 0.69171857, 0.58366782, 1.        ],\n        [0.99432526, 0.84599769, 0.7805767 , 1.        ],\n        [1.        , 0.96078431, 0.94117647, 1.        ]],\n\n       [[0.95109573, 0.28558247, 0.2071511 , 1.        ],\n        [0.9555248 , 0.30292964, 0.21822376, 1.        ],\n        [0.968812  , 0.35497116, 0.25144175, 1.        ],\n        [0.98486736, 0.4378316 , 0.31234141, 1.        ],\n        [0.98745098, 0.54117647, 0.41568627, 1.        ],\n        [0.98823529, 0.67658593, 0.56632065, 1.        ],\n        [0.99358708, 0.83234141, 0.76249135, 1.        ],\n        [0.99963091, 0.95303345, 0.93010381, 1.        ]],\n\n       [[0.93780854, 0.23354095, 0.1739331 , 1.        ],\n        [0.9422376 , 0.25088812, 0.18500577, 1.        ],\n        [0.9555248 , 0.30292964, 0.21822376, 1.        ],\n        [0.97767013, 0.38966551, 0.27358708, 1.        ],\n        [0.98634371, 0.49688581, 0.37139562, 1.        ],\n        [0.98823529, 0.631188  , 0.51427912, 1.        ],\n        [0.99137255, 0.79137255, 0.70823529, 1.        ],\n        [0.99852364, 0.92978085, 0.89688581, 1.        ]],\n\n       [[0.87247982, 0.16839677, 0.1455594 , 1.        ],\n        [0.88576701, 0.18131488, 0.15109573, 1.        ],\n        [0.9256286 , 0.2200692 , 0.16770473, 1.        ],\n        [0.9555248 , 0.30292964, 0.21822376, 1.        ],\n        [0.98449827, 0.42306805, 0.29757785, 1.        ],\n        [0.98782007, 0.55594002, 0.43044983, 1.        ],\n        [0.98823529, 0.72198385, 0.61836217, 1.        ],\n        [0.9966782 , 0.89102653, 0.84152249, 1.        ]],\n\n       [[0.77854671, 0.0899654 , 0.1100346 , 1.        ],\n        [0.79257209, 0.0932872 , 0.11298731, 1.        ],\n        [0.83261822, 0.12964245, 0.1289504 , 1.        ],\n        [0.89905421, 0.19423299, 0.15663206, 1.        ],\n        [0.9555248 , 0.30292964, 0.21822376, 1.        ],\n        [0.98523645, 0.45259516, 0.32710496, 1.        ],\n        [0.98823529, 0.61605536, 0.49693195, 1.        ],\n        [0.99211073, 0.80502884, 0.72632065, 1.        ]],\n\n       [[0.65231834, 0.0600692 , 0.08346021, 1.        ],\n        [0.66634371, 0.063391  , 0.08641292, 1.        ],\n        [0.70841984, 0.0733564 , 0.09527105, 1.        ],\n        [0.77854671, 0.0899654 , 0.1100346 , 1.        ],\n        [0.87247982, 0.16839677, 0.1455594 , 1.        ],\n        [0.9555248 , 0.30292964, 0.21822376, 1.        ],\n        [0.98597463, 0.48212226, 0.35663206, 1.        ],\n        [0.98823529, 0.67658593, 0.56632065, 1.        ]],\n\n       [[0.40392157, 0.        , 0.05098039, 1.        ],\n        [0.42680507, 0.00553633, 0.0539331 , 1.        ],\n        [0.49545559, 0.02214533, 0.06279123, 1.        ],\n        [0.60987313, 0.04982699, 0.07755479, 1.        ],\n        [0.72244521, 0.0766782 , 0.09822376, 1.        ],\n        [0.84590542, 0.14256055, 0.13448674, 1.        ],\n        [0.9555248 , 0.30292964, 0.21822376, 1.        ],\n        [0.9867128 , 0.51164937, 0.38615917, 1.        ]]])"
+}
+```
+[/OUTPUT]
+
+[STRUCTURE]
+```
+{
+    "self": {
+        "monochrome": XXX,
+        "name": XXX,
+        "N": XXX,
+        "_rgba_bad": XXX,
+        "_rgba_under": XXX,
+        "_rgba_over": XXX,
+        "_i_under": XXX,
+        "_i_over": XXX,
+        "_i_bad": XXX,
+        "_isinit": XXX,
+        "n_variates": XXX,
+        "colorbar_extend": XXX,
+        "_segmentdata": {
+            "red": XXX,
+            "green": XXX,
+            "blue": XXX,
+            "alpha": XXX
+        },
+        "_gamma": XXX
+    },
+    "args": {
+        "X": XXX,
+        "alpha": XXX,
+        "bytes": XXX
+    },
+    "kwargs": {}
+}
+```
+[/STRUCTURE]
+
+[INPUT]

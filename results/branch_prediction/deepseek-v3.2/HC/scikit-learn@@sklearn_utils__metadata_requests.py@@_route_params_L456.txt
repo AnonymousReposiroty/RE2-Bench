@@ -1,0 +1,97 @@
+[THOUGHT]
+Let's trace through the code step by step.
+
+We are executing the `_route_params` method with the given input.
+
+First, line 18: `def _route_params(self, params, parent, caller):`
+
+Given args:
+- `self._requests = {"sample_weight": true, "metadata": true}` (note: in Python, `true` should be `True` but likely represented as boolean true in JSON)
+- `params = {"sample_weight": [1], "metadata": "a"}`
+- `parent` and `caller` are given but not directly relevant for branches.
+
+Line 19: `self._check_warnings(params=params)` – we'll execute this, but it doesn't affect branch decisions.
+
+Line 20: `unrequested = dict()`
+
+Line 21: `args = {arg: value for arg, value in params.items() if value is not None}`
+- Both `sample_weight` and `metadata` have non-None values, so `args = {"sample_weight": [1], "metadata": "a"}`
+
+Line 22: `res = Bunch()`
+
+Now we enter the loop at line 23: `for prop, alias in self._requests.items():`
+We have two items: 
+1. prop="sample_weight", alias=True (since `true` in JSON → True in Python)
+2. prop="metadata", alias=True
+
+Iteration 1: prop="sample_weight", alias=True
+- Line 24: `if alias is False or alias == WARN:` – `alias` is True, not False, and `WARN` is not defined in the snippet (likely a constant imported elsewhere), but assuming `WARN` is some sentinel value, `alias` (True) is not equal to `WARN`. So condition false → branch not taken → 'N'.
+- Line 26: `elif alias is True and prop in args:` – alias is True, prop "sample_weight" is in args (yes). So branch taken → 'Y'.
+- Then `res["sample_weight"] = args["sample_weight"] = [1]`
+- Skip remaining `elif` and `elif` because we entered this branch.
+
+Iteration 2: prop="metadata", alias=True
+- Line 24: same as above, alias is True → condition false → 'N'.
+- Line 26: alias is True and prop "metadata" is in args (yes) → branch taken → 'Y'.
+- Then `res["metadata"] = args["metadata"] = "a"`
+
+After loop finishes, line 32: `if unrequested:`
+- `unrequested` is still empty dict because we never added anything to it (no alias was None with prop in args). So condition false → branch not taken → 'N'.
+
+Now we need to collect branch outcomes in order of encounter during execution.
+
+Branch at line 24: encountered twice, outcomes: first iteration 'N', second iteration 'N' → list ['N', 'N'].
+Branch at line 26: encountered twice, outcomes: first 'Y', second 'Y' → ['Y', 'Y'].
+Branch at line 28: encountered twice but never taken because alias is True not None, so outcomes: first 'N', second 'N' → ['N', 'N'].
+Branch at line 30: encountered twice but never taken because alias is True not a string/key in args, so outcomes: first 'N', second 'N' → ['N', 'N'].
+Branch at line 32: encountered once, outcome: 'N' → ['N'].
+
+Now we need to replace ?? with these lists.
+
+Note: In the code, line 24, 26, 28, 30, 32 each have `## [BRANCH]taken=??[/BRANCH]`. We replace each accordingly.
+
+[/THOUGHT]
+
+[ANSWER]
+1 from warnings import warn
+2 from sklearn.exceptions import UnsetMetadataPassedError
+3 from sklearn.utils._bunch import Bunch
+4 
+5 class MethodMetadataRequest:
+6 
+7     def __init__(self, owner, method, requests=None):
+8         self._requests = requests or dict()
+9         self.owner = owner
+10         self.method = method
+11 
+12     def _check_warnings(self, *, params):
+13         params = {} if params is None else params
+14         warn_params = {prop for prop, alias in self._requests.items() if alias == WARN and prop in params}
+15         for param in warn_params:
+16             warn(f'Support for {param} has recently been added to {self.owner} class. To maintain backward compatibility, it is ignored now. Using `set_{self.method}_request({param}={{True, False}})` on this method of the class, you can set the request value to False to silence this warning, or to True to consume and use the metadata.')
+17 
+18     def _route_params(self, params, parent, caller):
+19         self._check_warnings(params=params)
+20         unrequested = dict()
+21         args = {arg: value for arg, value in params.items() if value is not None}
+22         res = Bunch()
+23         for prop, alias in self._requests.items():
+24             if alias is False or alias == WARN: ## [BRANCH]taken=['N','N'][/BRANCH]
+25                 continue
+26             elif alias is True and prop in args: ## [BRANCH]taken=['Y','Y'][/BRANCH]
+27                 res[prop] = args[prop]
+28             elif alias is None and prop in args: ## [BRANCH]taken=['N','N'][/BRANCH]
+29                 unrequested[prop] = args[prop]
+30             elif alias in args: ## [BRANCH]taken=['N','N'][/BRANCH]
+31                 res[prop] = args[alias]
+32         if unrequested: ## [BRANCH]taken=['N'][/BRANCH]
+33             if self.method in COMPOSITE_METHODS:
+34                 callee_methods = COMPOSITE_METHODS[self.method]
+35             else:
+36                 callee_methods = [self.method]
+37             set_requests_on = ''.join([f'.set_{method}_request({{metadata}}=True/False)' for method in callee_methods])
+38             message = f"[{', '.join([key for key in unrequested])}] are passed but are not explicitly set as requested or not requested for {_routing_repr(self.owner)}.{self.method}, which is used within {_routing_repr(parent)}.{caller}. Call `{_routing_repr(self.owner)}" + set_requests_on + '` for each metadata you want to request/ignore. See the Metadata Routing User guide <https://scikit-learn.org/stable/metadata_routing.html> for more information.'
+39             raise UnsetMetadataPassedError(message=message, unrequested_params=unrequested, routed_params=res)
+40         return res
+41 
+[/ANSWER]

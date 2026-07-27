@@ -1,0 +1,485 @@
+[THOUGHT]
+The method `_map_drop_idx_to_infrequent` is called with `feature_idx=2` and `drop_idx="1"`.
+The input `self` has `_infrequent_enabled` set to `False`.
+
+Trace:
+Line 71: `if not self._infrequent_enabled:`
+Since `self._infrequent_enabled` is `False`, the condition `not self._infrequent_enabled` evaluates to `True`.
+The branch is taken.
+The method returns `drop_idx` at line 72.
+
+Therefore, the branch at line 71 is taken (`'Y'`).
+There are no loops or repeated calls indicated, so the list contains a single entry.
+Annotation: `['Y']`.
+[/THOUGHT]
+
+[ANSWER]
+1 import numbers
+2 from numbers import Integral, Real
+3 import warnings
+4 import numpy as np
+5 from scipy import sparse
+6 from ..base import BaseEstimator, TransformerMixin, OneToOneFeatureMixin
+7 from ..utils import check_array, is_scalar_nan, _safe_indexing
+8 from ..utils.validation import check_is_fitted
+9 from ..utils.validation import _check_feature_names_in
+10 from ..utils._param_validation import Interval, StrOptions, Hidden
+11 from ..utils._mask import _get_mask
+12 from ..utils._encode import _encode, _check_unknown, _unique, _get_counts
+13 
+14 __all__ = ["OneHotEncoder", "OrdinalEncoder"]
+15 
+16 class OneHotEncoder(_BaseEncoder):
+17 
+18     _parameter_constraints: dict = {
+19         "categories": [StrOptions({"auto"}), list],
+20         "drop": [StrOptions({"first", "if_binary"}), "array-like", None],
+21         "dtype": "no_validation",
+22         "handle_unknown": [StrOptions({"error", "ignore", "infrequent_if_exist"})],
+23         "max_categories": [Interval(Integral, 1, None, closed="left"), None],
+24         "min_frequency": [
+25             Interval(Integral, 1, None, closed="left"),
+26             Interval(Real, 0, 1, closed="neither"),
+27             None,
+28         ],
+29         "sparse": [Hidden(StrOptions({"deprecated"})), "boolean"],
+30         "sparse_output": ["boolean"],
+31         "feature_name_combiner": [StrOptions({"concat"}), callable],
+32     }
+33 
+34     def __init__(
+35         self,
+36         *,
+37         categories="auto",
+38         drop=None,
+39         sparse="deprecated",
+40         sparse_output=True,
+41         dtype=np.float64,
+42         handle_unknown="error",
+43         min_frequency=None,
+44         max_categories=None,
+45         feature_name_combiner="concat",
+46     ):
+47         self.categories = categories
+48         self.sparse = sparse
+49         self.sparse_output = sparse_output
+50         self.dtype = dtype
+51         self.handle_unknown = handle_unknown
+52         self.drop = drop
+53         self.min_frequency = min_frequency
+54         self.max_categories = max_categories
+55         self.feature_name_combiner = feature_name_combiner
+56 
+57     @property
+58     def infrequent_categories_(self):
+59         infrequent_indices = self._infrequent_indices
+60         return [
+61             None if indices is None else category[indices]
+62             for category, indices in zip(self.categories_, infrequent_indices)
+63         ]
+64 
+65     def _check_infrequent_enabled(self):
+66         self._infrequent_enabled = (
+67             self.max_categories is not None and self.max_categories >= 1
+68         ) or self.min_frequency is not None
+69 
+70     def _map_drop_idx_to_infrequent(self, feature_idx, drop_idx):
+71         if not self._infrequent_enabled: ## [BRANCH]taken=['Y'][/BRANCH]
+72             return drop_idx
+73 
+74         default_to_infrequent = self._default_to_infrequent_mappings[feature_idx]
+75         if default_to_infrequent is None:
+76             return drop_idx
+77 
+78         infrequent_indices = self._infrequent_indices[feature_idx]
+79         if infrequent_indices is not None and drop_idx in infrequent_indices:
+80             categories = self.categories_[feature_idx]
+81             raise ValueError(
+82                 f"Unable to drop category {categories[drop_idx]!r} from feature"
+83                 f" {feature_idx} because it is infrequent"
+84             )
+85         return default_to_infrequent[drop_idx]
+86 
+87     def _set_drop_idx(self):
+88         if self.drop is None:
+89             drop_idx_after_grouping = None
+90         elif isinstance(self.drop, str):
+91             if self.drop == "first":
+92                 drop_idx_after_grouping = np.zeros(len(self.categories_), dtype=object)
+93             elif self.drop == "if_binary":
+94                 n_features_out_no_drop = [len(cat) for cat in self.categories_]
+95                 if self._infrequent_enabled:
+96                     for i, infreq_idx in enumerate(self._infrequent_indices):
+97                         if infreq_idx is None:
+98                             continue
+99                         n_features_out_no_drop[i] -= infreq_idx.size - 1
+100 
+101                 drop_idx_after_grouping = np.array(
+102                     [
+103                         0 if n_features_out == 2 else None
+104                         for n_features_out in n_features_out_no_drop
+105                     ],
+106                     dtype=object,
+107                 )
+108 
+109         else:
+110             drop_array = np.asarray(self.drop, dtype=object)
+111             droplen = len(drop_array)
+112 
+113             if droplen != len(self.categories_):
+114                 msg = (
+115                     "`drop` should have length equal to the number "
+116                     "of features ({}), got {}"
+117                 )
+118                 raise ValueError(msg.format(len(self.categories_), droplen))
+119             missing_drops = []
+120             drop_indices = []
+121             for feature_idx, (drop_val, cat_list) in enumerate(
+122                 zip(drop_array, self.categories_)
+123             ):
+124                 if not is_scalar_nan(drop_val):
+125                     drop_idx = np.where(cat_list == drop_val)[0]
+126                     if drop_idx.size:
+127                         drop_indices.append(
+128                             self._map_drop_idx_to_infrequent(feature_idx, drop_idx[0])
+129                         )
+130                     else:
+131                         missing_drops.append((feature_idx, drop_val))
+132                     continue
+133 
+134                 for cat_idx, cat in enumerate(cat_list):
+135                     if is_scalar_nan(cat):
+136                         drop_indices.append(
+137                             self._map_drop_idx_to_infrequent(feature_idx, cat_idx)
+138                         )
+139                         break
+140                 else:
+141                     missing_drops.append((feature_idx, drop_val))
+142 
+143             if any(missing_drops):
+144                 msg = (
+145                     "The following categories were supposed to be "
+146                     "dropped, but were not found in the training "
+147                     "data.\n{}".format(
+148                         "\n".join(
+149                             [
+150                                 "Category: {}, Feature: {}".format(c, v)
+151                                 for c, v in missing_drops
+152                             ]
+153                         )
+154                     )
+155                 )
+156                 raise ValueError(msg)
+157             drop_idx_after_grouping = np.array(drop_indices, dtype=object)
+158 
+159         self._drop_idx_after_grouping = drop_idx_after_grouping
+160 
+161         if not self._infrequent_enabled or drop_idx_after_grouping is None:
+162             self.drop_idx_ = self._drop_idx_after_grouping
+163         else:
+164             drop_idx_ = []
+165             for feature_idx, drop_idx in enumerate(drop_idx_after_grouping):
+166                 default_to_infrequent = self._default_to_infrequent_mappings[
+167                     feature_idx
+168                 ]
+169                 if drop_idx is None or default_to_infrequent is None:
+170                     orig_drop_idx = drop_idx
+171                 else:
+172                     orig_drop_idx = np.flatnonzero(default_to_infrequent == drop_idx)[0]
+173 
+174                 drop_idx_.append(orig_drop_idx)
+175 
+176             self.drop_idx_ = np.asarray(drop_idx_, dtype=object)
+177 
+178     def _identify_infrequent(self, category_count, n_samples, col_idx):
+179         if isinstance(self.min_frequency, numbers.Integral):
+180             infrequent_mask = category_count < self.min_frequency
+181         elif isinstance(self.min_frequency, numbers.Real):
+182             min_frequency_abs = n_samples * self.min_frequency
+183             infrequent_mask = category_count < min_frequency_abs
+184         else:
+185             infrequent_mask = np.zeros(category_count.shape[0], dtype=bool)
+186 
+187         n_current_features = category_count.size - infrequent_mask.sum() + 1
+188         if self.max_categories is not None and self.max_categories < n_current_features:
+189             smallest_levels = np.argsort(category_count, kind="mergesort")[
+190                 : -self.max_categories + 1
+191             ]
+192             infrequent_mask[smallest_levels] = True
+193 
+194         output = np.flatnonzero(infrequent_mask)
+195         return output if output.size > 0 else None
+196 
+197     def _fit_infrequent_category_mapping(self, n_samples, category_counts):
+198         self._infrequent_indices = [
+199             self._identify_infrequent(category_count, n_samples, col_idx)
+200             for col_idx, category_count in enumerate(category_counts)
+201         ]
+202 
+203         self._default_to_infrequent_mappings = []
+204 
+205         for cats, infreq_idx in zip(self.categories_, self._infrequent_indices):
+206             if infreq_idx is None:
+207                 self._default_to_infrequent_mappings.append(None)
+208                 continue
+209 
+210             n_cats = len(cats)
+211             mapping = np.empty(n_cats, dtype=np.int64)
+212             n_infrequent_cats = infreq_idx.size
+213 
+214             n_frequent_cats = n_cats - n_infrequent_cats
+215             mapping[infreq_idx] = n_frequent_cats
+216 
+217             frequent_indices = np.setdiff1d(np.arange(n_cats), infreq_idx)
+218             mapping[frequent_indices] = np.arange(n_frequent_cats)
+219 
+220             self._default_to_infrequent_mappings.append(mapping)
+221 
+222     def _map_infrequent_categories(self, X_int, X_mask):
+223         if not self._infrequent_enabled:
+224             return
+225 
+226         for col_idx in range(X_int.shape[1]):
+227             infrequent_idx = self._infrequent_indices[col_idx]
+228             if infrequent_idx is None:
+229                 continue
+230 
+231             X_int[~X_mask[:, col_idx], col_idx] = infrequent_idx[0]
+232             if self.handle_unknown == "infrequent_if_exist":
+233                 X_mask[:, col_idx] = True
+234 
+235         for i, mapping in enumerate(self._default_to_infrequent_mappings):
+236             if mapping is None:
+237                 continue
+238             X_int[:, i] = np.take(mapping, X_int[:, i])
+239 
+240     def _compute_transformed_categories(self, i, remove_dropped=True):
+241         cats = self.categories_[i]
+242 
+243         if self._infrequent_enabled:
+244             infreq_map = self._default_to_infrequent_mappings[i]
+245             if infreq_map is not None:
+246                 frequent_mask = infreq_map < infreq_map.max()
+247                 infrequent_cat = "infrequent_sklearn"
+248                 cats = np.concatenate(
+249                     (cats[frequent_mask], np.array([infrequent_cat], dtype=object))
+250                 )
+251 
+252         if remove_dropped:
+253             cats = self._remove_dropped_categories(cats, i)
+254         return cats
+255 
+256     def _remove_dropped_categories(self, categories, i):
+257         if (
+258             self._drop_idx_after_grouping is not None
+259             and self._drop_idx_after_grouping[i] is not None
+260         ):
+261             return np.delete(categories, self._drop_idx_after_grouping[i])
+262         return categories
+263 
+264     def _compute_n_features_outs(self):
+265         output = [len(cats) for cats in self.categories_]
+266 
+267         if self._drop_idx_after_grouping is not None:
+268             for i, drop_idx in enumerate(self._drop_idx_after_grouping):
+269                 if drop_idx is not None:
+270                     output[i] -= 1
+271 
+272         if not self._infrequent_enabled:
+273             return output
+274 
+275         for i, infreq_idx in enumerate(self._infrequent_indices):
+276             if infreq_idx is None:
+277                 continue
+278             output[i] -= infreq_idx.size - 1
+279 
+280         return output
+281 
+282     def fit(self, X, y=None):
+283         self._validate_params()
+284 
+285         if self.sparse != "deprecated":
+286             warnings.warn(
+287                 "`sparse` was renamed to `sparse_output` in version 1.2 and "
+288                 "will be removed in 1.4. `sparse_output` is ignored unless you "
+289                 "leave `sparse` to its default value.",
+290                 FutureWarning,
+291             )
+292             self.sparse_output = self.sparse
+293 
+294         self._check_infrequent_enabled()
+295 
+296         fit_results = self._fit(
+297             X,
+298             handle_unknown=self.handle_unknown,
+299             force_all_finite="allow-nan",
+300             return_counts=self._infrequent_enabled,
+301         )
+302         if self._infrequent_enabled:
+303             self._fit_infrequent_category_mapping(
+304                 fit_results["n_samples"], fit_results["category_counts"]
+305             )
+306         self._set_drop_idx()
+307         self._n_features_outs = self._compute_n_features_outs()
+308         return self
+309 
+310     def transform(self, X):
+311         check_is_fitted(self)
+312         warn_on_unknown = self.drop is not None and self.handle_unknown in {
+313             "ignore",
+314             "infrequent_if_exist",
+315         }
+316         X_int, X_mask = self._transform(
+317             X,
+318             handle_unknown=self.handle_unknown,
+319             force_all_finite="allow-nan",
+320             warn_on_unknown=warn_on_unknown,
+321         )
+322         self._map_infrequent_categories(X_int, X_mask)
+323 
+324         n_samples, n_features = X_int.shape
+325 
+326         if self._drop_idx_after_grouping is not None:
+327             to_drop = self._drop_idx_after_grouping.copy()
+328             keep_cells = X_int != to_drop
+329             for i, cats in enumerate(self.categories_):
+330                 if to_drop[i] is None:
+331                     to_drop[i] = len(cats)
+332 
+333             to_drop = to_drop.reshape(1, -1)
+334             X_int[X_int > to_drop] -= 1
+335             X_mask &= keep_cells
+336 
+337         mask = X_mask.ravel()
+338         feature_indices = np.cumsum([0] + self._n_features_outs)
+339         indices = (X_int + feature_indices[:-1]).ravel()[mask]
+340 
+341         indptr = np.empty(n_samples + 1, dtype=int)
+342         indptr[0] = 0
+343         np.sum(X_mask, axis=1, out=indptr[1:], dtype=indptr.dtype)
+344         np.cumsum(indptr[1:], out=indptr[1:])
+345         data = np.ones(indptr[-1])
+346 
+347         out = sparse.csr_matrix(
+348             (data, indices, indptr),
+349             shape=(n_samples, feature_indices[-1]),
+350             dtype=self.dtype,
+351         )
+352         if not self.sparse_output:
+353             return out.toarray()
+354         else:
+355             return out
+356 
+357     def inverse_transform(self, X):
+358         check_is_fitted(self)
+359         X = check_array(X, accept_sparse="csr")
+360 
+361         n_samples, _ = X.shape
+362         n_features = len(self.categories_)
+363 
+364         n_features_out = np.sum(self._n_features_outs)
+365 
+366         msg = (
+367             "Shape of the passed X data is not correct. Expected {0} columns, got {1}."
+368         )
+369         if X.shape[1] != n_features_out:
+370             raise ValueError(msg.format(n_features_out, X.shape[1]))
+371 
+372         transformed_features = [
+373             self._compute_transformed_categories(i, remove_dropped=False)
+374             for i, _ in enumerate(self.categories_)
+375         ]
+376 
+377         dt = np.result_type(*[cat.dtype for cat in transformed_features])
+378         X_tr = np.empty((n_samples, n_features), dtype=dt)
+379 
+380         j = 0
+381         found_unknown = {}
+382 
+383         if self._infrequent_enabled:
+384             infrequent_indices = self._infrequent_indices
+385         else:
+386             infrequent_indices = [None] * n_features
+387 
+388         for i in range(n_features):
+389             cats_wo_dropped = self._remove_dropped_categories(
+390                 transformed_features[i], i
+391             )
+392             n_categories = cats_wo_dropped.shape[0]
+393 
+394             if n_categories == 0:
+395                 X_tr[:, i] = self.categories_[i][self._drop_idx_after_grouping[i]]
+396                 j += n_categories
+397                 continue
+398             sub = X[:, j : j + n_categories]
+399             labels = np.asarray(sub.argmax(axis=1)).flatten()
+400             X_tr[:, i] = cats_wo_dropped[labels]
+401 
+402             if self.handle_unknown == "ignore" or (
+403                 self.handle_unknown == "infrequent_if_exist"
+404                 and infrequent_indices[i] is None
+405             ):
+406                 unknown = np.asarray(sub.sum(axis=1) == 0).flatten()
+407                 if unknown.any():
+408                     if (
+409                         self._drop_idx_after_grouping is None
+410                         or self._drop_idx_after_grouping[i] is None
+411                     ):
+412                         found_unknown[i] = unknown
+413                     else:
+414                         X_tr[unknown, i] = self.categories_[i][
+415                             self._drop_idx_after_grouping[i]
+416                         ]
+417             else:
+418                 dropped = np.asarray(sub.sum(axis=1) == 0).flatten()
+419                 if dropped.any():
+420                     if self._drop_idx_after_grouping is None:
+421                         all_zero_samples = np.flatnonzero(dropped)
+422                         raise ValueError(
+423                             f"Samples {all_zero_samples} can not be inverted "
+424                             "when drop=None and handle_unknown='error' "
+425                             "because they contain all zeros"
+426                         )
+427                     drop_idx = self._drop_idx_after_grouping[i]
+428                     X_tr[dropped, i] = transformed_features[i][drop_idx]
+429 
+430             j += n_categories
+431 
+432         if found_unknown:
+433             if X_tr.dtype != object:
+434                 X_tr = X_tr.astype(object)
+435 
+436             for idx, mask in found_unknown.items():
+437                 X_tr[mask, idx] = None
+438 
+439         return X_tr
+440 
+441     def get_feature_names_out(self, input_features=None):
+442         check_is_fitted(self)
+443         input_features = _check_feature_names_in(self, input_features)
+444         cats = [
+445             self._compute_transformed_categories(i)
+446             for i, _ in enumerate(self.categories_)
+447         ]
+448 
+449         name_combiner = self._check_get_feature_name_combiner()
+450         feature_names = []
+451         for i in range(len(cats)):
+452             names = [name_combiner(input_features[i], t) for t in cats[i]]
+453             feature_names.extend(names)
+454 
+455         return np.array(feature_names, dtype=object)
+456 
+457     def _check_get_feature_name_combiner(self):
+458         if self.feature_name_combiner == "concat":
+459             return lambda feature, category: feature + "_" + str(category)
+460         else:
+461             dry_run_combiner = self.feature_name_combiner("feature", "category")
+462             if not isinstance(dry_run_combiner, str):
+463                 raise TypeError(
+464                     "When `feature_name_combiner` is a callable, it should return a "
+465                     f"Python string. Got {type(dry_run_combiner)} instead."
+466                 )
+467             return self.feature_name_combiner
+468 
+[/ANSWER]

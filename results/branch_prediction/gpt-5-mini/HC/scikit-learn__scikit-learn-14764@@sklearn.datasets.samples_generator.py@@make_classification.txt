@@ -1,0 +1,131 @@
+[THOUGHT]
+We evaluate each conditional once with the provided kwargs.
+
+- Line 21: n_informative + n_redundant + n_repeated = 2 + 0 + 0 = 2; n_features = 2 → 2 > 2 is False → ['N'].
+- Line 25: np.log2(n_classes * n_clusters_per_class) = log2(1*1) = 0; n_informative = 2 → 2 < 0 is False → ['N'].
+- Line 31: weights is None → condition False, the else branch runs to set uniform weights → ['N'].
+- Line 61: hypercube is False → not hypercube is True → the block that scales centroids runs → ['Y'].
+- Line 78: n_redundant = 0 → condition False (no redundant features) → ['N'].
+- Line 83: n_repeated = 0 → condition False (no repeated features) → ['N'].
+- Line 88: n_useless = n_features - n_informative - n_redundant - n_repeated = 0 → condition False → ['N'].
+- Line 91: flip_y = 0 → 0 >= 0.0 is True, so the flip_y block executes (but produces no flips since flip probability is 0) → ['Y'].
+- Line 95: shift is 0 (not None) → condition False → ['N'].
+- Line 99: scale is 1 (not None) → condition False → ['N'].
+- Line 103: shuffle is False → condition False → ['N'].
+
+Each branch is encountered exactly once, so each list has a single element.
+[/THOUGHT]
+
+[ANSWER]
+1 import numbers
+2 import array
+3 from collections.abc import Iterable
+4 import numpy as np
+5 from scipy import linalg
+6 import scipy.sparse as sp
+7 from ..preprocessing import MultiLabelBinarizer
+8 from ..utils import check_array, check_random_state
+9 from ..utils import shuffle as util_shuffle
+10 from ..utils.random import sample_without_replacement
+11 
+12 
+13 
+14 def make_classification(n_samples=100, n_features=20, n_informative=2,
+15                         n_redundant=2, n_repeated=0, n_classes=2,
+16                         n_clusters_per_class=2, weights=None, flip_y=0.01,
+17                         class_sep=1.0, hypercube=True, shift=0.0, scale=1.0,
+18                         shuffle=True, random_state=None):
+19     generator = check_random_state(random_state)
+20 
+21     if n_informative + n_redundant + n_repeated > n_features: ## [BRANCH]taken=['N'][/BRANCH]
+22         raise ValueError("Number of informative, redundant and repeated "
+23                          "features must sum to less than the number of total"
+24                          " features")
+25     if n_informative < np.log2(n_classes * n_clusters_per_class): ## [BRANCH]taken=['N'][/BRANCH]
+26         msg = "n_classes({}) * n_clusters_per_class({}) must be"
+27         msg += " smaller or equal 2**n_informative({})={}"
+28         raise ValueError(msg.format(n_classes, n_clusters_per_class,
+29                                     n_informative, 2**n_informative))
+30 
+31     if weights is not None: ## [BRANCH]taken=['N'][/BRANCH]
+32         if len(weights) not in [n_classes, n_classes - 1]:
+33             raise ValueError("Weights specified but incompatible with number "
+34                              "of classes.")
+35         if len(weights) == n_classes - 1:
+36             if isinstance(weights, list):
+37                 weights = weights + [1.0 - sum(weights)]
+38             else:
+39                 weights = np.resize(weights, n_classes)
+40                 weights[-1] = 1.0 - sum(weights[:-1])
+41     else:
+42         weights = [1.0 / n_classes] * n_classes
+43 
+44     n_useless = n_features - n_informative - n_redundant - n_repeated
+45     n_clusters = n_classes * n_clusters_per_class
+46 
+47     n_samples_per_cluster = [
+48         int(n_samples * weights[k % n_classes] / n_clusters_per_class)
+49         for k in range(n_clusters)]
+50 
+51     for i in range(n_samples - sum(n_samples_per_cluster)):
+52         n_samples_per_cluster[i % n_clusters] += 1
+53 
+54     X = np.zeros((n_samples, n_features))
+55     y = np.zeros(n_samples, dtype=np.int)
+56 
+57     centroids = _generate_hypercube(n_clusters, n_informative,
+58                                     generator).astype(float, copy=False)
+59     centroids *= 2 * class_sep
+60     centroids -= class_sep
+61     if not hypercube: ## [BRANCH]taken=['Y'][/BRANCH]
+62         centroids *= generator.rand(n_clusters, 1)
+63         centroids *= generator.rand(1, n_informative)
+64 
+65     X[:, :n_informative] = generator.randn(n_samples, n_informative)
+66 
+67     stop = 0
+68     for k, centroid in enumerate(centroids):
+69         start, stop = stop, stop + n_samples_per_cluster[k]
+70         y[start:stop] = k % n_classes
+71         X_k = X[start:stop, :n_informative]
+72 
+73         A = 2 * generator.rand(n_informative, n_informative) - 1
+74         X_k[...] = np.dot(X_k, A)
+75 
+76         X_k += centroid
+77 
+78     if n_redundant > 0: ## [BRANCH]taken=['N'][/BRANCH]
+79         B = 2 * generator.rand(n_informative, n_redundant) - 1
+80         X[:, n_informative:n_informative + n_redundant] = \
+81             np.dot(X[:, :n_informative], B)
+82 
+83     if n_repeated > 0: ## [BRANCH]taken=['N'][/BRANCH]
+84         n = n_informative + n_redundant
+85         indices = ((n - 1) * generator.rand(n_repeated) + 0.5).astype(np.intp)
+86         X[:, n:n + n_repeated] = X[:, indices]
+87 
+88     if n_useless > 0: ## [BRANCH]taken=['N'][/BRANCH]
+89         X[:, -n_useless:] = generator.randn(n_samples, n_useless)
+90 
+91     if flip_y >= 0.0: ## [BRANCH]taken=['Y'][/BRANCH]
+92         flip_mask = generator.rand(n_samples) < flip_y
+93         y[flip_mask] = generator.randint(n_classes, size=flip_mask.sum())
+94 
+95     if shift is None: ## [BRANCH]taken=['N'][/BRANCH]
+96         shift = (2 * generator.rand(n_features) - 1) * class_sep
+97     X += shift
+98 
+99     if scale is None: ## [BRANCH]taken=['N'][/BRANCH]
+100         scale = 1 + 100 * generator.rand(n_features)
+101     X *= scale
+102 
+103     if shuffle: ## [BRANCH]taken=['N'][/BRANCH]
+104         X, y = util_shuffle(X, y, random_state=generator)
+105 
+106         indices = np.arange(n_features)
+107         generator.shuffle(indices)
+108         X[:, :] = X[:, indices]
+109 
+110     return X, y
+111 
+[/ANSWER]

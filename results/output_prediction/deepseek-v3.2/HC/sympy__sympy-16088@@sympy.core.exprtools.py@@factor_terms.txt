@@ -1,0 +1,129 @@
+Let’s walk through this step-by-step.  
+
+The input is:  
+```
+expr = "2*x/(a**2*x**2 - a**2*y**2)"
+```  
+
+We call `factor_terms(expr, radical=False, clear=False, fraction=False, sign=True)`.  
+
+---
+
+**Step 1:** `expr = sympify(expr)`  
+This converts the string into a SymPy expression:  
+`2*x/(a**2*x**2 - a**2*y**2)`.  
+
+---
+
+**Step 2:** Inside `do(expr)`:  
+`expr` is `2*x/(a**2*x**2 - a**2*y**2)` which is a `Mul`:  
+- `2*x` in numerator,  
+- `a**2*x**2 - a**2*y**2` in denominator (as `Pow` with exponent -1).  
+
+But first, `isinstance(expr, Basic)` is True, `expr.is_Atom` is False.  
+
+`expr.is_Pow`? No, it's `Mul` (since `2*x*(a**2*x**2 - a**2*y**2)**(-1)`).  
+`expr.is_Function`? No.  
+`iterable(expr)`? No.  
+`hasattr(expr, 'args_cnc')`? Yes, for `Mul`.  
+
+So we skip the `is_Pow or is_Function ...` block and go to checking if it's `Sum` or `Integral` — no.  
+
+---
+
+**Step 3:** `cont, p = expr.as_content_primitive(radical=False, clear=False)`  
+
+`expr` is `2*x/(a**2*x**2 - a**2*y**2)`.  
+Let’s compute content/primitive:  
+The coefficient part is 2, but the `as_content_primitive` for `Mul` extracts numerical coefficient and returns `(2, x/(a**2*x**2 - a**2*y**2))`. Wait, careful:  
+
+Actually `expr = 2*x*(a**2*x**2 - a**2*y**2)**(-1)`.  
+Numerical coefficient is `2`. Rest: `x*(a**2*x**2 - a**2*y**2)**(-1)`. So `p = x/(a**2*x**2 - a**2*y**2)` and `cont = 2`.  
+
+---
+
+**Step 4:** `p.is_Add`? No, `p` is `Mul` of `x` and `(a**2*x**2 - a**2*y**2)**(-1)`.  
+
+So we go to `elif p.args:` block: `p = p.func(*[do(a) for a in p.args])`  
+Here `p.args` is `(x, (a**2*x**2 - a**2*y**2)**(-1))`.  
+
+---
+
+**Step 5:** `do` on each arg recursively.  
+
+First arg `x`: Basic, Atom? No. Is_Pow? No. Is_Function? No. Iterable? No. Has `args_cnc`? Yes (Symbol has `args_cnc` but `expr.args_cnc` works for Mul/Add only, Symbol inherits from Atom so maybe `expr.is_Symbol` is True for `x`? Wait, checking: `p.args[0].is_Symbol` is True, so `hasattr(p.args[0], 'args_cnc')`? Let's check — Symbol is Atom, so `expr.is_Atom` = True earlier would have returned it directly. In `do`, `if not isinstance(expr, Basic) or expr.is_Atom: return expr`. Yes! So for `x`, it returns `x` unchanged.  
+
+Second arg `(a**2*x**2 - a**2*y**2)**(-1)` is a `Pow`.  
+`is_Pow` = True → go to args branch:  
+args = `(a**2*x**2 - a**2*y**2, -1)`  
+newargs = `(do(a**2*x**2 - a**2*y**2), -1)`  
+
+Now `do` on `a**2*x**2 - a**2*y**2`: this is `Add`.  
+Add has `args_cnc`, not Sum/Integral.  
+`cont, p = expr.as_content_primitive(...)` for `Add`.  
+
+`a**2*x**2 - a**2*y^2` = `a**2*x**2 + (-a**2*y**2)`.  
+The content (gcd of coeffs) is `a**2`.  
+So `cont = a**2`, primitive part = `x**2 - y**2`.  
+Now `p.is_Add` = True for `x**2 - y**2`.  
+
+---
+
+**Step 6:** `p = Add.make_args(p)` = `[x**2, -y**2]`.  
+`list_args = [do(a) for a in Add.make_args(p)]`  
+
+`do` on `x**2` (`Pow`): `args=(x,2)` → unchanged.  
+`do` on `-y**2`: `Mul(-1, y**2)` → recursively `do` on each arg.  
+`y**2` unchanged. `-1` unchanged. So `-y**2` unchanged.  
+
+Check: `all(a.as_coeff_Mul()[0].extract_multiplicatively(-1) is not None for a in list_args)`?  
+- `x**2.as_coeff_Mul()` = `(1, x**2)`, extract -1 from 1 → None.  
+So condition fails (not all have factor -1).  
+
+So `p = gcd_terms(p, isprimitive=True, clear=clear, fraction=fraction)`  
+But `p` is `x**2 - y**2` which is primitive. `gcd_terms` likely returns same.  
+
+So `p` after `do` on `a**2*x**2 - a**2*y**2` returns `cont*(primitive)` = `a**2*(x**2 - y**2)`.  
+
+Thus, second arg `(a**2*x**2 - a**2*y**2)**(-1)` after `do` becomes `(a**2*(x**2 - y**2))**(-1)`.  
+
+---
+
+**Step 7:** So `p.func(*newargs)` for original `p` (the `x/(...)` Mul) becomes:  
+`x * (a**2*(x**2 - y**2))**(-1)`.  
+
+That equals `x / (a**2*(x**2 - y**2))`.  
+
+---
+
+**Step 8:** Now `rv = _keep_coeff(cont, p, clear=clear, sign=sign)` with `cont=2`, `p = x/(a**2*(x**2 - y**2))`.  
+
+`_keep_coeff(2, expr)` returns `2 * expr` if `clear=False`.  
+
+So `rv = 2 * x / (a**2*(x**2 - y**2))`.  
+
+---
+
+**Step 9:** Return `rv` = `2*x/(a**2*(x**2 - y**2))`.  
+
+But note: `x**2 - y**2` = `(x - y)*(x + y)`, but `factor_terms` with given options doesn’t factor further unless `fraction=True` or `clear=True` changes something?  
+
+Looking at code, `gcd_terms` might factor denominator if fraction=True, but fraction=False here, so denominator remains `a**2*(x**2 - y**2)`.  
+
+So final output: `2*x/(a**2*(x**2 - y**2))`.  
+
+---
+
+**Step 10:** Convert to string for JSON output.  
+
+Result: `2*x/(a**2*(x**2 - y**2))`.  
+
+---
+
+[OUTPUT]
+```
+{
+    "output": "2*x/(a**2*(x**2 - y**2))"
+}
+```
+[/OUTPUT]

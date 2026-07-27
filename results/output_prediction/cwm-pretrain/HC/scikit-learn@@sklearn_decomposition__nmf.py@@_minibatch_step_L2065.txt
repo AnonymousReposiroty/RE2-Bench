@@ -1,0 +1,424 @@
+<think>
+1. `_minibatch_step` first extracts the inputs: `X`, `W`, `H`, `update_H=True`.
+2. Since `W` is given and `fresh_restarts=False`, it calls `_multiplicative_update_w` to update `W`:
+   - Input: `X=[[4,6],[3,7],[2,8],[1,9],[0,10]]`, `W=[[0.71426555, 0.68671821],[1.1039895, 0.51585613],[1.76682158, 0.11666063],[0.5354431, 1.26516297],[0.6186091, 1.34340944]]`, `H=[[1.16158817, 4.16211863],[0.91598555, 5.22460419]]`, `_beta_loss=2`
+   - Output: `W` is updated
+3. Compute batch cost:
+   - Call `_beta_divergence`: `beta_loss=2`, input `X`, `W`, `H`
+   - Output: cost
+4. Since `update_H=True`, calls `_multiplicative_update_h` to update `H`:
+   - Input: `X`, `W`, `H`, `beta_loss=2`, other parameters
+   - Output: updated `H`
+5. Return `batch_cost`.
+</think>
+
+[OUTPUT]
+```
+{
+    "output": 0.0
+}
+```
+[/OUTPUT]
+
+[FILEPATH] examples/test_suite/custom_models.py [/FILEPATH]
+from numbers import Integral, Real
+import numpy as np
+from scipy import linalg
+from sklearn.utils._param_validation import Interval, StrOptions, validate_params
+
+class MiniBatchNMF(_BaseNMF):
+    _parameter_constraints: dict = {**_BaseNMF._parameter_constraints, 'max_no_improvement': [Interval(Integral, 1, None, closed='left'), None], 'batch_size': [Interval(Integral, 1, None, closed='left')], 'forget_factor': [Interval(Real, 0, 1, closed='both')], 'fresh_restarts': ['boolean'], 'fresh_restarts_max_iter': [Interval(Integral, 1, None, closed='left')], 'transform_max_iter': [Interval(Integral, 1, None, closed='left'), None]}
+
+    def __init__(self, n_components='auto', *, init=None, batch_size=1024, beta_loss='frobenius', tol=0.0001, max_no_improvement=10, max_iter=200, alpha_W=0.0, alpha_H='same', l1_ratio=0.0, forget_factor=0.7, fresh_restarts=False, fresh_restarts_max_iter=30, transform_max_iter=None, random_state=None, verbose=0):
+        super().__init__(n_components=n_components, init=init, beta_loss=beta_loss, tol=tol, max_iter=max_iter, random_state=random_state, alpha_W=alpha_W, alpha_H=alpha_H, l1_ratio=l1_ratio, verbose=verbose)
+        self.max_no_improvement = max_no_improvement
+        self.batch_size = batch_size
+        self.forget_factor = forget_factor
+        self.fresh_restarts = fresh_restarts
+        self.fresh_restarts_max_iter = fresh_restarts_max_iter
+        self.transform_max_iter = transform_max_iter
+
+    def _solve_W(self, X, H, max_iter):
+        avg = np.sqrt(X.mean() / self._n_components)
+        W = np.full((X.shape[0], self._n_components), avg, dtype=X.dtype)
+        W_buffer = W.copy()
+        l1_reg_W, _, l2_reg_W, _ = self._compute_regularization(X)
+        for _ in range(max_iter):
+            W, *_ = _multiplicative_update_w(X, W, H, self._beta_loss, l1_reg_W, l2_reg_W, self._gamma)
+            W_diff = linalg.norm(W - W_buffer) / linalg.norm(W)
+            if self.tol > 0 and W_diff <= self.tol:
+                break
+            W_buffer[:] = W
+        return W
+
+    def _minibatch_step(self, X, W, H, update_H):
+        batch_size = X.shape[0]
+        l1_reg_W, l1_reg_H, l2_reg_W, l2_reg_H = self._compute_regularization(X)
+        if self.fresh_restarts or W is None:
+            W = self._solve_W(X, H, self.fresh_restarts_max_iter)
+        else:
+            W, *_ = _multiplicative_update_w(X, W, H, self._beta_loss, l1_reg_W, l2_reg_W, self._gamma)
+        if self._beta_loss < 1:
+            W[W < np.finfo(np.float64).eps] = 0.0
+        batch_cost = (_beta_divergence(X, W, H, self._beta_loss) + l1_reg_W * W.sum() + l1_reg_H * H.sum() + l2_reg_W * (W ** 2).sum() + l2_reg_H * (H ** 2).sum()) / batch_size
+        if update_H:
+            H[:] = _multiplicative_update_h(X, W, H, beta_loss=self._beta_loss, l1_reg_H=l1_reg_H, l2_reg_H=l2_reg_H, gamma=self._gamma, A=self._components_numerator, B=self._components_denominator, rho=self._rho)
+            if self._beta_loss <= 1:
+                H[H < np.finfo(np.float64).eps] = 0.0
+        return batch_cost
+
+[FILEPATH] examples/test_suite/test_inference.py [/FILEPATH]
+import os
+import yaml
+import warnings
+from pprint import pprint
+
+from examples.test_suite.test_environment import (
+    generate_fixture, load_test_cases
+)
+
+from examples.test_suite.test_environment import (
+    CodeExecutionIsolator, 
+    InferenceModel
+)
+from inferentia.ml import Prompt
+
+TEST_CASE_CONFIG_FILE = 'test_cases.yaml'
+EXAMPLE_CONFIG_FILE = 'example.yaml'
+PROJECT_ROOT = os.path.dirname(__file__)
+
+class TestInference:
+
+    @staticmethod
+    def test_execute():
+        warnings.simplefilter("ignore")
+
+        isolation = CodeExecutionIsolator()
+        
+        example_path = os.path.join(PROJECT_ROOT, EXAMPLE_CONFIG_FILE)
+        example = Prompt.read(example_path)
+        example.num_tokens_in_context_window = None
+
+        # read the test cases
+        cases_path = os.path.join(PROJECT_ROOT, TEST_CASE_CONFIG_FILE)
+        cases = load_test_cases(cases_path)
+
+        tests_pass = True
+        passed, failed, skipped = 0, 0, 0
+        for test_idx, test in enumerate(cases.tests, start=1):
+            if test.skip: # 'skip' is a custom attribute
+                print(f"🔁 Skipping test case {test_idx}")
+                skipped += 1
+                continue
+
+            try:
+                fixture_path = os.path.join(
+                    PROJECT_ROOT, 'fixtures',
+                    test[InferenceModel.prompt_field_name], 
+                    test[InferenceModel.fixture_file_name]
+                )
+                fixture = generate_fixture(
+                    test, fixture_path, 
+                    test[InferenceModel.model_field_name]
+                )
+            except Exception as e:
+                print(f"❌ Fixture creation failed for test {test_idx}: {e}")
+                tests_pass = False
+                continue
+                
+            print(f"🔍 Running test {test_idx}")
+            result, execution_time = isolation.execute(
+                example=example,
+                fixture=fixture, 
+                fn_test=InferenceModel.extract_chat_completion,
+                fn_baseline=InferenceModel.extract_baseline,
+                verbose=False
+            )
+
+            if not result == 'pass':
+                tests_pass = False
+                print(f"❌ Test {test_idx} failed (did not pass)")
+                failed += 1
+            else:
+                print(f"✅ Test {test_idx} passed")
+                passed += 1
+        
+        print("📊 Test Summary:")
+        print(f"Total tests: {len(cases.tests)}")
+        print(f"Passed: {passed}")
+        print(f"Failed: {failed}")
+        print(f"Skipped: {skipped}")
+
+        if not tests_pass:
+            raise Exception("❌ One or more tests failed")
+        else:
+            print("✅ All tests passed successfully!")
+
+[FILEPATH] examples/falcon_code_execution_isolation/README.md [/FILEPATH]
+# tzero Code Interpreter + Execution Isolation Example
+
+This directory contains a brief example demonstrating the use of [tzero](https://docs.tzero.ai/) with the open source Falcon LLMs to simulate a local code interpreter. Furthermore, we demonstrate execution isolation capabilities in a local LLM server using the [fastapi-toolkit](https://github.com/sautuavaahanka/fastapi-toolkit/).
+
+## What's Falcon?
+
+A family of transformer language models are known for their open source and accessible nature and easy to use. [Falcon LLMs](https://falconllm.tii.ae/) are leading models open-sourced by [Technology Innovation Institute (TII)](https://www.tii.ae/). [Falcon-40B](https://huggingface.co/tiiuae/falcon-40b) and [Falcon-180B](https://huggingface.co/tiiuae/falcon-180b) are available in the model hub with fine-tuned variants for chat. This is a great starter point for code execution isolation.
+
+## TLDR - How to run this?
+
+Follow the [quick start](https://docs.tzero.ai/basics/quick-start/) for installing tzero in your virtual environment.
+
+Here's the quick-start `Bash` snippet for running this example.
+
+```bash
+git clone https://github.com/speechcolab/speechcolab
+cd speechcolab
+
+# After installing the deps, 
+python -m examples.falcon_code_execution_isolation.01_example
+```
+
+The [codes](./01_example.py) execute a small function in Python.
+
+```python
+def fizz_buzz(limit: int = 100):
+    """
+    Fizz Buzz Challenge!
+    
+    For this challenge, write a function that returns the string `fizz buzz` if the number is divisible by both 3 and 5. 
+    Else if the number is divisible by 3, return `fizz`, and if it is divisible by 5, return `buzz`.
+    """
+    out = []
+    for i in range(1, limit):
+        if i % 15 == 0:
+            out.append("fizz buzz")
+        elif i % 3 == 0:
+            out.append("fizz")
+        elif i % 5 == 0:
+            out.append("buzz")
+        else:
+            out.append(i)
+    return out
+
+result = fizz_buzz(100)
+print(result)
+```
+
+If all goes well, you will see the following output.
+
+```
+Running Falcon execution isolation example...
+Created new client for http://127.0.0.1:8000
+Closed client
+Extraction: array(['fizz buzz', 7, 8, 'fizz', 'buzz', 11, 'fizz', 13, 14, 'fizz buzz', 16, 17, 'fizz', 19, 'buzz', 'fizz', 22, 23, 'fizz', 'buzz', 26, 'fizz', 28, 29, 'fizz buzz', 31, 32, 'fizz', 34, 'buzz', 'fizz', 37, 38, 'fizz', 'buzz', 41, 'fizz', 43, 44, 'fizz buzz', 46, 47, 'fizz', 49, 'buzz', 'fizz', 52, 53, 'fizz', 'buzz', 56, 'fizz', 58, 59, 'fizz buzz', 61, 62, 'fizz', 64, 'buzz', 'fizz', 67, 68, 'fizz', 'buzz', 71, 'fizz', 73, 74, 'fizz buzz', 76, 77, 'fizz', 79, 'buzz', 'fizz', 82, 83, 'fizz', 'buzz', 86, 'fizz', 88, 89, 'fizz buzz', 91, 92, 'fizz', 94, 'buzz', 'fizz', 97, 98, 'fizz', 'buzz'])
+```
+
+[FILEPATH] docs/README.md [/FILEPATH]
+# SpeechColab Docs
+
+> Open source AI-powered workflows to generate speech data.
+
+🚧 Work-in-progress 🚧
+
+## About SpeechColab
+
+SpeechColab is an open source tool for collecting and processing voice data using custom prompts.  The name "SpeechColab" is inspired by the Colab Notebooks from Google. 
+
+**SpeechColab is your canvas, and you're the artist.**
+
+It's meant to be used for generation or collecting voice data that could be used to train or fine-tune speech models, or build other applications. The tooling is meant to be a useful library of utilities for simple voice data collection that can be built upon to create custom applications.
+
+# 🚀 Quick Start
+
+Here's how you can get started with SpeechColab, and the many ways you can use the library and examples.
+
+## A quick example
+
+We can set up a simple command-line interface for speech collection in Python.
+
+```python
+from speechcolab import Recorder
+from speechcolab.utils import get_output_path
+from rich.console import Console
+
+with Recorder(model="openai/whisper-tiny.en") as rec:
+    while True:
+        with console.status("🎙 Recording..."):
+            result = rec.record()
+            
+        if result is None:
+            continue
+
+        with console.status("Transcribing..."):
+            transcription = rec.transcribe()
+
+        with console.status("Saving..."):
+            path = get_output_path(f"{transcription.text}.wav")
+            rec.save_wav(path)
+
+        console.print(f"Saved transcription to {path}")
+```
+
+Then, we can run the script in a terminal to record audio.
+
+```bash
+python speechcolab.py
+```
+
+This will start recording audio, and save the transcribed audio to a file in the current directory.
+
+## Installation
+
+SpeechColab is available on PyPI and can be installed with pip.
+
+```bash
+pip install speechcolab
+```
+
+SpeechColab is built on top of [LLM Inferentia](https://github.com/speechcolab/inferentia), which uses the [transformers](https://huggingface.co/transformers/) library to run models locally. You can install the dependencies with pip.
+
+```bash
+pip install transformers
+pip install pydub
+```
+
+## Voice Collection
+
+You can use SpeechColab to record and transcribe audio in Python, from the command-line, or from the browser. 
+
+To use the SpeechColab module, you can import the `Recorder` class and use it to record and transcribe audio.
+
+```python
+from speechcolab import Recorder
+
+with Recorder(model="openai/whisper-tiny.en") as rec:
+    result = rec.record()
+    transcription = rec.transcribe()
+```
+
+You can also run the `speechcolab` command in a terminal to record and transcribe audio.
+
+```bash
+speechcolab
+```
+
+The `speechcolab` command will record audio and save the transcribed audio to a file in the current directory.
+
+## Voice Prompts
+
+You can use SpeechColab to collect voice data using custom prompts. A prompt is a set of instructions or questions that you can use to guide the speech collection process. 
+
+To use prompts, you can import the `Prompt` class and use it to load and run prompts.
+
+```python
+from speechcolab import Prompt
+
+prompt = Prompt.load("path/to/prompt")
+result = prompt.run()
+```
+
+You can also run the `speechcolab` command in a terminal to load and run prompts.
+
+```bash
+speechcolab --prompt path/to/prompt
+```
+
+The `speechcolab` command will load the prompt and run it, recording and transcribing audio as specified in the prompt.
+
+## Voice Concurrency
+
+You can use SpeechColab to collect voice data from multiple users at the same time. This is useful for collecting large amounts of voice data quickly.
+
+To use concurrency, you can import the `Recorder` class and use it to record and transcribe audio in a concurrent manner.
+
+```python
+from speechcolab import Recorder
+
+with Recorder(model="openai/whisper-tiny.en") as rec:
+    result = rec.record(concurrent=True)
+    transcription = rec.transcribe()
+```
+
+You can also run the `speechcolab` command in a terminal to record and transcribe audio in a concurrent manner.
+
+```bash
+speechcolab --concurrent
+```
+
+The `speechcolab` command will record and transcribe audio from multiple users at the same time.
+
+## Voice Data Processing
+
+You can use SpeechColab to process the voice data you collect. This includes transcribing audio, saving audio files, and generating annotations.
+
+To use data processing, you can import the `Recorder` class and use it to transcribe and save audio.
+
+```python
+from speechcolab import Recorder
+
+with Recorder(model="openai/whisper-tiny.en") as rec:
+    result = rec.record()
+    transcription = rec.transcribe()
+    rec.save_wav("path/to/audio.wav")
+```
+
+You can also run the `speechcolab` command in a terminal to transcribe and save audio.
+
+```bash
+speechcolab --save path/to/audio.wav
+```
+
+The `speechcolab` command will record and transcribe audio, and save the audio file to the specified path.
+
+[FILEPATH] cli/templates/utils/dict.py [/FILEPATH]
+"""
+Useful utilities for working with dictionaries
+"""
+import functools
+
+
+@functools.singledispatch
+def dict_to_kvs(key: str, value: dict):
+    """
+    Converts a dictionary to a list of key-value pairs.
+
+    Args:
+        key (str): The key of the dictionary.
+        value (dict): The dictionary to convert.
+
+    Returns:
+        list: A list of key-value pairs.
+    """
+    return list(value.items())
+
+
+@dict_to_kvs.register(str)
+def _(key, value):
+    """
+    Converts a string value to a key-value pair.
+
+    Args:
+        key (str): The key of the value.
+        value (str): The value to convert.
+
+    Returns:
+        list: A list containing a single key-value pair.
+    """
+    return [(key, value)]
+
+
+def merge_dict_of_dicts(dicts: list[dict]):
+    """
+    Merges a list of dictionaries into a single dictionary.
+
+    Args:
+        dicts (list): A list of dictionaries to merge.
+
+    Returns:
+        dict: The merged dictionary.
+    """
+    return functools.reduce(lambda x, y: x | y, dicts)
+
+[FILEPATH] cli/utils/examples.py [/FILEPATH]
+import logging
+from collections import namedtuple
+from context

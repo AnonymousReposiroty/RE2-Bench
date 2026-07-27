@@ -1,0 +1,1 @@
+from sphinx.util.typing import stringify

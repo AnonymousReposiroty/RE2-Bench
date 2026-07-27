@@ -1,0 +1,253 @@
+[ANSWER]
+1   from __future__ import print_function, division
+2   import math
+3   from sympy.core.symbol import Dummy, Symbol, symbols
+4   from sympy.core import S, I, pi
+5   from sympy.core.compatibility import ordered
+6   from sympy.core.mul import expand_2arg, Mul
+7   from sympy.core.power import Pow
+8   from sympy.core.relational import Eq
+9   from sympy.core.sympify import sympify
+10  from sympy.core.numbers import Rational, igcd, comp
+11  from sympy.core.exprtools import factor_terms
+12  from sympy.core.logic import fuzzy_not
+13  from sympy.ntheory import divisors, isprime, nextprime
+14  from sympy.functions import exp, sqrt, im, cos, acos, Piecewise
+15  from sympy.functions.elementary.miscellaneous import root
+16  from sympy.polys.polytools import Poly, cancel, factor, gcd_list, discriminant
+17  from sympy.polys.specialpolys import cyclotomic_poly
+18  from sympy.polys.polyerrors import (PolynomialError, GeneratorsNeeded,
+19      DomainError)
+20  from sympy.polys.polyquinticconst import PolyQuintic
+21  from sympy.polys.rationaltools import together
+22  from sympy.simplify import simplify, powsimp
+23  from sympy.utilities import public
+24  from sympy.core.compatibility import reduce, range
+25  from sympy.solvers.solvers import solve as _solve
+26  from sympy.polys.polytools import to_rational_coeffs
+27  
+28  
+29  
+30  def roots(f, *gens, **flags):
+31      from sympy.polys.polytools import to_rational_coeffs
+32      flags = dict(flags)
+33  
+34      auto = flags.pop('auto', True)
+35      cubics = flags.pop('cubics', True)
+36      trig = flags.pop('trig', False)
+37      quartics = flags.pop('quartics', True)
+38      quintics = flags.pop('quintics', False)
+39      multiple = flags.pop('multiple', False)
+40      filter = flags.pop('filter', None)
+41      predicate = flags.pop('predicate', None)
+42  
+43      if isinstance(f, list): ## [BRANCH]taken=['Y'][/BRANCH]
+44          if gens: ## [BRANCH]taken=['N'][/BRANCH]
+45              raise ValueError('redundant generators given')
+46  
+47          x = Dummy('x')
+48  
+49          poly, i = {}, len(f) - 1
+50  
+51          for coeff in f:
+52              poly[i], i = sympify(coeff), i - 1
+53  
+54          f = Poly(poly, x, field=True)
+55      else: ## [BRANCH]taken=['N'][/BRANCH]
+56          try:
+57              f = Poly(f, *gens, **flags)
+58              if f.length == 2 and f.degree() != 1:
+59                  n = f.degree()
+60                  npow_bases = []
+61                  expr = f.as_expr()
+62                  con = expr.as_independent(*gens)[0]
+63                  for p in Mul.make_args(con):
+64                      if p.is_Pow and not p.exp % n:
+65                          npow_bases.append(p.base**(p.exp/n))
+66                      else: ## [BRANCH]taken=[][/BRANCH]
+67                          other.append(p)
+68                      if npow_bases:
+69                          b = Mul(*npow_bases)
+70                          B = Dummy()
+71                          d = roots(Poly(expr - con + B**n*Mul(*others), *gens,
+72                              **flags), *gens, **flags)
+73                          rv = {}
+74                          for k, v in d.items():
+75                              rv[k.subs(B, b)] = v
+76                          return rv
+77  
+78          except GeneratorsNeeded:
+79              if multiple:
+80                  return []
+81              else: ## [BRANCH]taken=[][/BRANCH]
+82                  return {}
+83  
+84          if f.is_multivariate:
+85              raise PolynomialError('multivariate polynomials are not supported')
+86  
+87      def _update_dict(result, root, k):
+88          if root in result: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+89              result[root] += k
+90          else: ## [BRANCH]taken=['Y', 'Y'][/BRANCH]
+91              result[root] = k
+92  
+93      def _try_decompose(f):
+94          factors, roots = f.decompose(), []
+95  
+96          for root in _try_heuristics(factors[0]):
+97              roots.append(root)
+98  
+99          for factor in factors[1:]:
+100             previous, roots = list(roots), []
+101 
+102             for root in previous:
+103                 g = factor - Poly(root, f.gen)
+104 
+105                 for root in _try_heuristics(g):
+106                     roots.append(root)
+107 
+108         return roots
+109 
+110     def _try_heuristics(f):
+111         if f.is_ground:
+112             return []
+113         if f.is_monomial:
+114             return [S(0)]*f.degree()
+115 
+116         if f.length() == 2:
+117             if f.degree() == 1:
+118                 return list(map(cancel, roots_linear(f)))
+119             else: ## [BRANCH]taken=[][/BRANCH]
+120                 return roots_binomial(f)
+121 
+122         result = []
+123 
+124         for i in [-1, 1]:
+125             if not f.eval(i):
+126                 f = f.quo(Poly(f.gen - i, f.gen))
+127                 result.append(i)
+128                 break
+129 
+130         n = f.degree()
+131 
+132         if n == 1:
+133             result += list(map(cancel, roots_linear(f)))
+134         elif n == 2:
+135             result += list(map(cancel, roots_quadratic(f)))
+136         elif f.is_cyclotomic:
+137             result += roots_cyclotomic(f)
+138         elif n == 3 and cubics:
+139             result += roots_cubic(f, trig=trig)
+140         elif n == 4 and quartics:
+141             result += roots_quartic(f)
+142         elif n == 5 and quintics:
+143             result += roots_quintic(f)
+144 
+145         return result
+146 
+147     (k,), f = f.terms_gcd()
+148 
+149     if not k: ## [BRANCH]taken=['Y'][/BRANCH]
+150         zeros = {}
+151     else: ## [BRANCH]taken=['N'][/BRANCH]
+152         zeros = {S(0): k}
+153 
+154     coeff, f = preprocess_roots(f)
+155 
+156     if auto and f.get_domain().is_Ring: ## [BRANCH]taken=['Y'][/BRANCH]
+157         f = f.to_field()
+158 
+159     rescale_x = None
+160     translate_x = None
+161 
+162     result = {}
+163 
+164     if not f.is_ground: ## [BRANCH]taken=['Y'][/BRANCH]
+165         if not f.get_domain().is_Exact: ## [BRANCH]taken=['N'][/BRANCH]
+166             for r in f.nroots():
+167                 _update_dict(result, r, 1)
+168         elif f.degree() == 1: ## [BRANCH]taken=['N'][/BRANCH]
+169             result[roots_linear(f)[0]] = 1
+170         elif f.length() == 2: ## [BRANCH]taken=['Y'][/BRANCH]
+171             roots_fun = roots_quadratic if f.degree() == 2 else roots_binomial
+172             for r in roots_fun(f):
+173                 _update_dict(result, r, 1)
+174         else: ## [BRANCH]taken=['N'][/BRANCH]
+175             _, factors = Poly(f.as_expr()).factor_list()
+176             if len(factors) == 1 and f.degree() == 2:
+177                 for r in roots_quadratic(f):
+178                     _update_dict(result, r, 1)
+179             else: ## [BRANCH]taken=[][/BRANCH]
+180                 if len(factors) == 1 and factors[0][1] == 1:
+181                     if f.get_domain().is_EX:
+182                         res = to_rational_coeffs(f)
+183                         if res:
+184                             if res[0] is None:
+185                                 translate_x, f = res[2:]
+186                             else: ## [BRANCH]taken=[][/BRANCH]
+187                                 rescale_x, f = res[1], res[-1]
+188                             result = roots(f)
+189                             if not result:
+190                                 for root in _try_decompose(f):
+191                                     _update_dict(result, root, 1)
+192                         else:
+193                             for r in _try_heuristics(f):
+194                                 _update_dict(result, r, 1)
+195                     else:
+196                         for root in _try_decompose(f):
+197                             _update_dict(result, root, 1)
+198                 else:
+199                     for factor, k in factors:
+200                         for r in _try_heuristics(Poly(factor, f.gen, field=True)):
+201                             _update_dict(result, r, k)
+202 
+203     if coeff is not S.One: ## [BRANCH]taken=['N'][/BRANCH]
+204         _result, result, = result, {}
+205 
+206         for root, k in _result.items():
+207             result[coeff*root] = k
+208 
+209     result.update(zeros)
+210 
+211     if filter not in [None, 'C']: ## [BRANCH]taken=['N'][/BRANCH]
+212         handlers = {
+213             'Z': lambda r: r.is_Integer,
+214             'Q': lambda r: r.is_Rational,
+215             'R': lambda r: r.is_real,
+216             'I': lambda r: r.is_imaginary,
+217         }
+218 
+219         try:
+220             query = handlers[filter]
+221         except KeyError:
+222             raise ValueError("Invalid filter: %s" % filter)
+223 
+224         for zero in dict(result).keys():
+225             if not query(zero):
+226                 del result[zero]
+227 
+228     if predicate is not None: ## [BRANCH]taken=['N'][/BRANCH]
+229         for zero in dict(result).keys():
+230             if not predicate(zero):
+231                 del result[zero]
+232     if rescale_x: ## [BRANCH]taken=['N'][/BRANCH]
+233         result1 = {}
+234         for k, v in result.items():
+235             result1[k*rescale_x] = v
+236         result = result1
+237     if translate_x: ## [BRANCH]taken=['N'][/BRANCH]
+238         result1 = {}
+239         for k, v in result.items():
+240             result1[k + translate_x] = v
+241         result = result1
+242 
+243     if not multiple: ## [BRANCH]taken=['Y'][/BRANCH]
+244         return result
+245     else:
+246         zeros = []
+247 
+248         for zero in ordered(result):
+249             zeros.extend([zero]*result[zero])
+250 
+251         return zeros
+252 [/ANSWER]

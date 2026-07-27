@@ -1,0 +1,90 @@
+[THOUGHT]
+We sympify "3 + I" -> Add(3, I). do(expr) is called on the Add and then recursively on each term.
+
+Trace:
+- do(Add(3, I)): line 19 checks "not isinstance(expr, Basic) or expr.is_Atom" -> False for Add -> marker at line 19: 'N' (1st occurrence).
+  - line 32 isinstance(Sum, Integral) -> False -> marker at 32: 'N' (only occurrence).
+  - cont, p = expr.as_content_primitive(...); p.is_Add is True -> marker at 38: 'Y' (only occurrence).
+  - list_args = [do(3), do(I)].
+
+- do(3): integer is an Atom -> line 19 condition True -> marker at 19: 'Y' (2nd occurrence).
+  - inside that, is_iterable False -> marker at 20: 'N' (1st occurrence). returns 3.
+
+- do(I): same as 3 -> marker at 19: 'Y' (3rd occurrence); marker at 20: 'N' (2nd occurrence). returns I.
+
+Back to parent: iterate list_args and test e.is_Mul ... at line 47 for each term (two terms). For both terms e.is_Mul is False -> marker at 47: 'N', 'N' (two occurrences).
+
+The elif at line 55 is not reached because p.is_Add branch taken, so marker at 55 is never encountered -> [].
+
+So the sequences are:
+- line 19: ['N','Y','Y']
+- line 20: ['N','N']
+- line 32: ['N']
+- line 38: ['Y']
+- line 47: ['N','N']
+- line 55: []
+[/THOUGHT]
+
+[ANSWER]
+1 from .add import Add
+2 from .mul import Mul, _keep_coeff
+3 from .basic import Basic
+4 from .expr import Expr
+5 from .sympify import sympify
+6 from .symbol import Dummy
+7 from sympy.utilities.iterables import (common_prefix, common_suffix,
+8         variations, iterable, is_sequence)
+9 from sympy.concrete.summations import Sum
+10 from sympy.integrals.integrals import Integral
+11 from .symbol import Dummy
+12 
+13 def factor_terms(expr: Expr | complex, radical=False, clear=False, fraction=False, sign=True) -> Expr:
+14     def do(expr):
+15         from sympy.concrete.summations import Sum
+16         from sympy.integrals.integrals import Integral
+17         is_iterable = iterable(expr)
+18 
+19         if not isinstance(expr, Basic) or expr.is_Atom: ## [BRANCH]taken=['N', 'Y', 'Y'][/BRANCH]
+20             if is_iterable: ## [BRANCH]taken=['N', 'N'][/BRANCH]
+21                 return type(expr)([do(i) for i in expr])
+22             return expr
+23 
+24         if expr.is_Pow or expr.is_Function or \
+25                 is_iterable or not hasattr(expr, 'args_cnc'):
+26             args = expr.args
+27             newargs = tuple([do(i) for i in args])
+28             if newargs == args:
+29                 return expr
+30             return expr.func(*newargs)
+31 
+32         if isinstance(expr, (Sum, Integral)): ## [BRANCH]taken=['N'][/BRANCH]
+33             return _factor_sum_int(expr,
+34                 radical=radical, clear=clear,
+35                 fraction=fraction, sign=sign)
+36 
+37         cont, p = expr.as_content_primitive(radical=radical, clear=clear)
+38         if p.is_Add: ## [BRANCH]taken=['Y'][/BRANCH]
+39             list_args = [do(a) for a in Add.make_args(p)]
+40             if not any(a.as_coeff_Mul()[0].extract_multiplicatively(-1) is None
+41                        for a in list_args):
+42                 cont = -cont
+43                 list_args = [-a for a in list_args]
+44             special = {}
+45             for i, a in enumerate(list_args):
+46                 b, e = a.as_base_exp()
+47                 if e.is_Mul and e != Mul(*e.args): ## [BRANCH]taken=['N', 'N'][/BRANCH]
+48                     list_args[i] = Dummy()
+49                     special[list_args[i]] = a
+50             p = Add._from_args(list_args)
+51             p = gcd_terms(p,
+52                 isprimitive=True,
+53                 clear=clear,
+54                 fraction=fraction).xreplace(special)
+55         elif p.args: ## [BRANCH]taken=[][/BRANCH]
+56             p = p.func(
+57                 *[do(a) for a in p.args])
+58         rv = _keep_coeff(cont, p, clear=clear, sign=sign)
+59         return rv
+60     expr2 = sympify(expr)
+61     return do(expr2)
+62

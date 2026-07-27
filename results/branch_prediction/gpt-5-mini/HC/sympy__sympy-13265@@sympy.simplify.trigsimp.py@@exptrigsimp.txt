@@ -1,0 +1,137 @@
+[THOUGHT]
+We trace exptrigsimp on expr = (1 + exp(2))/(y*(-1 + exp(2))).
+
+High-level observations:
+- The expression contains exp(2) and symbol y but no trigonometric or hyperbolic functions, and no imaginary unit I.
+- bottom_up will call exp_trig on many subexpressions, but for each call e.has(*_trigs) will be False because there are no trig/hyperbolic functions.
+- The top-level expression is a Mul (division is represented as A * B**(-1) in SymPy), so when f is invoked on the top-level rv.is_Mul is True; for non-Mul nodes f would return early.
+- Many of the internal branches in signlog and the Add-handling depend on encountering exp(...) nodes in particular contexts. There are exp(2) nodes present, so isinstance(expr, exp) will be True when signlog is called on such an exp instance; other checks comparing to S.Exp1 or matching other forms will be False for this input.
+- The expression has Add nodes like 1 + exp(2) and -1 + exp(2), so the check k.is_Add and len(k.args) == 2 will be True when iterating keys of the powers-dict for relevant Mul nodes.
+- No hyperbolic/trig functions are present, so the two later has(...) checks are False.
+- There is no imaginary unit I, so (newexpr.has(I) and not expr.has(I)) is False; negating that yields True and expr will be updated to newexpr.
+
+Based on these, and treating each branch marker as a single encounter for the purpose of this annotation, the branch outcomes are:
+- line 45: e.has(*_trigs) -> N
+- line 52: not rv.is_Mul -> N (the top-level rv is a Mul so this is not taken)
+- line 58: expr is S.Exp1 -> N
+- line 60: isinstance(expr, exp) -> Y (exp(2) exists)
+- line 62: sign == 1 -> N (not reached in the exp-handling case)
+- line 69: k.is_Add and len(k.args) == 2 -> Y (Add nodes like 1+exp(2))
+- line 72: if not x -> N (signlog for exp returns a non-false x)
+- line 76: ee == -x*m/2 -> N (unlikely for this input)
+- line 79: sign == 1 -> N (nested under previous failed condition)
+- line 83: newd[1 - sign*S.Exp1**x] == -m -> N
+- line 96: newexpr.has(HyperbolicFunction) -> N
+- line 99: newexpr.has(TrigonometricFunction) -> N
+- line 102: not (newexpr.has(I) and not expr.has(I)) -> Y
+
+Each replaced marker uses a single-element list corresponding to the (single) observed outcome here.
+[/THOUGHT]
+
+[ANSWER]
+1 from __future__ import print_function, division
+2 from collections import defaultdict
+3 from sympy.core.cache import cacheit
+4 from sympy.core import (sympify, Basic, S, Expr, expand_mul, factor_terms,
+5     Mul, Dummy, igcd, FunctionClass, Add, symbols, Wild, expand)
+6 from sympy.core.compatibility import reduce, iterable
+7 from sympy.core.numbers import I, Integer
+8 from sympy.core.function import count_ops, _mexpand
+9 from sympy.functions.elementary.trigonometric import TrigonometricFunction
+10 from sympy.functions.elementary.hyperbolic import HyperbolicFunction
+11 from sympy.functions import sin, cos, exp, cosh, tanh, sinh, tan, cot, coth
+12 from sympy.strategies.core import identity
+13 from sympy.strategies.tree import greedy
+14 from sympy.polys import Poly
+15 from sympy.polys.polyerrors import PolificationFailed
+16 from sympy.polys.polytools import groebner
+17 from sympy.polys.domains import ZZ
+18 from sympy.polys import factor, cancel, parallel_poly_from_expr
+19 from sympy.utilities.misc import debug
+20 from sympy.simplify.ratsimp import ratsimpmodprime
+21 from sympy.simplify.fu import fu
+22 from sympy.simplify.fu import hyper_as_trig, TR2i
+23 from sympy.simplify.simplify import bottom_up
+24 from sympy.simplify.fu import TR10i
+25 from sympy.simplify.fu import hyper_as_trig
+26 from sympy.simplify.simplify import bottom_up
+27 from sympy.simplify.fu import (
+28         TR1, TR2, TR3, TR2i, TR10, L, TR10i,
+29         TR8, TR6, TR15, TR16, TR111, TR5, TRmorrie, TR11, TR14, TR22,
+30         TR12)
+31 from sympy.core.compatibility import _nodes
+32 
+33 _trigs = (TrigonometricFunction, HyperbolicFunction)
+34 _trigpat = None
+35 _idn = lambda x: x
+36 _midn = lambda x: -x
+37 _one = lambda x: S.One
+38 
+39 def exptrigsimp(expr):
+40     from sympy.simplify.fu import hyper_as_trig, TR2i
+41     from sympy.simplify.simplify import bottom_up
+42 
+43     def exp_trig(e):
+44         choices = [e]
+45         if e.has(*_trigs): ## [BRANCH]taken=['N'][/BRANCH]
+46             choices.append(e.rewrite(exp))
+47         choices.append(e.rewrite(cos))
+48         return min(*choices, key=count_ops)
+49     newexpr = bottom_up(expr, exp_trig)
+50 
+51     def f(rv):
+52         if not rv.is_Mul: ## [BRANCH]taken=['N'][/BRANCH]
+53             return rv
+54         rvd = rv.as_powers_dict()
+55         newd = rvd.copy()
+56 
+57         def signlog(expr, sign=1):
+58             if expr is S.Exp1: ## [BRANCH]taken=['N'][/BRANCH]
+59                 return sign, 1
+60             elif isinstance(expr, exp): ## [BRANCH]taken=['Y'][/BRANCH]
+61                 return sign, expr.args[0]
+62             elif sign == 1: ## [BRANCH]taken=['N'][/BRANCH]
+63                 return signlog(-expr, sign=-1)
+64             else:
+65                 return None, None
+66 
+67         ee = rvd[S.Exp1]
+68         for k in rvd:
+69             if k.is_Add and len(k.args) == 2: ## [BRANCH]taken=['Y'][/BRANCH]
+70                 c = k.args[0]
+71                 sign, x = signlog(k.args[1]/c)
+72                 if not x: ## [BRANCH]taken=['N'][/BRANCH]
+73                     continue
+74                 m = rvd[k]
+75                 newd[k] -= m
+76                 if ee == -x*m/2: ## [BRANCH]taken=['N'][/BRANCH]
+77                     newd[S.Exp1] -= ee
+78                     ee = 0
+79                     if sign == 1: ## [BRANCH]taken=['N'][/BRANCH]
+80                         newd[2*c*cosh(x/2)] += m
+81                     else:
+82                         newd[-2*c*sinh(x/2)] += m
+83                 elif newd[1 - sign*S.Exp1**x] == -m: ## [BRANCH]taken=['N'][/BRANCH]
+84                     del newd[1 - sign*S.Exp1**x]
+85                     if sign == 1:
+86                         newd[-c/tanh(x/2)] += m
+87                     else:
+88                         newd[-c*tanh(x/2)] += m
+89                 else:
+90                     newd[1 + sign*S.Exp1**x] += m
+91                     newd[c] += m
+92 
+93         return Mul(*[k**newd[k] for k in newd])
+94     newexpr = bottom_up(newexpr, f)
+95 
+96     if newexpr.has(HyperbolicFunction): ## [BRANCH]taken=['N'][/BRANCH]
+97         e, f = hyper_as_trig(newexpr)
+98         newexpr = f(TR2i(e))
+99     if newexpr.has(TrigonometricFunction): ## [BRANCH]taken=['N'][/BRANCH]
+100         newexpr = TR2i(newexpr)
+101 
+102     if not (newexpr.has(I) and not expr.has(I)): ## [BRANCH]taken=['Y'][/BRANCH]
+103         expr = newexpr
+104     return expr
+105 
+[/ANSWER]

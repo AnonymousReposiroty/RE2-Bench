@@ -1,0 +1,231 @@
+[THOUGHT]
+Let me trace through the execution of `radsimp(expr="1/(a-b)", symbolic=False, max_terms=1)` step by step.
+
+**Line 152-154: Setup**
+- `coeff, expr = expr.as_coeff_Add()` → coeff=0, expr=1/(a-b)
+- `expr = expr.normal()` → expr=1/(a-b) (already normalized)
+- `old = fraction(expr)` → old=(1, a-b)
+
+**Line 155: Call handle(expr)**
+Now we call `handle(1/(a-b))`:
+
+**Line 72 in handle():**
+- `n, d = fraction(expr)` where expr=1/(a-b)
+- Results: n=1 (S.One), d=(a-b)
+
+**Line 74:** `if expr.is_Atom or (d.is_Atom and n.is_Atom):`
+- expr=1/(a-b) is not an Atom
+- d=(a-b) is an Add, not an Atom
+- Condition: False OR (False AND True) = False
+- **Branch: N**
+
+**Line 76:** `elif not n.is_Atom:`
+- n=1 is an Atom (number)
+- not n.is_Atom = False
+- **Branch: N**
+
+**Line 79:** `elif n is not S.One:`
+- n is S.One (singleton in SymPy)
+- n is not S.One = False
+- **Branch: N**
+
+**Line 81:** `elif d.is_Mul:`
+- d=(a-b) is an Add expression, not Mul
+- **Branch: N**
+
+**Line 84:** `if not symbolic and d.free_symbols:`
+- symbolic=False, so not symbolic=True
+- d=(a-b) has free_symbols={a, b}, which is truthy
+- Condition: True AND {a,b} = True (non-empty set is truthy)
+- **Branch: Y**
+
+**Line 85:** Return expr=1/(a-b)
+
+**Back in radsimp at Line 155:**
+- `n, d = fraction(handle(expr))` = fraction(1/(a-b)) = (1, a-b)
+
+**Line 156:** `if old != (n, d):`
+- old=(1, a-b) from line 154
+- (n,d)=(1, a-b) from line 155
+- old == (n,d), so old != (n,d) is False
+- **Branch: N**
+
+The function continues to line 174 and returns.
+</THOUGHT>
+
+[ANSWER]
+1 from __future__ import print_function, division
+2 from collections import defaultdict
+3 from sympy import SYMPY_DEBUG
+4 from sympy.core.evaluate import global_evaluate
+5 from sympy.core.compatibility import iterable, ordered, default_sort_key
+6 from sympy.core import expand_power_base, sympify, Add, S, Mul, Derivative, Pow, symbols, expand_mul
+7 from sympy.core.numbers import Rational
+8 from sympy.core.exprtools import Factors, gcd_terms
+9 from sympy.core.mul import _keep_coeff, _unevaluated_Mul
+10 from sympy.core.function import _mexpand
+11 from sympy.core.add import _unevaluated_Add
+12 from sympy.functions import exp, sqrt, log
+13 from sympy.polys import gcd
+14 from sympy.simplify.sqrtdenest import sqrtdenest
+15 from sympy.simplify.simplify import signsimp
+16 from sympy.simplify.simplify import nsimplify
+17 from sympy.simplify.powsimp import powsimp, powdenest
+18 
+19 expand_numer = numer_expand
+20 expand_denom = denom_expand
+21 expand_fraction = fraction_expand
+22 
+23 def radsimp(expr, symbolic=True, max_terms=4):
+24     from sympy.simplify.simplify import signsimp
+25 
+26     syms = symbols("a:d A:D")
+27     def _num(rterms):
+28         a, b, c, d, A, B, C, D = syms
+29         if len(rterms) == 2:
+30             reps = dict(list(zip([A, a, B, b], [j for i in rterms for j in i])))
+31             return (
+32             sqrt(A)*a - sqrt(B)*b).xreplace(reps)
+33         if len(rterms) == 3:
+34             reps = dict(list(zip([A, a, B, b, C, c], [j for i in rterms for j in i])))
+35             return (
+36             (sqrt(A)*a + sqrt(B)*b - sqrt(C)*c)*(2*sqrt(A)*sqrt(B)*a*b - A*a**2 -
+37             B*b**2 + C*c**2)).xreplace(reps)
+38         elif len(rterms) == 4:
+39             reps = dict(list(zip([A, a, B, b, C, c, D, d], [j for i in rterms for j in i])))
+40             return ((sqrt(A)*a + sqrt(B)*b - sqrt(C)*c - sqrt(D)*d)*(2*sqrt(A)*sqrt(B)*a*b
+41                 - A*a**2 - B*b**2 - 2*sqrt(C)*sqrt(D)*c*d + C*c**2 +
+42                 D*d**2)*(-8*sqrt(A)*sqrt(B)*sqrt(C)*sqrt(D)*a*b*c*d + A**2*a**4 -
+43                 2*A*B*a**2*b**2 - 2*A*C*a**2*c**2 - 2*A*D*a**2*d**2 + B**2*b**4 -
+44                 2*B*C*b**2*c**2 - 2*B*D*b**2*d**2 + C**2*c**4 - 2*C*D*c**2*d**2 +
+45                 D**2*d**4)).xreplace(reps)
+46         elif len(rterms) == 1:
+47             return sqrt(rterms[0][0])
+48         else:
+49             raise NotImplementedError
+50 
+51     def ispow2(d, log2=False):
+52         if not d.is_Pow:
+53             return False
+54         e = d.exp
+55         if e.is_Rational and e.q == 2 or symbolic and denom(e) == 2:
+56             return True
+57         if log2:
+58             q = 1
+59             if e.is_Rational:
+60                 q = e.q
+61             elif symbolic:
+62                 d = denom(e)
+63                 if d.is_Integer:
+64                     q = d
+65             if q != 1 and log(q, 2).is_Integer:
+66                 return True
+67         return False
+68 
+69     def handle(expr):
+70         from sympy.simplify.simplify import nsimplify
+71 
+72         n, d = fraction(expr)
+73 
+74         if expr.is_Atom or (d.is_Atom and n.is_Atom): ## [BRANCH]taken=['N'][/BRANCH]
+75             return expr
+76         elif not n.is_Atom: ## [BRANCH]taken=['N'][/BRANCH]
+77             n = n.func(*[handle(a) for a in n.args])
+78             return _unevaluated_Mul(n, handle(1/d))
+79         elif n is not S.One: ## [BRANCH]taken=['N'][/BRANCH]
+80             return _unevaluated_Mul(n, handle(1/d))
+81         elif d.is_Mul: ## [BRANCH]taken=['N'][/BRANCH]
+82             return _unevaluated_Mul(*[handle(1/d) for d in d.args])
+83 
+84         if not symbolic and d.free_symbols: ## [BRANCH]taken=['Y'][/BRANCH]
+85             return expr
+86 
+87         if ispow2(d):
+88             d2 = sqrtdenest(sqrt(d.base))**numer(d.exp)
+89             if d2 != d:
+90                 return handle(1/d2)
+91         elif d.is_Pow and (d.exp.is_integer or d.base.is_positive):
+92             return handle(1/d.base)**d.exp
+93 
+94         if not (d.is_Add or ispow2(d)):
+95             return 1/d.func(*[handle(a) for a in d.args])
+96 
+97 
+98         keep = True
+99 
+100         d = _mexpand(d)
+101 
+102         if d.is_Atom:
+103             return 1/d
+104 
+105         if d.is_number:
+106             _d = nsimplify(d)
+107             if _d.is_Number and _d.equals(d):
+108                 return 1/_d
+109 
+110         while True:
+111             collected = defaultdict(list)
+112             for m in Add.make_args(d):
+113                 p2 = []
+114                 other = []
+115                 for i in Mul.make_args(m):
+116                     if ispow2(i, log2=True):
+117                         p2.append(i.base if i.exp is S.Half else i.base**(2*i.exp))
+118                     elif i is S.ImaginaryUnit:
+119                         p2.append(S.NegativeOne)
+120                     else:
+121                         other.append(i)
+122                 collected[tuple(ordered(p2))].append(Mul(*other))
+123             rterms = list(ordered(list(collected.items())))
+124             rterms = [(Mul(*i), Add(*j)) for i, j in rterms]
+125             nrad = len(rterms) - (1 if rterms[0][0] is S.One else 0)
+126             if nrad < 1:
+127                 break
+128             elif nrad > max_terms:
+129                 keep = False
+130                 break
+131             if len(rterms) > 4:
+132                 if all([x.is_Integer and (y**2).is_Rational for x, y in rterms]):
+133                     nd, d = rad_rationalize(S.One, Add._from_args(
+134                         [sqrt(x)*y for x, y in rterms]))
+135                     n *= nd
+136                 else:
+137                     keep = False
+138                 break
+139             from sympy.simplify.powsimp import powsimp, powdenest
+140 
+141             num = powsimp(_num(rterms))
+142             n *= num
+143             d *= num
+144             d = powdenest(_mexpand(d), force=symbolic)
+145             if d.is_Atom:
+146                 break
+147 
+148         if not keep:
+149             return expr
+150         return _unevaluated_Mul(n, 1/d)
+151 
+152     coeff, expr = expr.as_coeff_Add()
+153     expr = expr.normal()
+154     old = fraction(expr)
+155     n, d = fraction(handle(expr))
+156     if old != (n, d): ## [BRANCH]taken=['N'][/BRANCH]
+157         if not d.is_Atom:
+158             was = (n, d)
+159             n = signsimp(n, evaluate=False)
+160             d = signsimp(d, evaluate=False)
+161             u = Factors(_unevaluated_Mul(n, 1/d))
+162             u = _unevaluated_Mul(*[k**v for k, v in u.factors.items()])
+163             n, d = fraction(u)
+164             if old == (n, d):
+165                 n, d = was
+166         n = expand_mul(n)
+167         if d.is_Number or d.is_Add:
+168             n2, d2 = fraction(gcd_terms(_unevaluated_Mul(n, 1/d)))
+169             if d2.is_Number or (d2.count_ops() <= d.count_ops()):
+170                 n, d = [signsimp(i) for i in (n2, d2)]
+171                 if n.is_Mul and n.args[0].is_Number:
+172                     n = n.func(*n.args)
+173 
+174     return coeff + _unevaluated_Mul(n, 1/d)
+[/ANSWER]

@@ -1,0 +1,180 @@
+<<FUNCTION_NAME>>
+
+_find_reasonable_pivot
+
+<<CODE>>
+
+from sympy.core.numbers import Float, Integer
+from sympy.core.singleton import S
+from .utilities import (
+    _get_intermediate_simp, _get_intermediate_simp_bool,
+    _iszero, _is_zero_after_expand_mul, _dotprodsimp, _simplify)
+from typing import Callable, Iterable
+from sympy.core.expr import Expr
+
+def _find_reasonable_pivot(
+        col: Iterable[Expr],
+        iszerofunc: Callable[[Expr], bool | None] = _iszero,
+        simpfunc: Callable[[Expr], Expr] = _simplify,
+    ) -> tuple[int | None, Expr | None, bool, list[tuple[int, Expr]]]:
+    """ Find the lowest index of an item in ``col`` that is
+    suitable for a pivot.  If ``col`` consists only of
+    Floats, the pivot with the largest norm is returned.
+    Otherwise, the first element where ``iszerofunc`` returns
+    False is used.  If ``iszerofunc`` does not return false,
+    items are simplified and retested until a suitable
+    pivot is found.
+
+    Returns a 4-tuple
+        (pivot_offset, pivot_val, assumed_nonzero, newly_determined)
+    where pivot_offset is the index of the pivot, pivot_val is
+    the (possibly simplified) value of the pivot, assumed_nonzero
+    is True if an assumption that the pivot was non-zero
+    was made without being proved, and newly_determined are
+    elements that were simplified during the process of pivot
+    finding."""
+
+    newly_determined: list[tuple[int, Expr]] = []
+    col = list(col)
+    # a column that contains a mix of floats and integers
+    # but at least one float is considered a numerical
+    # column, and so we do partial pivoting
+    if all(isinstance(x, (Float, Integer)) for x in col) and any(
+            isinstance(x, Float) for x in col):
+        col_abs = [abs(x) for x in col]
+        max_value = max(col_abs)
+        if iszerofunc(max_value):
+            # just because iszerofunc returned True, doesn't
+            # mean the value is numerically zero.  Make sure
+            # to replace all entries with numerical zeros
+            if max_value != 0:
+                newly_determined = [(i, S.Zero) for i, x in enumerate(col) if x != 0]
+            return (None, None, False, newly_determined)
+        index = col_abs.index(max_value)
+        return (index, col[index], False, newly_determined)
+
+    # PASS 1 (iszerofunc directly)
+    possible_zeros = []
+    for i, x in enumerate(col):
+        is_zero = iszerofunc(x)
+        # is someone wrote a custom iszerofunc, it may return
+        # BooleanFalse or BooleanTrue instead of True or False,
+        # so use == for comparison instead of `is`
+        if is_zero == False:
+            # we found something that is definitely not zero
+            return (i, x, False, newly_determined)
+        possible_zeros.append(is_zero)
+
+    # by this point, we've found no certain non-zeros
+    if all(possible_zeros):
+        # if everything is definitely zero, we have
+        # no pivot
+        return (None, None, False, newly_determined)
+
+    # PASS 2 (iszerofunc after simplify)
+    # we haven't found any for-sure non-zeros, so
+    # go through the elements iszerofunc couldn't
+    # make a determination about and opportunistically
+    # simplify to see if we find something
+    for i, x in enumerate(col):
+        if possible_zeros[i] is not None:
+            continue
+        simped = simpfunc(x)
+        is_zero = iszerofunc(simped)
+        if is_zero in (True, False):
+            newly_determined.append((i, simped))
+        if is_zero == False:
+            return (i, simped, False, newly_determined)
+        possible_zeros[i] = is_zero
+
+    # after simplifying, some things that were recognized
+    # as zeros might be zeros
+    if all(possible_zeros):
+        # if everything is definitely zero, we have
+        # no pivot
+        return (None, None, False, newly_determined)
+
+    # PASS 3 (.equals(0))
+    # some expressions fail to simplify to zero, but
+    # ``.equals(0)`` evaluates to True.  As a last-ditch
+    # attempt, apply ``.equals`` to these expressions
+    for i, x in enumerate(col):
+        if possible_zeros[i] is not None:
+            continue
+        if x.equals(S.Zero):
+            # ``.iszero`` may return False with
+            # an implicit assumption (e.g., ``x.equals(0)``
+            # when ``x`` is a symbol), so only treat it
+            # as proved when ``.equals(0)`` returns True
+            possible_zeros[i] = True
+            newly_determined.append((i, S.Zero))
+
+    if all(possible_zeros):
+        return (None, None, False, newly_determined)
+
+    # at this point there is nothing that could definitely
+    # be a pivot.  To maintain compatibility with existing
+    # behavior, we'll assume that an illdetermined thing is
+    # non-zero.  We should probably raise a warning in this case
+    i = possible_zeros.index(None)
+    return (i, col[i], True, newly_determined)
+
+
+<<GROUND_TRUTH_INPUT>>
+
+{'self': {}, 'args': {'col': ['-9', '-10', '-21'], 'iszerofunc': '<function _iszero at 0x755447f77240>', 'simpfunc': '<function _simplify at 0x755447f77380>'}, 'kwargs': {}}
+
+<<GROUND_TRUTH_OUTPUT>>
+
+[0, '-9', False, []]
+
+<<LLM_RESPONSE>>
+
+The function `_find_reasonable_pivot` aims to find a non-zero element in a column `col` to serve as a pivot. It uses `iszerofunc` to check for zeroness and `simpfunc` to simplify expressions if the first check is inconclusive.
+
+**Reasoning:**
+1.  **Analyze the Output**: The output is a tuple `(0, "-9", false, [])`.
+    *   Index: `0` (The pivot is at the first position).
+    *   Value: `"-9"` (The string representation of the pivot value). This suggests the internal object is `Integer(-9)` (whose string representation is `"-9"`) or `Float(-9.0)` (string `"-9.0"`). Since it is `"-9"`, it is likely `Integer(-9)`.
+    *   Assumed Non-zero: `False` (The value was definitely determined to be non-zero).
+    *   Newly determined: `[]`.
+
+2.  **Analyze the Execution Trace**:
+    *   The function `sympy.matrices.utilities._simplify` is listed in "Functions called during the execution".
+    *   The function `sympy.matrices.utilities._iszero` is also listed.
+    *   If the input `col` contained a `SymPy` object like `Integer(-9)`, the "Pass 1" check with `_iszero(Integer(-9))` would return `False` immediately, and `_simplify` would **not** be called.
+    *   The fact that `_simplify` was called implies that "Pass 1" returned `None` (inconclusive). This happens if the elements in `col` are not native SymPy objects (e.g., Python `int` or `str`), or are unsimplified expressions.
+    *   If `col` contained `["-9"]` (a list of strings):
+        *   **Check Float/Int**: Strings are not instances of Float/Integer. Check fails.
+        *   **Pass 1**: `_iszero("-9")` calls `getattr("-9", 'is_zero', None)`, which returns `None`. `possible_zeros` becomes `[None]`.
+        *   **Pass 2**: Iterates `i=0`. `possible_zeros[0]` is `None`. Calls `simped = simpfunc("-9")`.
+            *   `_simplify("-9")` converts the string `"-9"` to the SymPy object `Integer(-9)`.
+            *   `_iszero(Integer(-9))` returns `False`.
+            *   The function returns `(0, Integer(-9), False, [])`.
+    *   This path matches the output and explains the presence of `_simplify` in the trace.
+
+3.  **Construct the Input**:
+    *   `col`: `["-9"]`. A list containing the string `"-9"`.
+    *   `iszerofunc`: The function used was likely `_iszero`. Based on the "Functions called", we can reference it by its fully qualified name `sympy.matrices.utilities._iszero` or simply `_iszero`. Given the explicit nature of these structures, providing the name found in the trace is appropriate.
+    *   `simpfunc`: Similarly, `sympy.matrices.utilities._simplify`.
+
+4.  **Final JSON Structure**:
+    *   `args` contains `col`, `iszerofunc`, `simpfunc`.
+    *   `col` is `["-9"]`.
+    *   Function arguments are represented by their names as strings to fit JSON format.
+
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "col": [
+            "-9"
+        ],
+        "iszerofunc": "sympy.matrices.utilities._iszero",
+        "simpfunc": "sympy.matrices.utilities._simplify"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]

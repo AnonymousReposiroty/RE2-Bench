@@ -1,0 +1,135 @@
+The input to the method `_parallel_dict_from_expr_no_gens` calls for tracing two loops over expressions. The expressions are `w**2 + x**2 - y**2 - z**2` and `1`.
+
+**Trace Analysis:**
+
+1.  **Outer Loop (Line 21):** Iterates over `exprs`.
+    *   Iteration 1: `expr = w**2 + x**2 - y**2 - z**2`.
+    *   Iteration 2: `expr = 1`.
+
+2.  **Middle Loop (Line 27):** Iterates over terms of `expr`.
+    *   For `w**2 + x**2 - y**2 - z**2`: `Add.make_args` splits this sum. Assuming natural order or standard SymPy object creation order from the string: `w**2`, `x**2`, `-y**2`, `-z**2`.
+        *   `term` takes values: `w**2`, `x**2`, `-y**2`, `-z**2`.
+    *   For `1`: `Add.make_args` returns `(1,)`.
+        *   `term` takes value: `1`.
+
+3.  **Inner Loop (Line 30):** Iterates over factors of `term`.
+    *   `term = w**2` (Pow): `Mul.make_args` returns `(w**2,)`. `factor = w**2`.
+    *   `term = x**2` (Pow): `Mul.make_args` returns `(x**2,)`. `factor = x**2`.
+    *   `term = -y**2` (Mul): `Mul.make_args` returns `(-1, y**2)`.
+        *   `factor = -1`.
+        *   `factor = y**2`.
+    *   `term = -z**2` (Mul): `Mul.make_args` returns `(-1, z**2)`.
+        *   `factor = -1`.
+        *   `factor = z**2`.
+    *   `term = 1` (Integer): `Mul.make_args` returns `(1,)`. `factor = 1`.
+
+4.  **Generators Sort (Line 49):**
+    *   Gens found: `w`, `x`, `y`, `z`.
+    *   `_sort_gens` sorts them: `(w, x, y, z)`.
+
+5.  **Index Loop (Line 52):**
+    *   Iterates `enumerate((w, x, y, z))`.
+    *   `i` values: `0, 1, 2, 3`.
+    *   `g` values: `w, x, y, z`.
+
+6.  **Representative Loop (Line 57):**
+    *   `reprs` contains two term lists constructed earlier.
+    *   List 1 (from expr 1): `[([], {w:2}), ([], {x:2}), ([-1], {y:2}), ([-1], {z:2})]`.
+    *   List 2 (from expr 2): `[([1], {})]`.
+    *   `terms` iterates these two lists.
+
+7.  **Polynomial Construction Loop (Line 60):**
+    *   Iterates over `terms`.
+    *   Processing List 1:
+        *   `coeff=[], term={w:2}`.
+        *   `coeff=[], term={x:2}`.
+        *   `coeff=[-1], term={y:2}`.
+        *   `coeff=[-1], term={z:2}`.
+    *   Processing List 2:
+        *   `coeff=[1], term={}`.
+
+8.  **Monomial Loop (Line 63):**
+    *   Iterates `term.items()`.
+    *   For `{w:2}`: `base=w, exp=2`.
+    *   For `{x:2}`: `base=x, exp=2`.
+    *   For `{y:2}`: `base=y, exp=2`.
+    *   For `{z:2}`: `base=z, exp=2`.
+    *   For `{}`: Loop does not run.
+
+[ANSWER]
+1 from sympy.core import (S, Add, Mul, Pow, Eq, Expr,
+2     expand_mul, expand_multinomial)
+3 from sympy.core.exprtools import decompose_power, decompose_power_rat
+4 
+5 def _parallel_dict_from_expr_no_gens(exprs, opt):
+6     if opt.domain is not None:
+7         def _is_coeff(factor):
+8             return factor in opt.domain
+9     elif opt.extension is True:
+10         def _is_coeff(factor):
+11             return factor.is_algebraic
+12     elif opt.greedy is not False:
+13         def _is_coeff(factor):
+14             return factor is S.ImaginaryUnit
+15     else:
+16         def _is_coeff(factor):
+17             return factor.is_number
+18 
+19     gens, reprs = set(), []
+20 
+21     for expr in exprs:## [STATE]expr=[w**2 + x**2 - y**2 - z**2, 1][/STATE] [STATE]exprs=[[w**2 + x**2 - y**2 - z**2, 1], [w**2 + x**2 - y**2 - z**2, 1]][/STATE]
+22         terms = []
+23 
+24         if expr.is_Equality:
+25             expr = expr.lhs - expr.rhs
+26 
+27         for term in Add.make_args(expr):## [STATE]term=[w**2, x**2, -y**2, -z**2, 1][/STATE] [STATE]Add.make_args(expr)=[(w**2, x**2, -y**2, -z**2), (w**2, x**2, -y**2, -z**2), (w**2, x**2, -y**2, -z**2), (w**2, x**2, -y**2, -z**2), (1,)][/STATE]
+28             coeff, elements = [], {}
+29 
+30             for factor in Mul.make_args(term):## [STATE]factor=[w**2, x**2, -1, y**2, -1, z**2, 1][/STATE] [STATE]Mul.make_args(term)=[(w**2,), (x**2,), (-1, y**2), (-1, y**2), (-1, z**2), (-1, z**2), (1,)][/STATE]
+31                 if not _not_a_coeff(factor) and (factor.is_Number or _is_coeff(factor)):
+32                     coeff.append(factor)
+33                 else:
+34                     if opt.series is False:
+35                         base, exp = decompose_power(factor)
+36 
+37                         if exp < 0:
+38                             exp, base = -exp, Pow(base, -S.One)
+39                     else:
+40                         base, exp = decompose_power_rat(factor)
+41 
+42                     elements[base] = elements.setdefault(base, 0) + exp
+43                     gens.add(base)
+44 
+45             terms.append((coeff, elements))
+46 
+47         reprs.append(terms)
+48 
+49     gens = _sort_gens(gens, opt=opt)
+50     k, indices = len(gens), {}
+51 
+52     for i, g in enumerate(gens):## [STATE]i=[0, 1, 2, 3][/STATE] [STATE]g=[w, x, y, z][/STATE] [STATE]gens=[(w, x, y, z), (w, x, y, z), (w, x, y, z), (w, x, y, z)][/STATE]
+53         indices[g] = i
+54 
+55     polys = []
+56 
+57     for terms in reprs:## [STATE]terms=[[([], {w: 2}), ([], {x: 2}), ([-1], {y: 2}), ([-1], {z: 2})], [([1], {})]][/STATE] [STATE]reprs=[[[([], {w: 2}), ([], {x: 2}), ([-1], {y: 2}), ([-1], {z: 2})], [([1], {})]], [[([], {w: 2}), ([], {x: 2}), ([-1], {y: 2}), ([-1], {z: 2})], [([1], {})]]][/STATE]
+58         poly = {}
+59 
+60         for coeff, term in terms:## [STATE]coeff=[[], [], [-1], [-1], [1]][/STATE] [STATE]term=[{w: 2}, {x: 2}, {y: 2}, {z: 2}, {}][/STATE] [STATE]terms=[[([], {w: 2}), ([], {x: 2}), ([-1], {y: 2}), ([-1], {z: 2})], [([], {w: 2}), ([], {x: 2}), ([-1], {y: 2}), ([-1], {z: 2})], [([], {w: 2}), ([], {x: 2}), ([-1], {y: 2}), ([-1], {z: 2})], [([], {w: 2}), ([], {x: 2}), ([-1], {y: 2}), ([-1], {z: 2})], [([1], {})]][/STATE]
+61             monom = [0]*k
+62 
+63             for base, exp in term.items():## [STATE]base=[w, x, y, z][/STATE] [STATE]exp=[2, 2, 2, 2][/STATE] [STATE]term.items()=[[(w, 2)], [(x, 2)], [(y, 2)], [(z, 2)]][/STATE]
+64                 monom[indices[base]] = exp
+65 
+66             monom = tuple(monom)
+67 
+68             if monom in poly:
+69                 poly[monom] += Mul(*coeff)
+70             else:
+71                 poly[monom] = Mul(*coeff)
+72 
+73         polys.append(poly)
+74 
+75     return polys, tuple(gens)
+[/ANSWER]

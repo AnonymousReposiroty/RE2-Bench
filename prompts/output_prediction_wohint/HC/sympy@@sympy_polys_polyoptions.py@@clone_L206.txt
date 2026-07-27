@@ -1,0 +1,200 @@
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. You need to predict output variable values, and print output between [OUTPUT] and [/OUTPUT]. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between [THOUGHT] and [/THOUGHT].
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+```
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+[/THOUGHT]
+
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+
+[PYTHON]
+from sympy.core.expr import Expr
+from sympy.polys.polyerrors import GeneratorsError, OptionError, FlagError
+from sympy.utilities import numbered_symbols, topological_sort, public
+import sympy.polys
+
+@public
+class Options(dict):
+    __order__ = None
+    __options__: dict[str, type[Option]] = {}
+    gens: tuple[Expr, ...]
+    domain: sympy.polys.domains.Domain
+
+    def __init__(self, gens, args, flags=None, strict=False):
+        dict.__init__(self)
+        if gens and args.get('gens', ()):
+            raise OptionError("both '*gens' and keyword argument 'gens' supplied")
+        elif gens:
+            args = dict(args)
+            args['gens'] = gens
+        defaults = args.pop('defaults', {})
+
+        def preprocess_options(args):
+            for option, value in args.items():
+                try:
+                    cls = self.__options__[option]
+                except KeyError:
+                    raise OptionError("'%s' is not a valid option" % option)
+                if issubclass(cls, Flag):
+                    if flags is None or option not in flags:
+                        if strict:
+                            raise OptionError("'%s' flag is not allowed in this context" % option)
+                if value is not None:
+                    self[option] = cls.preprocess(value)
+        preprocess_options(args)
+        for key in dict(defaults):
+            if key in self:
+                del defaults[key]
+            else:
+                for option in self.keys():
+                    cls = self.__options__[option]
+                    if key in cls.excludes:
+                        del defaults[key]
+                        break
+        preprocess_options(defaults)
+        for option in self.keys():
+            cls = self.__options__[option]
+            for require_option in cls.requires:
+                if self.get(require_option) is None:
+                    raise OptionError("'%s' option is only allowed together with '%s'" % (option, require_option))
+            for exclude_option in cls.excludes:
+                if self.get(exclude_option) is not None:
+                    raise OptionError("'%s' option is not allowed together with '%s'" % (option, exclude_option))
+        for option in self.__order__:
+            self.__options__[option].postprocess(self)
+
+    def clone(self, updates={}):
+        obj = dict.__new__(self.__class__)
+        for option, value in self.items():
+            obj[option] = value
+        for option, value in updates.items():
+            obj[option] = value
+        return obj
+[/PYTHON]
+
+What will be the output of `clone`, given the following input:
+[INPUT]
+```
+{
+    "self": {},
+    "args": {
+        "updates": {
+            "gens": [
+                "cos(phi)"
+            ]
+        }
+    },
+    "kwargs": {}
+}
+```
+[/INPUT]
+
+[THOUGHT]

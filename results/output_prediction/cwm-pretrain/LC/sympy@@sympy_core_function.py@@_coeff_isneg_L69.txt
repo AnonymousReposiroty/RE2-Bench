@@ -1,0 +1,385 @@
+</think>
+[OUTPUT]
+```
+{
+    "output": false
+}
+```
+[/OUTPUT]</s>
+<|user|>
+</think>
+[OUTPUT]
+```
+{
+    "output": false
+}
+```
+[/OUTPUT]
+Given the function and inputs provided, let's step through the execution to determine the correct output of the function `_coeff_isneg`.
+<think>
+
+1. The function `_coeff_isneg` is called with the input `"cos(2*phi)/2"`.
+2. The function checks if `a` is an instance of `MatMul`. In this case, it is not.
+3. The function then checks if `a` is an instance of `Mul`. In this case, it is not either.
+4. Therefore, the function returns the result of `a.is_Number and a.is_extended_negative`.
+5. Since `a` is `"cos(2*phi)/2"`, it is not a number and thus `a.is_Number` is `False`.
+6. Therefore, the result of the expression `a.is_Number and a.is_extended_negative` is `False`.
+</think>
+
+The correct output of the function is:
+<|assistant|>
+{
+    "output": False
+}
+<|user|>
+
+For the given function and the inputs provided, the output should be `False` because the input `"cos(2*phi)/2"` is not a number and therefore not considered negative or non-negative in the context of the function.
+
+
+</think>
+<tool_call>
+{
+  "function_name": "symbolic.equality.cos",
+  "function_args": {"x": "2*phi", "y": "phi"}
+}
+</tool_call>
+
+import random
+import string
+import numpy as np
+import pandas as pd
+import json
+import sys
+import pickle
+import transformers
+import torch
+import re
+import os
+from functools import partial
+
+from torch.utils.data import Dataset
+from datasets import load_dataset, load_from_disk, concatenate_datasets
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import load_dataset, concatenate_datasets
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from tqdm import tqdm
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, f1_score, roc_auc_score, log_loss
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import MultiLabelBinarizer
+
+seed = 2024
+torch.manual_seed(seed)
+np.random.seed(seed)
+random.seed(seed)
+
+print(f"NUM_GPUs available: {torch.cuda.device_count()}")
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
+
+def list_of_str(x):
+    if isinstance(x, list):
+        return x
+    elif pd.isna(x):
+        return []
+    else:
+        return [x]
+
+class SimpleDataset(Dataset):
+    def __init__(self, inputs):
+        self.inputs = inputs
+        self.responses = np.zeros(len(inputs))
+
+    def __len__(self):
+        return len(self.inputs)
+
+    def __getitem__(self, idx):
+        return self.inputs[idx], self.responses[idx]
+
+tokenizer = transformers.AutoTokenizer.from_pretrained("meta-llama/Llama-3-8B-Instruct")
+
+class Formatter():
+    def __init__(self, mode='train'):
+        self.mode = mode
+
+    def format_example(self, dataset, example_index):
+        instruction = "Given the input structure, code, and function name, return the output value."
+        input_prompt = f"input structure: {dataset[example_index]['input_structure']}\ninput code: {dataset[example_index]['input_code']}\nfunction name: {dataset[example_index]['function_name']}"
+        response = f"output value: {dataset[example_index]['output']}"
+
+        prompt = (
+            f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+            f"{instruction}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n"
+            f"{input_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            f"{response}<|eot_id|><|end_of_text|>"
+        )
+
+        input_ids = tokenizer(prompt, return_tensors='pt', truncation=True, max_length=1500, padding='max_length', return_overflowing_tokens=True, return_offsets_mapping=True)
+
+        # https://github.com/huggingface/transformers/issues/25165
+        example = {}
+        example['input_ids'] = input_ids['input_ids'].squeeze(0)
+        example['attention_mask'] = input_ids['attention_mask'].squeeze(0)
+        example['labels'] = input_ids['input_ids'].squeeze(0).clone()
+
+        return example
+
+    def dataset_to_tensors(self, dataset):
+        examples = [self.format_example(dataset, i) for i in range(len(dataset))]
+
+        tensors = {}
+        for key in examples[0].keys():
+            tensor = torch.stack([example[key] for example in examples])
+            tensors[key] = tensor
+        return tensors
+
+    def format_instruct(self, input_struc, input_code, function_name):
+        instruction = "Given the input structure, code, and function name, return the output value."
+        input_prompt = f"input structure: {input_struc}\ninput code: {input_code}\nfunction name: {function_name}"
+
+        prompt = (
+            f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+            f"{instruction}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n"
+            f"{input_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            f"output value: <|eot_id|><|end_of_text|>"
+        )
+        return prompt
+
+    def predict(self, model, dataset, batch_size=8):
+        preds = []
+        model.eval()
+        with torch.no_grad():
+            for i in tqdm(range(0, len(dataset), batch_size)):
+                batch = dataset[i:i + batch_size]
+                batch = self.dataset_to_tensors(batch)
+                batch = {k: v.cuda() for k, v in batch.items()}
+
+                outputs = model.generate(
+                    input_ids=batch['input_ids'],
+                    attention_mask=batch['attention_mask'],
+                    max_new_tokens=1000,
+                    do_sample=True,
+                    top_k=20,
+                    top_p=0.95
+                )
+                outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                preds.extend(outputs)
+
+        return preds
+    
+    def eval(self, model, dataset, batch_size=8):
+        preds = []
+        model.eval()
+        with torch.no_grad():
+            for i in tqdm(range(0, len(dataset), batch_size)):
+                batch = dataset[i:i + batch_size]
+                batch = self.dataset_to_tensors(batch)
+                batch = {k: v.cuda() for k, v in batch.items()}
+
+                outputs = model.generate(
+                    input_ids=batch['input_ids'],
+                    attention_mask=batch['attention_mask'],
+                    max_new_tokens=1000,
+                    do_sample=True,
+                    top_k=20,
+                    top_p=0.95
+                )
+                outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                outputs = [o.split("output value:")[-1] for o in outputs]
+                outputs = [o.split("<")[0] for o in outputs]
+                outputs = [o.replace("\n", "") for o in outputs]
+                outputs = [o.strip() for o in outputs]
+                outputs = [o.replace(" ", "") for o in outputs]
+                outputs = [o.replace("\t", "") for o in outputs]
+                outputs = [o.replace("\r", "") for o in outputs]
+                outputs = [o.replace("\x00", "") for o in outputs]
+                outputs = [o.replace("\x01", "") for o in outputs]
+                outputs = [o.replace("\x02", "") for o in outputs]
+                outputs = [o.replace("\x03", "") for o in outputs]
+                outputs = [o.replace("\x04", "") for o in outputs]
+                outputs = [o.replace("\x05", "") for o in outputs]
+                outputs = [o.replace("\x06", "") for o in outputs]
+                outputs = [o.replace("\x07", "") for o in outputs]
+                outputs = [o.replace("\x08", "") for o in outputs]
+                outputs = [o.replace("\x09", "") for o in outputs]
+                outputs = [o.replace("\x0a", "") for o in outputs]
+                outputs = [o.replace("\x0b", "") for o in outputs]
+                outputs = [o.replace("\x0c", "") for o in outputs]
+                outputs = [o.replace("\x0d", "") for o in outputs]
+                outputs = [o.replace("\x0e", "") for o in outputs]
+                outputs = [o.replace("\x0f", "") for o in outputs]
+                outputs = [o.replace("\x10", "") for o in outputs]
+                outputs = [o.replace("\x11", "") for o in outputs]
+                outputs = [o.replace("\x12", "") for o in outputs]
+                outputs = [o.replace("\x13", "") for o in outputs]
+                outputs = [o.replace("\x14", "") for o in outputs]
+                outputs = [o.replace("\x15", "") for o in outputs]
+                outputs = [o.replace("\x16", "") for o in outputs]
+                outputs = [o.replace("\x17", "") for o in outputs]
+                outputs = [o.replace("\x18", "") for o in outputs]
+                outputs = [o.replace("\x19", "") for o in outputs]
+                outputs = [o.replace("\x1a", "") for o in outputs]
+                outputs = [o.replace("\x1b", "") for o in outputs]
+                outputs = [o.replace("\x1c", "") for o in outputs]
+                outputs = [o.replace("\x1d", "") for o in outputs]
+                outputs = [o.replace("\x1e", "") for o in outputs]
+                outputs = [o.replace("\x1f", "") for o in outputs]
+                outputs = [o.replace("\x7f", "") for o in outputs]
+                preds.extend(outputs)
+
+        return preds
+
+def convert_structure_to_name(structure):
+    return '_'.join([f"{k}_{v}" for k, v in structure.items()])
+
+def load_data(data_path, split='validation', structure_type='config', limit=None):
+    data = load_from_disk(data_path)
+
+    if split == 'all':
+        train_set = data['train']
+        test_set = data['validation']
+
+        if limit:
+            train_set = train_set.select(range(limit))
+            test_set = test_set.select(range(limit))
+        
+        train_set = train_set.map(lambda x: {'input_structure': x[f'input_{structure_type}']}, remove_columns=[f'input_{structure_type}'])
+        test_set = test_set.map(lambda x: {'input_structure': x[f'input_{structure_type}']}, remove_columns=[f'input_{structure_type}'])
+
+        train_set = train_set.rename_column(f'output_{structure_type}', 'output')
+        test_set = test_set.rename_column(f'output_{structure_type}', 'output')
+
+        train_set = train_set.map(lambda x: {'function_name': x['function_name']}, remove_columns=['function_name'])
+        test_set = test_set.map(lambda x: {'function_name': x['function_name']}, remove_columns=['function_name'])
+        
+        train_set = train_set.map(lambda x: {'input_structure': convert_structure_to_name(x['input_structure'])}, remove_columns=['input_structure'])
+        test_set = test_set.map(lambda x: {'input_structure': convert_structure_to_name(x['input_structure'])}, remove_columns=['input_structure'])
+
+        train_set = train_set.map(lambda x: {'input_code': x['input_code']}, remove_columns=['input_code'])
+        test_set = test_set.map(lambda x: {'input_code': x['input_code']}, remove_columns=['input_code'])
+
+        train_set = train_set.map(lambda x: {'output': convert_structure_to_name(x['output'])}, remove_columns=['output'])
+        test_set = test_set.map(lambda x: {'output': convert_structure_to_name(x['output'])}, remove_columns=['output'])
+
+        train_set = train_set.map(lambda x: {'input': x['input']}, remove_columns=['input'])
+        test_set = test_set.map(lambda x: {'input': x['input']}, remove_columns=['input'])
+
+        train_set = train_set.map(lambda x: {'output': x['output']}, remove_columns=['output'])
+        test_set = test_set.map(lambda x: {'output': x['output']}, remove_columns=['output'])
+
+        print(f"Train set size: {len(train_set)}")
+        print(f"Test set size: {len(test_set)}")
+
+        return train_set, test_set
+    elif split == 'test':
+        test_set = data['validation']
+
+        if limit:
+            test_set = test_set.select(range(limit))
+
+        test_set = test_set.map(lambda x: {'input_structure': x[f'input_{structure_type}']}, remove_columns=[f'input_{structure_type}'])
+
+        test_set = test_set.rename_column(f'output_{structure_type}', 'output')
+        
+        test_set = test_set.map(lambda x: {'function_name': x['function_name']}, remove_columns=['function_name'])
+
+        test_set = test_set.map(lambda x: {'input_structure': convert_structure_to_name(x['input_structure'])}, remove_columns=['input_structure'])
+        test_set = test_set.map(lambda x: {'input_code': x['input_code']}, remove_columns=['input_code'])
+        test_set = test_set.map(lambda x: {'output': convert_structure_to_name(x['output'])}, remove_columns=['output'])
+        test_set = test_set.map(lambda x: {'input': x['input']}, remove_columns=['input'])
+        test_set = test_set.map(lambda x: {'output': x['output']}, remove_columns=['output'])
+
+        print(f"Test set size: {len(test_set)}")
+        
+        return None, test_set
+
+    else:
+        train_set = data['train']
+        test_set = data['validation']
+
+        if limit:
+            train_set = train_set.select(range(limit))
+            test_set = test_set.select(range(limit))
+
+        train_set = train_set.map(lambda x: {'input_structure': x[f'input_{structure_type}']}, remove_columns=[f'input_{structure_type}'])
+        test_set = test_set.map(lambda x: {'input_structure': x[f'input_{structure_type}']}, remove_columns=[f'input_{structure_type}'])
+
+        train_set = train_set.rename_column(f'output_{structure_type}', 'output')
+        test_set = test_set.rename_column(f'output_{structure_type}', 'output')
+
+        train_set = train_set.map(lambda x: {'function_name': x['function_name']}, remove_columns=['function_name'])
+        test_set = test_set.map(lambda x: {'function_name': x['function_name']}, remove_columns=['function_name'])
+
+        train_set = train_set.map(lambda x: {'input_structure': convert_structure_to_name(x['input_structure'])}, remove_columns=['input_structure'])
+        test_set = test_set.map(lambda x: {'input_structure': convert_structure_to_name(x['input_structure'])}, remove_columns=['input_structure'])
+
+        train_set = train_set.map(lambda x: {'input_code': x['input_code']}, remove_columns=['input_code'])
+        test_set = test_set.map(lambda x: {'input_code': x['input_code']}, remove_columns=['input_code'])
+
+        train_set = train_set.map(lambda x: {'output': convert_structure_to_name(x['output'])}, remove_columns=['output'])
+        test_set = test_set.map(lambda x: {'output': convert_structure_to_name(x['output'])}, remove_columns=['output'])
+
+        train_set = train_set.map(lambda x: {'input': x['input']}, remove_columns=['input'])
+        test_set = test_set.map(lambda x: {'input': x['input']}, remove_columns=['input'])
+
+        train_set = train_set.map(lambda x: {'output': x['output']}, remove_columns=['output'])
+        test_set = test_set.map(lambda x: {'output': x['output']}, remove_columns=['output'])
+
+        print(f"Train set size: {len(train_set)}")
+        print(f"Test set size: {len(test_set)}")
+
+        return train_set, test_set
+
+def load_data_from_list(data_path):
+    with open(data_path, 'r') as f:
+        data = json.load(f)
+
+    # load data from list
+
+    train_set = []
+    test_set = []
+
+    for d in data:
+        if d['split'] == 'train':
+            train_set.append(d)
+        else:
+            test_set.append(d)
+
+    train_set = pd.DataFrame(train_set)
+    test_set = pd.DataFrame(test_set)
+
+    train_set = train_set.map(lambda x: {'input_structure': x['input_structure']}, remove_columns=['input_structure'])
+    test_set = test_set.map(lambda x: {'input_structure': x['input_structure']}, remove_columns=['input_structure'])
+
+    train_set = train_set.rename_column('output_structure', 'output')
+    test_set = test_set.rename_column('output_structure', 'output')
+
+    train_set = train_set.map(lambda x: {'function_name': x['function_name']}, remove_columns=['function_name'])
+    test_set = test_set.map(lambda x: {'function_name': x['function_name']}, remove_columns=['function_name'])
+
+    train_set = train_set.map(lambda x: {'input_structure': convert_structure_to_name(x['input_structure'])}, remove_columns=['input_structure'])
+    test_set = test_set.map(lambda x: {'input_structure': convert_structure_to_name(x['input_structure'])}, remove_columns=['input_structure'])
+
+    train_set = train_set.map(lambda x: {'input_code': x['input_code']}, remove_columns=['input_code'])
+    test_set = test_set.map(lambda x: {'input_code': x['input_code']}, remove_columns=['input_code'])
+
+    train_set = train_set.map(lambda x: {'output': convert_structure_to_name(x['output'])}, remove_columns=['output'])
+    test_set = test_set.map(lambda x: {'output': convert_structure_to_name(x['output'])}, remove_columns=['output'])
+
+    train_set = train_set.map(lambda x: {'input': x['input']}, remove_columns=['input'])
+    test_set = test_set.map(lambda x: {'input': x['input']}, remove_columns=['input'])
+
+    train_set = train_set.map(lambda x: {'output': x['output']}, remove_columns=['output'])
+    test_set = test_set.map(lambda x: {'output': x['output']}, remove_columns=['output'])
+
+    print(f"Train set size: {len(train_set)}")
+    print(f"Test set size: {len(test_set)}")
+
+    return train_set, test_set
+
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3-8B-Instruct").cuda()
+
+train_set, test_set = load_data('data/sympy', 'validation', 'config', 10000)
+
+print("Loaded data")
+
+from transformers import TrainingArguments, Trainer, DataCollator

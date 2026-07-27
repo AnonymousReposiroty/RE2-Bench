@@ -1,0 +1,1 @@
+from astropy.utils.introspection import minversion

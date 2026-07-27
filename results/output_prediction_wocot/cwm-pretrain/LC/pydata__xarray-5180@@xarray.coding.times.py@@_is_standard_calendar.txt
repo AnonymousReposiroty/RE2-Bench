@@ -1,0 +1,544 @@
+<|user|>
+Let's think step by step. We need to understand the function `_is_standard_calendar` and how it processes the input value of `calendar`.
+
+1. The function takes a single argument `calendar`.
+2. It checks if the lowercase version of `calendar` exists in the set `_STANDARD_CALENDARS`.
+3. The value of `calendar` is `"GREGORIAN"`, so we convert it to lowercase: `"gregorian"`.
+4. The set `_STANDARD_CALENDARS` contains the lowercase values `{"standard", "gregorian", "proleptic_gregorian"}`.
+5. Since `"gregorian"` is in the set, the condition is satisfied, and the function returns `True`.
+
+The final output should reflect this result.
+
+[OUTPUT]
+```
+{
+    "output": true
+}
+```
+[/OUTPUT]
+</think>
+
+[FILEPATH] pdmurray-progsynth-e810f9e/progsynth/transforms/logic/lambda_prompting_with_the_middle/1/input.py [/FILEPATH]
+import numpy as np
+import pandas as pd
+import networkx as nx
+import xarray as xr
+import dask.array as da
+from datetime import datetime
+from typing import Optional, List, Dict
+import json
+from collections import defaultdict
+import re
+
+from .utils import varname_prefix_re
+
+
+from ..core import indexing
+from ..core.common import (
+    contains_cftime_datetimes,
+    contains_pyarrow_datetimes,
+    contains_pydatetimes,
+    contains_multiindex_level,
+    is_datetime_like,
+    parse_strings,
+    transpose,
+)
+from ..core.variable import Variable
+from ..core.formatting import (
+    format_timedelta,
+    format_timestamp,
+    format_time_delta_with_unit,
+    format_offset,
+    format_string_dtypes,
+    first_n_items,
+    last_item,
+    count_not_none,
+    is_reduced_formatting_disabled,
+)
+from ..core.formatting_html import (
+    disable_tabular,
+    format_html_string_dtypes,
+    format_html_metadata,
+    format_html_offsets,
+    format_html_url,
+    format_html_item,
+    format_html_minimal_item,
+    format_html_table,
+    format_html_time_delta_with_unit,
+    format_html_timedelta,
+    format_html_offset,
+    format_html_timestamp,
+    format_html_value,
+    get_formatting_function,
+)
+from .coding import PackedArray, pack_array
+
+from .variables import (
+    _offset_base_time_to_time_span,
+    SerializationWarning,
+    VariableCoder,
+    attrdict_from_dict,
+    empty,
+    encode_strings,
+    env_context,
+    get_offsets_to_string_dtype,
+    get_unit_string,
+    lazy_elemwise_func,
+    null_timestamp,
+    pop_to,
+    sanitize_strings,
+    strings_to_np_datetime64,
+    support_index_encoding,
+    support_mask_and_scale,
+    supports_dtypes,
+    variable_to_value,
+    warning_if_reduced_dtype,
+)
+from ..core.jinja_env import (
+    META_ENV,
+    tabular_summary_string,
+)
+from .settings import DATAFRAME_COLS
+
+class JsonNormalizer:
+    """
+    Normalize structured data (e.g., JSON objects) by flattening nested structures
+    and transforming values into a consistent format suitable for database storage
+    or further analysis.
+    """
+
+    @staticmethod
+    def flatten(data: Dict) -> Dict:
+        """
+        Recursively flatten a nested dictionary into a single-level dictionary
+        with dot notation for keys.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        flat = {}
+        for k, v in data.items():
+            if isinstance(v, dict):
+                flat.update(JsonNormalizer._prefix_keys(v, k))
+            elif isinstance(v, list):
+                for i, item in enumerate(v):
+                    if isinstance(item, dict):
+                        flat.update(JsonNormalizer._prefix_keys(item, f"{k}.{i}"))
+                    else:
+                        flat[f"{k}.{i}"] = item
+            else:
+                flat[k] = v
+        return flat
+
+    @staticmethod
+    def _prefix_keys(data: Dict, prefix: str) -> Dict:
+        """
+        Prefix keys of a dictionary with a given string.
+        """
+        return {f"{prefix}.{k}": v for k, v in data.items()}
+
+    @staticmethod
+    def convert_dates(data: Dict) -> Dict:
+        """
+        Convert ISO 8601 date strings to epoch timestamps.
+        """
+        for k, v in data.items():
+            if isinstance(v, str):
+                try:
+                    data[k] = int(pd.to_datetime(v).timestamp() * 1000)  # Convert to milliseconds
+                except ValueError:
+                    pass  # If conversion fails, leave the value as is
+            elif isinstance(v, list):
+                data[k] = [JsonNormalizer._convert_date_item(item) for item in v]
+            elif isinstance(v, dict):
+                data[k] = JsonNormalizer.convert_dates(v)
+        return data
+
+    @staticmethod
+    def _convert_date_item(item: any) -> any:
+        """
+        Helper method to convert a single item to an epoch timestamp if possible.
+        """
+        if isinstance(item, str):
+            try:
+                return int(pd.to_datetime(item).timestamp() * 1000)
+            except ValueError:
+                return item
+        return item
+
+    @staticmethod
+    def normalize(data: Dict) -> Dict:
+        """
+        Normalize the input data by flattening and converting date strings.
+        """
+        flat_data = JsonNormalizer.flatten(data)
+        normalized_data = JsonNormalizer.convert_dates(flat_data)
+        return normalized_data
+
+def array_representer(dumper, data):
+    if not hasattr(data, "shape"):
+        return dumper.represent_sequence(
+            "tag:yaml.org,2002:seq", data, flow_style=True
+        )
+    import yaml
+
+    # which version of yaml are we using?
+    from yaml import __version__ as yaml_version
+
+    shape = list(data.shape)
+    import numpy
+
+    if data.dtype == numpy.float16:
+        # yaml does not support this, so we need to write a string,
+        # but use a tag to make sure it is deserialised properly
+        shape.append("float16")
+        return yaml.nodes.ScalarNode(
+            "tag:yaml.org,2002:str",
+            yaml.resolver.BaseResolver.DEFAULT_SCALAR_TAG,
+            repr(data.tolist()),
+            style="|",
+        )
+
+    major_version = int(yaml_version.split(".", 1)[0])
+    if major_version >= 5:
+        header = {"shape": shape, "dtype": str(data.dtype)}
+        yaml.add_representer(
+            numpy.ndarray,
+            lambda self, data: self.represent_mapping(
+                "tag:yaml.org,2002:map",
+                header,
+                style="|",
+            ),
+        )
+    else:
+        yaml.add_representer(
+            numpy.ndarray,
+            lambda self, data: self.represent_mapping(
+                "tag:yaml.org,2002:map",
+                {"!!ndarray": data.tolist(), "shape": shape, "dtype": str(data.dtype)},
+                flow_style=False,
+            ),
+        )
+
+    return dumper.represent_sequence("tag:yaml.org,2002:seq", data.tolist(), flow_style=True)
+
+def maskedarray_representer(dumper, data):
+    """
+    Special representer for numpy.maskedarray.
+
+    Applies a tag but delegates the actual serialization to array_representer.
+    """
+    return dumper.represent_sequence(
+        "tag:yaml.org,2002:seq", data.data, flow_style=True
+    )
+
+def render_variables_data(
+    variables,
+    env,
+    variable_data=None,
+    force_dense=False,
+    skipna=False,
+    effective_uniques=10,
+):
+    """
+    Renders a set of variables as strings, or as a Jinja2 template.
+
+    Parameters
+    ----------
+    variables : dict of Variable
+        The variables to render.
+    env : jinja2.Environment
+        The Jinja2 environment to use when rendering as a template.
+    variable_data : dict of str, str
+        Values for the templates in variables, passed as keyword arguments.
+    force_dense : bool, default False
+        If True, render in a densely packed format (no whitespace or new lines).
+    skipna : bool, default False
+        If True, missing data are not rendered.
+    effective_uniques : int, default 10
+        The maximum number of unique elements to consider
+        a non-human readable type to be renderable.
+
+    Returns
+    -------
+    str or jinja2.nodes.Template
+    """
+    names = {var for var in variables if variables[var].is_not_null()}
+    if not names:
+        # no variables to render
+        return None
+
+    n_unique = {}
+    str_values = {}
+
+    if not force_dense:
+        for name in names:
+            values = variables[name].as_array().flatten()
+            str_values[name] = sanitize_strings(
+                encode_strings(parse_strings(values), na_rep=np.nan)
+            )
+            if skipna:
+                str_values[name] = str_values[name][~np.isnan(str_values[name])]
+
+            if values.dtype.kind not in "bSU":
+                # don't waste time on efficiently checking uniqueness for strings
+                n_unique[name] = count_not_none(
+                    np.unique(values)
+                )  # type: ignore [assignment]
+            else:
+                n_unique[name] = count_not_none(str_values[name])
+
+    renderable = []
+    if force_dense:
+        # We don't want to change the formatting for just one or two large variables
+        # in case we are on an interactive terminal (and IPython wraps too early
+        # so this case is not well rendered anyway)
+        force_dense = False
+        if len(names) == 1:
+            for name in names:
+                if n_unique[name] > effective_uniques or variables[name].dtype.kind in "SU":
+                    force_dense = True
+    else:
+        # otherwise renderable if and only if all are below the threshold
+        force_dense = not all(n_unique[name] <= effective_uniques for name in names)
+
+    for name in names:
+        if n_unique.get(name, 0) <= effective_uniques or variables[name].dtype.kind in "SU":
+            # NOTE: using repr() so that if strings contain any of the control
+            # characters (including \x00, \x01, \x02 which can be problematic for pandas)
+            # they are escaped
+            renderable.append(f"{name}: {repr(first_n_items(str_values[name]))}")
+        else:
+            # render variables that are too big for their full string representation
+            value = variables[name].to_preview()
+            if value is not None:
+                unit = get_unit_string(variables[name])
+                if unit:
+                    value = {"value": value, "unit": unit}
+
+                renderable.append(
+                    f"{name}: {get_formatting_function(value, variables[name])}"
+                )
+            else:
+                # the variable does not have .to_preview() implemented
+                renderable.append(f"{name}: {variables[name]}")
+
+    if force_dense:
+        return "{" + ", ".join(renderable) + "}"
+    else:
+        return "\n" + "\n".join(f"    {item}" for item in renderable) + "\n"
+
+
+class FrameVariableCoder(VariableCoder):
+    """
+    Coder for instances of the Frames class of objects.
+
+    These are structured objects containing a dictionary with the data, an
+    ordered list of keys (the columns) and metadata.
+    """
+
+    def _variable_data(self, obj, accessor):
+        return accessor(obj)
+
+    def _label(self, variables):
+        return ["Columns" if variables["name"] == "columns" else variables["name"]]
+
+    def _format(self, variables, env, as_template=False, skipna=False, **kwargs):
+        if as_template:
+            template = tabular_summary_string()
+            if variables.get("transpose", False):
+                format_func = get_formatting_function(
+                    variables["values"], variables["values"]
+                )
+                template += f"\n    {format_func} columns"
+            return env.from_string(template).render(variables=variables)
+        else:
+            variable_data = variables.get("variable_data", {})
+            with env_context(**variable_data):
+                return render_variables_data(
+                    variables["values"], env, skipna=skipna, **kwargs
+                )
+
+    def _format_value(self, value, variables):
+        label = self._label(variables)
+        unit_string = get_unit_string(variables.get("unit", None))
+        offsets = get_offsets_to_string_dtype(variables.get("offsets", None))
+        units = get_unit_string(variables.get("units", None))
+        return {
+            "label": label[0],
+            "data": variable_to_value(value, variables),
+            "unit": unit_string if unit_string != "" else None,
+            "offsets": offsets,
+            "units": units if units != "" else None,
+        }
+
+    def _finalize_value(self, value, variables):
+        if "units" in variables:
+            value["data"] = {"value": value["data"], "units": value["units"]}
+        return value
+
+    def _export_variables(self, obj, attrs, accessor):
+        values = accessor(obj)
+        variables = {}
+        for k in values.keys():
+            item = values[k]
+            # .to_preview() can return the original item, which may not be
+            # JSON serializable. Therefore, we need to set up our own
+            # serialization function, namely the lambda. We want to export
+            # the variable as an array if it is serializable, which may not
+            # be the case even if the dataset exports to a normal dictionary
+            # (hence why we specify serializers=dumpers)
+
+            # NOTE: we cannot use to_backend here, because xarray uses nested
+            # generators and that is always exported as an empty list in that
+            # case
+
+            dumped = None
+            try:
+                dumped = json.dumps(item)
+            except TypeError:
+                # now check if this is even something we'd normally
+                # want to export, i.e. the case for dataframes
+                if isinstance(item, pd.DataFrame):
+                    try:
+                        # (see issue #891)
+                        var = Variable.from_value(
+                            item.to_dict(orient="list"), item.columns
+                        )
+                        exported = var.to_dict()
+                        dumped = json.dumps(exported)
+                    except ValueError:
+                        # can happen if datatypes don't support to_dict()
+                        # oriented
+                        pass
+
+            if dumped is None:
+                # check for lazy variable names
+                varname_prefix = varname_prefix_re.search(k).group("varname_prefix")
+                variables[varname_prefix] = Variable.from_value(
+                    pack_array(values, lazy_elemwise_func(lambda x: x[k]))
+                )
+            else:
+                variables[k] = Variable.from_value(pack_array(item))
+
+        # now filter out any pre-computed lazy variable names
+        # TODO: these need to be recomputed, but we don't yet have an API
+        # to compute on the frontend
+        filtered = set()
+        for k in values.keys():
+            if varname_prefix_re.match(k):
+                filtered.add(k)
+        variables = {k: v for k, v in variables.items() if k not in filtered}
+        return {"values": variables}
+
+    def _to_value(self, variables, key):
+        return Variable.from_value(variables[key])
+
+    def _to_descriptors(self, variables):
+        return [
+            v.to_descriptor(v.name)
+            for v in variables["values"].values()
+            if not isinstance(v.data, PackedArray)
+        ]
+
+    def to_dict(self, obj):
+        if not getattr(obj, "empty", False):
+            if hasattr(obj, "_to_dict_of_dicts"):
+                return obj._to_dict_of_dicts()
+            else:
+                raise NotImplementedError(
+                    f"{obj.__class__} does not define a _to_dict_of_dicts() method."
+                )
+        else:
+            return {}
+
+    def supports_index_encoding(self, var):
+        return support_index_encoding(var)
+
+    def encode_index(self, variables):
+        ret = {}
+        # TODO: these are columns in dataframes, rows in xarrays,
+        # we will likely want a notion of a structure and do this
+        # the other way around
+        if "dim_0" in variables:
+            # Variable name is e.g. "label_1_dim_0"
+            for dim in variables["dim_0"]:
+                if dim not in variables["index"]:
+                    continue
+
+                var = variables["index"][dim]
+                attr = None
+                if var.is_datetime():
+                    attr = "timestamp"
+                elif var.is_date():
+                    attr = "date"
+                elif var.is_timedelta():
+                    attr = "time_delta"
+
+                if attr is not None:
+                    ret[f"index.{attr}"] = var.attrs
+            ret["dim_0"] = variables["dim_0"]
+            ret["index"] = variables["index"]
+        return ret
+
+    def decode_index(self, variables):
+        ret = {}
+        if "index.timestamp" in variables:
+            # this is a datetime index, we can also encode this by name
+            for k in variables["index.timestamp"].keys():
+                # TODO: support multiple indices, with corresponding dims
+                ret[k] = Variable.from_attr(variables["index.timestamp"][k])
+        if "index.time_delta" in variables:
+            for k in variables["index.time_delta"].keys():
+                ret[k] = Variable.from_attr(variables["index.time_delta"][k])
+        ret["dim_0"] = variables["dim_0"]
+        ret["index"] = variables["index"]
+
+        # now also add the labels
+        for idx in ret:
+            if ret[idx].is_datetime():
+                ret[idx].attrs["tz"] = variables["index"]["index"][idx].attrs["tz"]
+            if ret[idx].is_timedelta():
+                ret[idx].attrs["unit"] = variables["index"]["index"][idx].attrs["unit"]
+
+            # TODO: support multiple indices
+            ret[idx].name = variables["index"]["label_0"][0]
+            ret[idx].dims = (variables["index"]["label_0"][1],)
+        return ret
+
+    def _pack(self, variables, frame):
+        # now fill the data
+        for k in variables:
+            if isinstance(k, int):
+                k = list(variables.keys())[k]
+                var = variables[k]
+                if isinstance(var.data, PackedArray):
+                    # this is a nested variable!
+                    var = var.from_value(
+                        {
+                            k: getattr(
+                                frame, DATAFRAME_COLS
+                            )  # trigger lazy-evaluation
+                        }
+                    )
+                else:
+                    v = var.value()
+                    v = v.loc[:, k]
+                    if isinstance(v, pd.MultiIndex):
+                        v = {"label_{}".format(i): list(v.levels[i]) for i in range(v.nlevels)}
+                        if v:
+                            var = var.from_value(v)
+                    else:
+                        var = var.from_value(v)
+
+                name = "values" if k == frame.name else k
+                var.name = name
+                variables[name] = var
+            else:
+                var = variables[k]
+                # put back the index name
+                if k != "dim_0":
+                    if var.dims == (frame.name,):
+                        variables[k].dims = ("dim_0",)
+                    elif var.dims and var.dims[0] == frame.name:
+                        variables[k].dims = ("dim_0",) + var.dims

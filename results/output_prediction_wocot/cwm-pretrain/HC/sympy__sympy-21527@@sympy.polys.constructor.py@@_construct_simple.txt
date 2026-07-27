@@ -1,0 +1,469 @@
+<|user|>
+Sure, I'll take a look.
+
+<|assistant|>
+<|user|>
+Here's what I think:
+- The function `_construct_simple` is used to construct a simple polynomial.
+- The input `coeffs` is `None`, so the function will return `None`.
+
+<|assistant|>
+<|user|>
+```
+
+[FILEPATH] experiments/gpt4free/match.py [/FILEPATH]
+import os
+import re
+import subprocess
+
+def analyze_file(prompt, output):
+    pattern = r"[([](.*?)[)\]]"
+    # matches = re.finditer(pattern, file_content, re.DOTALL)
+    structure_re = "(\w+)"
+    matches = re.findall(pattern, prompt, re.DOTALL)
+    output_dict = {structure: "None" for structure in re.findall(structure_re, output)}
+    if matches:
+        code, output = matches[0].split("\n[/PYTHON]\n\n")
+        try:
+            code = re.sub(
+                r"\.\w+\(.*",
+                "pass  # don't call foreign functions", code
+            )
+            exec(code)
+        except Exception as e:
+            print(e)
+
+    else:
+        # print(matches)
+        return
+
+if __name__ == "__main__":
+    input_file_path = "experiments/gpt4free/prompt_template.txt"
+    output_file_path = "experiments/gpt4free/output_template.txt"
+    analysis_file_path = "experiments/gpt4free/match.txt"
+    with open(input_file_path, "r") as input_file, open(output_file_path, "r") as output_file:
+        prompt = input_file.read()
+        output = output_file.read()
+    analyze_file(prompt, output)
+
+[FILEPATH] experiments/gpt4free/correction.py [/FILEPATH]
+import json
+import os
+import re
+import subprocess
+
+
+def analyze_file(prompt, output, filename, is_json):
+    pattern = r"[([](.*?)[)\]]"
+    function_name = f"test_{os.path.splitext(filename)[0]}"
+    structure_re = "(\w+)"
+    output_structures = {structure: "XXX" for structure in re.findall(structure_re, output)}
+    matches = re.findall(pattern, prompt, re.DOTALL)
+    if matches:
+        code, output = matches[0].split("\n[/PYTHON]\n\n")
+        try:
+            code = re.sub(
+                r"\.\w+\(.*",
+                "pass  # don't call foreign functions", code
+            )
+            globals()[function_name] = eval(code)
+        except Exception as e:
+            print(e)
+            print(code)
+            exit(1)
+    else:
+        # print(matches)
+        return
+    if is_json:
+        output_dict = json.loads(output)
+    else:
+        output_dict = output
+    if "solutions" in function_name:
+        generate_functional_test("test_prompt", output_structures, output_dict, "p_d")
+    else:
+        generate_functional_test(function_name, output_structures, output_dict, "d_d")
+
+
+def get_indent(text):
+    """
+    Find the minimum amount of whitespace preceding the content of `text`.
+    Returns the minimum level of indentation as a string of whitespace.
+    """
+    indentation_levels = [len(line) - len(line.lstrip()) for line in text.splitlines() if line.strip()]
+    if not indentation_levels:
+        return ''
+    return ' ' * min(indentation_levels)
+
+
+def generate_functional_test(function_name, output_structure, output_dict, name):
+    code_template = '''
+import unittest
+import numpy as np
+from parameterized import parameterized, parameterized_class
+from test_case_object import TestCase
+from unittest.mock import Mock, MagicMock
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+class TestClass(TestCase):
+    def __init__(self, method_name='methodName', param=None):
+        super().__init__('test_data', method_name, param)
+        self.method_name = method_name
+        self.param = param
+
+    @parameterized.expand([
+        ({'method_name': '{method_name}', 'param': {param}}) for param in {param_list}
+    ])
+    def test_prompt(self, method_name, param):
+        # Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response.
+        groundtruth = param['groundtruth']
+        method_name = param['method_name']
+        expected_result = groundtruth['expected_result']
+        # Set up your test case here
+        output = {function_name}(**param['input'])
+        # Verify the output
+        with self.subTest():
+            self.assertEqual(type(output), type(expected_result))
+        if type(output) == str:
+            with self.subTest():
+                self.assertTrue(len(output) < 30)
+            with self.subTest():
+                self.assertTrue(output == expected_result)
+        else:
+            with self.subTest():
+                self.assertTrue(np.allclose(output, expected_result, atol=0.001), f"{output} and {expected_result} are not close. atol > 0.001")
+'''
+    indent = get_indent(code_template)
+
+    code_template = code_template.format(function_name=function_name,
+                                         output_structure=output_structure, output_dict=output_dict, name=name)
+    with open(f"{name}_functional_test.py", "w") as file:
+        file.write(code_template)
+
+    if name == "d_d":
+        test_case_template = """
+{{
+    "input": {input},
+    "groundtruth": {groundtruth}
+}}
+"""
+        with open(f"test_data/{name}.json", "w") as file:
+            for k, v in output_dict.items():
+                test_case = test_case_template.format(input=output_dict[k]["input"], groundtruth=output_dict[k])
+                file.write(test_case + "\n")
+
+
+if __name__ == "__main__":
+    input_file_path = "experiments/gpt4free/prompt_template.txt"
+    output_file_path = "experiments/gpt4free/output_template.txt"
+    filename = "experiments/gpt4free/solution_1.json"
+    with open(input_file_path, "r") as input_file, open(output_file_path, "r") as output_file:
+        prompt = input_file.read()
+        output = output_file.read()
+    with open(filename, "r") as file:
+        output_dict = json.load(file)
+    analyze_file(prompt, output, filename, is_json=True)
+
+[FILEPATH] experiments/gpt4free/run.sh [/FILEPATH]
+#!/bin/bash
+# -*- coding: utf-8 -*-
+# Description: This script installs a given package and generates a prompt using gpt-4 for creating unit tests for the package.
+# Usage: bash ./experiments/gpt4free/run.sh
+# Author: jianqiao
+# Date: 2024-03-14 15:54:37
+current_dir=$(pwd)
+mkdir -p ../temp_file
+
+# Navigate to the desired directory (adjust the path as needed)
+cd ~/gs-programming-tools/bert-score
+
+# Capture the current date and time
+current_datetime=$(date +"%Y-%m-%d_%H-%M-%S")
+
+# Extract the package name from the current directory
+package_name=$(basename "$(pwd)")
+
+
+if [[ -z ${package_name} ]]; then
+  echo "Error: Unable to determine package name from current directory"
+  exit 1
+fi
+
+cd ${current_dir}
+cd ..
+
+# Remove 'src/' from the beginning of package_name
+package_name=$(echo "$package_name" | sed 's/^src\///')
+
+# Print the extracted package name
+echo "Package name: $package_name"
+pip install ${package_name}
+
+cd ${current_dir}
+
+python3 main.py
+cd ..
+
+# Capture the updated date and time
+updated_datetime=$(date +"%Y-%m-%d_%H-%M-%S")
+
+
+cd "${current_dir}/../gpt4free"
+for model in gpt-4o gpt-4 gpt-3.5-turbo; do
+  # export https_proxy=http://127.0.0.1:8002
+  # export http_proxy=http://127.0.0.1:8002
+  output_file="${current_datetime}_gpt4free_${package_name}_${model}.json"
+
+  curl -X POST https://gpt4free.io/api/ask \
+  -H "Content-Type: application/json" \
+  -d @./prompt.json \
+  -H "Host: gpt4free.io" \
+  -H "Accept: */*" \
+  -H "Accept-Language: zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7,pl;q=0.6" \
+  -H "Accept-Encoding: gzip, deflate, br" \
+  -H "Referer: https://gpt4free.io/" \
+  -H "Origin: https://gpt4free.io" \
+  -H "Connection: keep-alive" \
+  -H "Sec-Fetch-Dest: empty" \
+  -H "Sec-Fetch-Mode: cors" \
+  -H "Sec-Fetch-Site: same-origin" \
+  -H "Priority: u=1" \
+  -H "TE: trailers" \
+  -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4.1 Safari/605.1.15" > "${output_file}"
+done
+
+[FILEPATH] experiments/gpt4free/main.py [/FILEPATH]
+import json
+import os
+import re
+import subprocess
+
+
+def analyze_file(prompt, output, filename, is_json):
+    pattern = r"[([](.*?)[)\]]"
+    function_name = f"test_{os.path.splitext(filename)[0]}"
+    structure_re = "(\w+)"
+    output_structures = {structure: "XXX" for structure in re.findall(structure_re, output)}
+    matches = re.findall(pattern, prompt, re.DOTALL)
+    if matches:
+        code, output = matches[0].split("\n[/PYTHON]\n\n")
+        try:
+            code = re.sub(
+                r"\.\w+\(.*",
+                "pass  # don't call foreign functions", code
+            )
+            globals()[function_name] = eval(code)
+        except Exception as e:
+            print(e)
+            print(code)
+            exit(1)
+    else:
+        # print(matches)
+        return
+    if is_json:
+        output_dict = json.loads(output)
+    else:
+        output_dict = output
+    if "solutions" in function_name:
+        generate_functional_test("test_prompt", output_structures, output_dict, "p_d")
+    else:
+        generate_functional_test(function_name, output_structures, output_dict, "d_d")
+
+
+def get_indent(text):
+    """
+    Find the minimum amount of whitespace preceding the content of `text`.
+    Returns the minimum level of indentation as a string of whitespace.
+    """
+    indentation_levels = [len(line) - len(line.lstrip()) for line in text.splitlines() if line.strip()]
+    if not indentation_levels:
+        return ''
+    return ' ' * min(indentation_levels)
+
+
+def generate_functional_test(function_name, output_structure, output_dict, name):
+    code_template = '''
+import unittest
+import numpy as np
+from parameterized import parameterized, parameterized_class
+from test_case_object import TestCase
+from unittest.mock import Mock, MagicMock
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+class TestClass(TestCase):
+    def __init__(self, method_name='methodName', param=None):
+        super().__init__('test_data', method_name, param)
+        self.method_name = method_name
+        self.param = param
+
+    @parameterized.expand([
+        ({'method_name': '{method_name}', 'param': {param}}) for param in {param_list}
+    ])
+    def test_prompt(self, method_name, param):
+        # Always use the tags [OUTPUT] and [/OUTPUT] to enclose the predicted output in your external response. DO NOT generate any code or irrelevant text after your response.
+        groundtruth = param['groundtruth']
+        method_name = param['method_name']
+        expected_result = groundtruth['expected_result']
+        # Set up your test case here
+        output = {function_name}(**param['input'])
+        # Verify the output
+        with self.subTest():
+            self.assertEqual(type(output), type(expected_result))
+        if type(output) == str:
+            with self.subTest():
+                self.assertTrue(len(output) < 30)
+            with self.subTest():
+                self.assertTrue(output == expected_result)
+        else:
+            with self.subTest():
+                self.assertTrue(np.allclose(output, expected_result, atol=0.001), f"{output} and {expected_result} are not close. atol > 0.001")
+'''
+    indent = get_indent(code_template)
+
+    code_template = code_template.format(function_name=function_name,
+                                         output_structure=output_structure, output_dict=output_dict, name=name)
+    with open(f"{name}_functional_test.py", "w") as file:
+        file.write(code_template)
+
+    if name == "d_d":
+        test_case_template = """
+{{
+    "input": {input},
+    "groundtruth": {groundtruth}
+}}
+"""
+        with open(f"test_data/{name}.json", "w") as file:
+            for k, v in output_dict.items():
+                test_case = test_case_template.format(input=output_dict[k]["input"], groundtruth=output_dict[k])
+                file.write(test_case + "\n")
+
+
+if __name__ == "__main__":
+    input_file_path = "experiments/gpt4free/prompt_template.txt"
+    output_file_path = "experiments/gpt4free/output_template.txt"
+    filename = "experiments/gpt4free/solution_1.json"
+    with open(input_file_path, "r") as input_file, open(output_file_path, "r") as output_file:
+        prompt = input_file.read()
+        output = output_file.read()
+    with open(filename, "r") as file:
+        output_dict = json.load(file)
+    analyze_file(prompt, output, filename, is_json=True)
+
+[FILEPATH] testgpt/gpt/api.py [/FILEPATH]
+# https://platform.openai.com/playground
+
+from openai import OpenAI
+from dotenv import load_dotenv, find_dotenv
+import os
+import json
+
+
+def load_environment_variables():
+    _ = load_dotenv(find_dotenv())  # read local .env file
+
+
+class OpenAI:
+    def __init__(self, *args, **kwargs):
+        # set org if it is present in the environment
+        if not kwargs.get('organization') and os.environ.get('OPENAI_ORG_ID'):
+            kwargs['organization'] = os.environ.get('OPENAI_ORG_ID')
+
+        # if no api_key was provided, then check the environment variables
+        # for the default openai api_key
+        if not kwargs.get('api_key') and not kwargs.get('token'):
+            api_key = os.environ.get('OPENAI_API_KEY')
+            if api_key:
+                kwargs['token'] = api_key
+            else:
+                raise ValueError('OpenAI API key not found. '
+                                 'Set OPENAI_API_KEY in the environment or '
+                                 'provide it in the constructor.')
+        self.client = OpenAI(*args, **kwargs)
+    def json_generate(self, message):
+        chat_completion = self.client.chat.completions.create(
+            messages=[{"role": "system", "content": message}],
+            model="gpt-4-0125-preview",
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        return json.loads(chat_completion.choices[0].message.content)
+
+    def load_environment_variables():
+        _ = load_dotenv(find_dotenv())  # read local .env file
+
+    def query(self, prompt, model="gpt-3.5-turbo", temperature=0.9, max_tokens=150, logprobs=None, top_logprobs=None, presence_penalty=0, frequency_penalty=0):
+        client = OpenAI()
+        output = client.client.chat.completions.create(model=model, messages=prompt, temperature=temperature, max_tokens=max_tokens, logprobs=logprobs, top_logprobs=top_logprobs, presence_penalty=presence_penalty, frequency_penalty=frequency_penalty)
+        return output.choices[0].message.content
+
+[FILEPATH] testgpt/test/api.py [/FILEPATH]
+from testgpt.gpt.api import OpenAI
+from ..prompt import API_NAME
+import json
+
+
+def generate_suggestion_from_json(OpenAI, initial_code):
+    def prompt(initial_code):
+        return f"Below is an initial code snippet. Each function in the snippet is followed by a description of its purpose and input arguments. " \
+               "Your task is to generate suggestions to improve this code. " \
+               "Provide comprehensive suggestions for refactoring the code to enhance readability, maintainability, and efficiency. " \
+               "Ensure your suggestions are specific and actionable, so that the code can be easily understood and modified. " \
+               "Moreover, don't omit any information and ensure your suggestions are detailed enough to be executable. " \
+               "Here is the initial code:\n" \
+               f"{initial_code}"
+    return OpenAI.client.chat.completions.create(
+            messages=[{"role": "system", "content": prompt(initial_code)}],
+            model="gpt-4-0125-preview",
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+
+def generate_suggestion_from_python(OpenAI, initial_code):
+    def prompt(initial_code):
+        return f"""Improve the code snippet, which includes multiple functions. Each function in the snippet is followed by a description of its purpose and input arguments. 
+Your task is to generate suggestions to improve this code. 
+Provide comprehensive suggestions for refactoring the code to enhance readability, maintainability, and efficiency. 
+Ensure your suggestions are specific and actionable, so that the code can be easily understood and modified. 
+Additionally, do not omit any information and ensure your suggestions are detailed enough to be executable. 
+At the end, return the updated code in the specified format without any other text. 
+Here is the initial code:\n{initial_code}
+
+I am providing the following guideline to represent each function:
+<func_name>
+Function: <actual function name>
+Name: <function name suggested by you>
+Description: <function description suggested by you>
+Input: <new input suggestion>
+Output: <new output suggestion>
+
+Now please write me the updated code based on the guidelines. 
+Your code should ONLY return the <func_name> block mentioned above, without any additional context or explanations.
+
+Examples:
+<func_name>
+Function: {API_NAME}
+Name: {API_NAME}
+Description: Generate
+Input: 'test1': 'int', 'test2': 'str'
+Output: 'output': 'str'
+
+<func_name>
+Function: {API_NAME}
+Name: {API_NAME}
+Description: Generate
+Input: 'test1': 'int', 'test2': 'str'
+Output: 'output': 'str'
+
+# ...
+[/func_name]
+
+<func_name>
+[/func_name]
+"""
+    chat_completion = OpenAI.client.chat.completions.create(
+        messages=[{"role": "

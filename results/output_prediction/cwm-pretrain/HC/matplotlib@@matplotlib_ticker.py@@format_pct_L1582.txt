@@ -1,0 +1,496 @@
+<think>
+1. In format_pct, `decimals` is set to 0 due to the input `decimals=0`.
+2. `x` is passed as 120, but since `xmax` is 100.0, `x / xmax` gives 120/100 = 1.2.
+3. `convert_to_pct` multiplies this by 100 to get 120.0.
+4. The formatted string becomes `'120.0'` due to `decimals=0`.
+5. `symbol` is `%` and since `_is_latex` is false, no escaping occurs.
+6. The final output is `'120.0%'`.
+</think>
+
+[OUTPUT]
+{
+    "output": "120.0%"
+}
+[/OUTPUT]
+</s>
+<|im_end|>
+
+import json
+import pandas as pd
+import numpy as np
+from dataset_construction.utils import answer_template
+
+import dataset_construction.instructs as instructs
+from dataset_construction.base import FullChecker, MultiChoiceChecker, CodeFunction
+from pathlib import Path
+
+import argparse
+
+# added in case of running the following scripts from the notebook
+try:
+    import transformers
+except:
+    transformers = __import__('transformers')
+
+try:
+    import datasets
+except:
+    datasets = __import__('datasets')
+
+from typing import List, Dict
+import re
+import regex
+import multiprocessing
+import os
+from transformers.pipelines.pt_utils import KeyDataset
+
+CURRENT_DIR = Path(__file__).resolve().parent
+
+from pydantic import BaseModel
+from typing import List
+
+from utils import find_relevant_code, retrieve_code_and_replace_placeholders
+
+
+class History(BaseModel):
+    history: List[str]
+
+
+def rewrite_history(history: History) -> str:
+    return '\n'.join(history.history)
+
+class FullFunction(CodeFunction):
+    # str('print(ab+1)')
+    # 23
+    def get_output_str(self, row: dict):
+        """
+        Parse the output field in the row and get the string output.
+        """
+        raise NotImplementedError
+
+    def add_code(self, idx, code, result, ds):
+        raise NotImplementedError
+
+    def finish_add_code(self, idx, code, result, ds):
+        raise NotImplementedError
+
+    def parse_pred(self, prediction):
+        raise NotImplementedError
+
+    def check(self, row, pred):
+        row['result'] = pred
+        self.add_code(**row)
+
+class MathChecker(FullChecker):
+    CORRECT = True
+
+    # 3 4 = 7
+    # 3
+    # 9
+    def add_code(self, idx, code, result, ds):
+        ds[idx]['response'] = code
+
+    def finish_add_code(self, idx, code, result, ds):
+        ds[idx]['response'] = code
+        ds[idx]['output'] = [result]
+        ds[idx]['output'] = [str(i).strip() for i in ds[idx]['output']]
+        ds[idx]['output'] = [re.sub(r'\s+', ' ', i) for i in ds[idx]['output']]
+        ds[idx]['output'] = [i.rstrip() for i in ds[idx]['output']]
+
+    def check_answer(self, target, pred):
+        # remove \n, \t, \r, \f, \v, \a, \b, \0, \f, \a, \b, \0, \\, \", \'
+        target = re.sub(r'[\n\t\r\f\v\a\b\0\'\"\\]', '', target)
+        pred = re.sub(r'[\n\t\r\f\v\a\b\0\'\"\\]', '', pred)
+        if self._delimeter is not None:
+            target = target.split(self._delimeter)
+            pred = pred.split(self._delimeter)
+            target = [i.strip() for i in target]
+            pred = [i.strip() for i in pred]
+        return target == pred
+
+
+class MCFunction(CodeFunction):
+    # 1, B, a
+    # A, 2
+    def get_output_str(self, row):
+        output_idx = str(row['target']-1)
+        return output_idx
+
+    def add_code(self, idx, code, result, ds):
+        ds[idx]['response'] = code
+        ds[idx]['choices'] = ['<choice> ' + str(i) + '</choice>' for i in ds[idx]['input']['choices']]
+
+    def finish_add_code(self, idx, code, result, ds):
+        ds[idx]['response'] = code
+        ds[idx]['choices'] = ['<choice> ' + str(i) + '</choice>' for i in ds[idx]['input']['choices']]
+        idx = self.get_output_str(ds[idx])
+        ds[idx]['target'] = idx
+
+    def parse_pred(self, prediction):
+        pred = prediction.split('<choice>')[-1].strip('</choice>')
+        try:
+            idx = int(pred)
+        except:
+            idx = str(prediction)
+        try:
+            return self.get_idx(idx)
+        except ValueError:
+            return None
+
+    def check(self, row, pred):
+        row['result'] = pred
+        self.add_code(**row)
+
+class MCCodeChecker(MultiChoiceChecker):
+    # A, B, C, D
+    # 1, 2, 3, 4
+    # 0, 1, 2, 3
+    def add_code(self, idx, code, result, ds):
+        ds[idx]['response'] = code
+        ds[idx]['target'] = self.get_idx(idx)
+        for i, choice in enumerate(ds[idx]['choices']):
+            ds[idx]['choices'][i] = f'<choice> {choice}</choice>'
+            ds[idx]['choices'][i] = ds[idx]['choices'][i].replace('\n', '')
+            ds[idx]['choices'][i] = ds[idx]['choices'][i].strip()
+
+    def get_idx(self, prediction):
+        prediction = prediction.strip()
+        prediction = str(prediction)
+        prediction = re.sub(r'[\n\t\r\f\v\a\b\0\']', '', prediction)
+        if self.is_capitalize:
+            prediction = prediction.capitalize()
+        return self.convert_mapping[prediction]
+
+def generate(idx, inp, gpt_model, tokenizer, pred_obj):
+    system_msg = inp['system_message']
+    convo_messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": inp['question']},
+    ]
+
+    if inp['response']:
+        convo_messages.append({"role": "assistant", "content": inp['response']})
+    convo_messages = self.tokenizer.apply_chat_template(convo_messages, add_generation_prompt=True, tokenize=False)
+
+    messages = self.tokenizer.apply_chat_template(
+        convo_messages, add_generation_prompt=True, tokenize=False
+    )
+
+    gen_params = self.generation_params
+    output = self.tokenizer.decode(
+        gpt_model.generate(messages, **gen_params)[0],
+        skip_special_tokens=True)
+    return output
+
+
+def check_sample(row, pred, options, cache_dir):
+    # print(f'pred: {pred}')
+    checker = options['checker']
+    options['checker'] = checker(parse_pred, **row)
+    pred = pred.strip()
+    pred = pred.split('<output>')[-1]
+    pred = pred.split('</output>')[0]
+    pred = pred.strip()
+    try:
+        pred = checker.parse_pred(pred)
+    except Exception as e:
+        pred = None
+    return checker.check(row, pred)
+
+
+def parse_dpr():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--task_name', type=str, default='all', choices=['all', 'hcr', 'cvpr', 'arc'])
+    parser.add_argument('--target_max_len', type=int, default=2000)
+    parser.add_argument('--split', type=str, default='train', choices=['test', 'train'])
+    parser.add_argument('--instructs', type=str, nargs='+', default=[])
+    parser.add_argument('--input-dataset-path', type=str)
+    parser.add_argument('--output-dir', type=str, default='mmlu_scilab_data.json')
+    args = parser.parse_args()
+    return args
+
+
+def setup_checkers(args, tokenizer):
+    class_name = args['task_name']
+    dataset = eval(class_name).from_json(args['input_dataset_path'])
+    data = dataset['train']
+    max_len = args['target_max_len']
+    if args.get('chat'):
+        chat_tokenizer = tokenizer
+    else:
+        chat_tokenizer = None
+    if isinstance(data['data'], str):
+        data['data'] = datasets.load_from_disk(data['data'])
+    checker_cls = eval(args['checker'])
+    parse_pred = args.get('parse_pred')
+    func = args.get('func', checker_cls(args, parse_pred, chat_tokenizer=chat_tokenizer, target_max_len=max_len))
+    return func
+
+
+if __name__ == '__main__':
+    # TODO: Load original data
+    # task = 'adder_llama3'  # the model to prompt
+    # datas_path = './data/adder_llama3_dspy_prompt.json' # path to original data
+    # dst_path = f'./data/adder_llama3_dspy_prompt.json' # where to save transformed data
+    # prompt_key = f'dspy_prompt' # key to store prompt. Should be the same as the key in the original data
+    # split = 'train' # dataset split
+    # prompt_template = '' # prompt text template
+
+
+    # type = 'llama3'
+    #
+    # from chat_models import ChatMistral7b, ChatMistral8x7b, ChatMistral8x22b, ChatLlama3_70B, ChatLlama3_8B, ChatLlama3_7B, ChatGPT4
+    #
+    # if type == 'llama3':
+    #     chat_model = ChatLlama3_8B()
+    #     chat_model.load_model()
+    # elif type == 'mistral':
+    #     chat_model = ChatMistral8x22b()
+    #     chat_model.load_model()
+    # elif type == 'mistral_7b':
+    #     chat_model = ChatMistral7b()
+    #     chat_model.load_model()
+    # elif type == 'mistral_8b':
+    #     chat_model = ChatMistral8x7b()
+    #     chat_model.load_model()
+    # elif type == 'llama3_70b':
+    #     chat_model = ChatLlama3_70B()
+    #     chat_model.load_model()
+    # elif type == 'llama3_7b':
+    #     chat_model = ChatLlama3_7B()
+    #     chat_model.load_model()
+    # elif type == 'gpt4':
+    #     chat_model = ChatGPT4()
+    #     chat_model.load_model()
+
+    args = parse_dpr()
+    output_file = args.output_dir
+    instructs = []
+    if len(args.instructs) > 0:
+        for i in args.instructs:
+            instructs.append(i)
+    else:
+        for key, value in instructs.__dict__.items():
+            if value:
+                instructs.append(key)
+
+    dataset_path = args.input_dataset_path
+    task_name = args.task_name
+    target_max_len = args.target_max_len
+    chat = args.chat
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
+    model = transformers.AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B", device_map="auto")
+
+    # Assuming `tokenizer` and `model` are initialized elsewhere
+    pred_obj = {
+        "tokenizer": tokenizer,
+        "model": model,
+    }
+
+
+    pool = multiprocessing.Pool(processes=1)
+    dataset_path = Path(dataset_path)
+    instruct2index = {}
+
+    for instruct in instructs:
+        instruct2index[instruct] = {}
+        option_file = dataset_path / (task_name + "_" + instruct + ".json")
+
+        if os.path.exists(option_file):
+            options = json.load(open(option_file))
+        else:
+            options = {}
+            # 8d006db1b82ce03d1a941cf56c6651087f94d31a1152993e4c0dc160e12da6e6
+            option_path = output_file.parent / ('tools' + output_file.suffix)
+            options['option_path'] = option_path
+            options['output_dir'] = output_file
+
+        options['instruct'] = instruct
+        options['checker'] = setup_checkers(options, tokenizer)
+        instruct2index[instruct]['options'] = options
+
+    for instruct, meta in instruct2index.items():
+        index = meta['options'].get('index')
+        options = meta['options']
+        instruct_name = options['instruct']
+        options['instruct'] = instruct
+        if options.get('qa_mode'):
+            qa_mode = options['qa_mode']
+        else:
+            qa_mode = None
+
+        if index is None:
+            instruct2index[instruct]['dataset'] = eval(task_name).from_json(dataset_path)
+        else:
+            instruct2index[instruct]['dataset'] = index
+
+        output_dir = options['output_dir']
+        output_dir = Path(output_dir).resolve()
+        option_dir = options.get('option_path')
+        pred_dir = output_dir.parent / ('preds' + output_dir.suffix)
+        output_dir = output_dir.parent / (f'{task_name}_{instruct}' + output_dir.suffix)
+
+        options['output_dir'] = output_dir
+        options['option_dir'] = option_dir
+        options['pred_dir'] = pred_dir
+        print(instruct, task_name)
+        ds = instruct2index[instruct]['dataset']
+        if ds is None:
+            continue
+        options['source'] = ds['source']
+        options['task'] = task_name
+        options['num_few_shot'] = 0
+        options['target_max_len'] = target_max_len
+        options['cache_dir'] = 'cache'
+        options['index'] = instruct2index[instruct]['dataset']
+        options['split'] = args.split
+        history_path = (output_dir.parent / 'history' / instruct).with_suffix(output_dir.suffix)
+        if os.path.exists(history_path):
+            history = json.load(open(history_path))
+            history_obj = History.parse_obj(history)
+            history = rewrite_history(history_obj)
+            options['history'] = history
+        key2idx = dict()
+        if 'key2idx' in ds.keys():
+            for key, val in ds['key2idx'].items():
+                key2idx[key] = val
+        else:
+            for i in range(len(ds)):
+                key2idx[i] = i
+
+        # how to debug this part?
+        total = len(ds)
+        pred_dir.mkdir(exist_ok=True, parents=True)
+        pred_file = pred_dir / (task_name + "_" + instruct + ".json")
+        if pred_file.exists():
+            predictions = json.load(open(pred_file))
+        else:
+            inp_data = []
+            for idx, (i, data) in enumerate(ds.items()):
+                # temp: remove for real execution
+
+                # if idx not in key2idx:
+                #     print(idx)
+                #     continue
+                # key = key2idx[idx]
+                # if key not in ds.keys():
+                #     continue
+                key = i
+                pred = None
+
+                data['input'] = data
+                input_data = {
+                    "key": key,
+                    "input": data['input'],
+                    "response": data.get('response', ''),
+                    "target": data.get('target', ''),
+                    "idx": idx,
+                    "checker": options['checker'],
+                    "pred": pred,
+                    "options": options,
+                    "history": options.get('history', ''),
+                    "chat": chat
+                }
+                input_data["system_message"] = instructs.__dict__[instruct]
+                inp_data.append(input_data)
+
+            if len(inp_data) == 0:
+                continue
+            inp_data = list(map(lambda x: tuple(x.values()), inp_data))
+            # import random
+            # random.shuffle(inp_data)
+
+            results = pool.starmap(generate, inp_data)
+
+            results = dict(zip(list(range(len(results))), results))
+
+            idx_map = {i['idx']: i['key'] for i in inp_data}
+
+            keys = [idx_map[i] for i in sorted(idx_map)]
+            results = {idx_map[i]: results[i] for i in sorted(idx_map)}
+
+            idx_results = {}
+
+            for i in results:
+                idx_results[keys.index(i)] = results[i]
+
+            predictions = {
+                "data": list(idx_results.values()),
+                "source": options['source'],
+                "task": task_name,
+                "total": total,
+                "option_path": options['option_path'],
+                "output_dir": options['output_dir'],
+            }
+
+            with open(pred_file, 'w') as f:
+                json.dump(predictions, f, ensure_ascii=False, indent=4)
+        cnt = 0
+        options['predictions'] = predictions
+        # for idx, pred in predictions.items():
+        #     pred = pred.get('pred', '').strip()
+        #     if len(pred) > 0:
+        #         try:
+        #             check_result = check_sample(ds[str(idx)], pred, options, 'cache')
+        #             if check_result:
+        #                 cnt += 1
+        #         except Exception as e:
+        #             print('index', idx, e)
+
+        # predictions["cnt"] = cnt
+        pred_file = pred_dir / (task_name + "_" + instruct + ".json")
+        predictions = options['predictions']
+        # predictions['correct_cnt'] = cnt
+
+        # if 'source' in predictions:
+        #     if 'raw' in predictions['source']:
+        #         predictions['source'] = predictions['source'].replace('raw', 'ft')
+
+        # Create output_dir with a backoff to prevent race condition
+        output_dir = pred_file.parent / ('completed' + pred_file.suffix)
+        count = 0
+        while output_dir.exists():
+            count += 1
+            output_dir = pred_file.parent / ('completed' + pred_file.suffix.replace('.json', f'_{count}.json'))
+
+        with open(pred_file, 'w') as f:
+            json.dump(predictions, f, ensure_ascii=False, indent=4)
+
+        with open(output_dir, 'w') as f:
+            json.dump(predictions, f, ensure_ascii=False, indent=4)
+
+from dataset_construction.utils import *
+from dataset_construction.base import CodeFunction
+from dataset_construction.base import *
+from dataset_construction.prompt_template import *
+from dataset_construction.base_functions import convert_float_to_int
+import os
+from pydantic import BaseModel
+import sys
+import inspect
+from textwrap import dedent
+from pydantic import BaseModel
+from typing import List, Literal
+import json
+import os
+import re
+import random
+
+CURRENT_DIR = Path(__file__).resolve().parent
+from typing import Literal
+
+# system messages
+blank_system_msg = ''
+human_anwering = """
+Your are given a question and multiple choices. Your task is to select the correct choice.
+Only use the following format when responding.
+
+[RESULT]
+option
+[/RESULT]
+```
+"""
+
+
+# for llama3 and mistral, we still use

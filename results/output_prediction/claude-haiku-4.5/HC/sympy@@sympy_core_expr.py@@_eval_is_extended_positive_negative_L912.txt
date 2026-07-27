@@ -1,0 +1,140 @@
+<THOUGHT>
+Let me trace through the execution of `_eval_is_extended_positive_negative` with `self = -2` and `positive = True`.
+
+1. First, check `if self.is_number:` 
+   - For `-2`, which is a Number, `is_number` should return `True`
+   - So we enter the if block
+
+2. Inside the if block:
+   ```python
+   try:
+       n2 = self._eval_evalf(2)
+   except ValueError:
+       return None
+   ```
+   - We're calling `_eval_evalf(2)` on `-2`
+   - For a Number like `-2`, `_eval_evalf` is defined in `sympy.sympy.core.numbers._eval_evalf`
+   - It returns `Float._new(self._as_mpf_val(prec), prec)` where prec=2
+   - This should return a Float representation of -2
+
+3. Check `if n2 is None:` - it shouldn't be None, so we continue
+
+4. Check `if getattr(n2, '_prec', 1) == 1:` 
+   - For a properly evaluated Float with prec=2, `_prec` should be 2, not 1
+   - So this condition is False, we continue
+
+5. Check `if n2 is S.NaN:` - n2 is a Float(-2), not NaN, so False, we continue
+
+6. `f = self.evalf(2)` 
+   - Calls evalf on -2 with precision 2
+   - Should return a Float(-2) with appropriate precision
+
+7. Check `if f.is_Float:` 
+   - f is a Float, so this is True
+   - `match = (f, S.Zero)` - so match = (Float(-2), 0)
+
+8. `if match is None:` - match is not None, so False, we continue
+
+9. `r, i = match` 
+   - `r = Float(-2)`
+   - `i = S.Zero`
+
+10. Check `if not (i.is_Number and r.is_Number):` 
+    - Both `i` and `r` are Numbers, so this is False, we continue
+
+11. Check `if r._prec != 1 and i._prec != 1:` 
+    - `r._prec` should be 2 (not 1)
+    - `i._prec` - for S.Zero, we need to check. S.Zero typically has _prec as some default
+    - Actually, looking at the condition: `r._prec != 1 and i._prec != 1`
+    - If both are not equal to 1, then:
+      - `return bool(not i and (r > 0 if positive else r < 0))`
+      - `not i` checks if i is falsy. S.Zero is zero, and from `sympy.sympy.core.numbers.__bool__`, it returns False, so `not i` is True
+      - `positive = True`, so we check `r > 0`
+      - `r = Float(-2)`, so `r > 0` is False (since -2 is not > 0)
+      - `bool(True and False)` = `bool(False)` = False
+
+So the function should return `False`.
+
+Wait, let me reconsider the logic more carefully. The function structure is:
+```python
+def _eval_is_extended_positive_negative(self, positive):
+    from sympy.polys.numberfields import minimal_polynomial
+    from sympy.polys.polyerrors import NotAlgebraic
+    if self.is_number:
+        try:
+            n2 = self._eval_evalf(2)
+        except ValueError:
+            return None
+        if n2 is None:
+            return None
+        if getattr(n2, '_prec', 1) == 1:
+            return None
+        if n2 is S.NaN:
+            return None
+        f = self.evalf(2)
+        if f.is_Float:
+            match = (f, S.Zero)
+        else:
+            match = pure_complex(f)
+        if match is None:
+            return False
+        r, i = match
+        if not (i.is_Number and r.is_Number):
+            return False
+        if r._prec != 1 and i._prec != 1:
+            return bool(not i and (r > 0 if positive else r < 0))
+        elif r._prec == 1 and (not i or i._prec == 1) and self._eval_is_algebraic() and (not self.has(Function)):
+            try:
+                if minimal_polynomial(self).is_Symbol:
+                    return False
+            except (NotAlgebraic, NotImplementedError):
+                pass
+```
+
+For `-2`:
+1. `self.is_number` = True
+2. `n2 = self._eval_evalf(2)` returns Float(-2) with prec 2
+3. `n2 is None` = False
+4. `getattr(n2, '_prec', 1) == 1` = False (prec is 2)
+5. `n2 is S.NaN` = False
+6. `f = self.evalf(2)` returns Float(-2)
+7. `f.is_Float` = True
+8. `match = (f, S.Zero)` = (Float(-2), 0)
+9. `match is None` = False
+10. `r, i = match` so r=Float(-2), i=S.Zero
+11. `not (i.is_Number and r.is_Number)` = not (True and True) = False
+12. `r._prec != 1 and i._prec != 1` - need to check if both have _prec != 1
+    - r._prec should be 2
+    - i (S.Zero) - checking its _prec. S.Zero is a singleton Zero, which is a Number. Looking at numbers, Zero has specific handling. Actually, S.Zero is an Integer 0, so its _prec might be different.
+    
+Actually, looking back at the pure_complex definition and the evalf function, when we have a real number like Float(-2), evalf returns a Float. When we set `match = (f, S.Zero)`, we're setting the imaginary part to S.Zero.
+
+For S.Zero (which is an Integer), what is its _prec? Looking at the code, Integer is a subclass of Number. The `_prec` attribute is typically only set on Float objects. For other numbers like Integer, getting `_prec` might return a default or raise an AttributeError.
+
+Wait, looking at line: `if getattr(n2, '_prec', 1) == 1:` - they use getattr with a default of 1. So if _prec doesn't exist, it defaults to 1.
+
+So:
+- `r._prec` = 2 (Float)
+- `i._prec` via getattr with default 1: S.Zero is not a Float, so it would return 1
+
+So: `r._prec != 1 and i._prec != 1` = `2 != 1 and 1 != 1` = `True and False` = `False`
+
+So we don't enter the first if condition. We check the elif:
+
+`elif r._prec == 1 and (not i or i._prec == 1) and self._eval_is_algebraic() and (not self.has(Function)):`
+
+- `r._prec == 1` = `2 == 1` = False
+
+So we don't enter this elif either. The function completes without an explicit return, so it returns `None`.
+
+Wait, I need to re-read the function. After the if/elif block, the function ends. So if neither condition is true, the function returns None implicitly.
+
+</THOUGHT>
+
+[OUTPUT]
+```
+{
+    "output": null
+}
+```
+[/OUTPUT]

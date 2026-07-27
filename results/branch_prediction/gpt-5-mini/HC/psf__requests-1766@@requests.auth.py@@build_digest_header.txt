@@ -1,0 +1,168 @@
+[THOUGHT]
+Trace build_digest_header with given self.chal and inputs.
+
+- algorithm = "MD5" => "if algorithm is None" (line 31) is False -> ['N'].
+- _algorithm becomes "MD5". The check "_algorithm == 'MD5' or _algorithm == 'MD5-SESS'" (line 35) is True -> ['Y'].
+- md5_utf8's inner "if isinstance(x, str)" (line 37) is executed each time hash_utf8 is called. Calls here:
+  1) HA1 = hash_utf8(A1)
+  2) HA2 = hash_utf8(A2)
+  3) respdig = KD(HA1, noncebit) -> KD calls hash_utf8 again
+  All three calls receive str -> branch taken each time -> ['Y','Y','Y'].
+- The "elif _algorithm == 'SHA'" (line 41) is not evaluated/taken because previous if was True -> ['N'].
+- "if hash_utf8 is None" (line 50) is False (it's a function) -> ['N'].
+- URL has no query, so "if p_parsed.query" (line 56) is False -> ['N'].
+- nonce != last_nonce (last_nonce == ''), so "if nonce == self.last_nonce" (line 65) is False -> ['N'].
+- "_algorithm == 'MD5-SESS'" (line 77) is False -> ['N'].
+- "if qop is None" (line 80) is False (qop == 'auth') -> ['N'].
+- "elif qop == 'auth' or 'auth' in qop.split(',')" (line 82) is True -> ['Y'].
+  That leads to KD(HA1, noncebit) which triggered the third md5 call above.
+- opaque is present -> "if opaque" (line 91) True -> ['Y'].
+- algorithm is present -> "if algorithm" (line 93) True -> ['Y'].
+- entdig is None -> "if entdig" (line 95) False -> ['N'].
+- qop is present -> "if qop" (line 97) True -> ['Y'].
+
+All branch markers replaced accordingly (with multiple entries where a branch point is hit multiple times).
+[/THOUGHT]
+
+[ANSWER]
+1 import os
+2 import re
+3 import time
+4 import hashlib
+5 import logging
+6 from base64 import b64encode
+7 from .compat import urlparse, str
+8 from .utils import parse_dict_header
+9 
+10 log = logging.getLogger(__name__)
+11 CONTENT_TYPE_FORM_URLENCODED = 'application/x-www-form-urlencoded'
+12 CONTENT_TYPE_MULTI_PART = 'multipart/form-data'
+13 
+14 class HTTPDigestAuth(AuthBase):
+15     def __init__(self, username, password):
+16         self.username = username
+17         self.password = password
+18         self.last_nonce = ''
+19         self.nonce_count = 0
+20         self.chal = {}
+21         self.pos = None
+22 
+23     def build_digest_header(self, method, url):
+24 
+25         realm = self.chal['realm']
+26         nonce = self.chal['nonce']
+27         qop = self.chal.get('qop')
+28         algorithm = self.chal.get('algorithm')
+29         opaque = self.chal.get('opaque')
+30 
+31         if algorithm is None: ## [BRANCH]taken=['N'][/BRANCH]
+32             _algorithm = 'MD5'
+33         else:
+34             _algorithm = algorithm.upper()
+35         if _algorithm == 'MD5' or _algorithm == 'MD5-SESS': ## [BRANCH]taken=['Y'][/BRANCH]
+36             def md5_utf8(x):
+37                 if isinstance(x, str): ## [BRANCH]taken=['Y','Y','Y'][/BRANCH]
+38                     x = x.encode('utf-8')
+39                 return hashlib.md5(x).hexdigest()
+40             hash_utf8 = md5_utf8
+41         elif _algorithm == 'SHA': ## [BRANCH]taken=['N'][/BRANCH]
+42             def sha_utf8(x):
+43                 if isinstance(x, str):
+44                     x = x.encode('utf-8')
+45                 return hashlib.sha1(x).hexdigest()
+46             hash_utf8 = sha_utf8
+47 
+48         KD = lambda s, d: hash_utf8("%s:%s" % (s, d))
+49 
+50         if hash_utf8 is None: ## [BRANCH]taken=['N'][/BRANCH]
+51             return None
+52 
+53         entdig = None
+54         p_parsed = urlparse(url)
+55         path = p_parsed.path
+56         if p_parsed.query: ## [BRANCH]taken=['N'][/BRANCH]
+57             path += '?' + p_parsed.query
+58 
+59         A1 = '%s:%s:%s' % (self.username, realm, self.password)
+60         A2 = '%s:%s' % (method, path)
+61 
+62         HA1 = hash_utf8(A1)
+63         HA2 = hash_utf8(A2)
+64 
+65         if nonce == self.last_nonce: ## [BRANCH]taken=['N'][/BRANCH]
+66             self.nonce_count += 1
+67         else:
+68             self.nonce_count = 1
+69         ncvalue = '%08x' % self.nonce_count
+70         s = str(self.nonce_count).encode('utf-8')
+71         s += nonce.encode('utf-8')
+72         s += time.ctime().encode('utf-8')
+73         s += os.urandom(8)
+74 
+75         cnonce = (hashlib.sha1(s).hexdigest()[:16])
+76         noncebit = "%s:%s:%s:%s:%s" % (nonce, ncvalue, cnonce, qop, HA2)
+77         if _algorithm == 'MD5-SESS': ## [BRANCH]taken=['N'][/BRANCH]
+78             HA1 = hash_utf8('%s:%s:%s' % (HA1, nonce, cnonce))
+79 
+80         if qop is None: ## [BRANCH]taken=['N'][/BRANCH]
+81             respdig = KD(HA1, "%s:%s" % (nonce, HA2))
+82         elif qop == 'auth' or 'auth' in qop.split(','): ## [BRANCH]taken=['Y'][/BRANCH]
+83             respdig = KD(HA1, noncebit)
+84         else:
+85             return None
+86 
+87         self.last_nonce = nonce
+88 
+89         base = 'username="%s", realm="%s", nonce="%s", uri="%s", ' \
+90                'response="%s"' % (self.username, realm, nonce, path, respdig)
+91         if opaque: ## [BRANCH]taken=['Y'][/BRANCH]
+92             base += ', opaque="%s"' % opaque
+93         if algorithm: ## [BRANCH]taken=['Y'][/BRANCH]
+94             base += ', algorithm="%s"' % algorithm
+95         if entdig: ## [BRANCH]taken=['N'][/BRANCH]
+96             base += ', digest="%s"' % entdig
+97         if qop: ## [BRANCH]taken=['Y'][/BRANCH]
+98             base += ', qop="auth", nc=%s, cnonce="%s"' % (ncvalue, cnonce)
+99 
+100         return 'Digest %s' % (base)
+101 
+102     def handle_401(self, r, **kwargs):
+103 
+104         if self.pos is not None:
+105             r.request.body.seek(self.pos)
+106         num_401_calls = getattr(self, 'num_401_calls', 1)
+107         s_auth = r.headers.get('www-authenticate', '')
+108 
+109         if 'digest' in s_auth.lower() and num_401_calls < 2:
+110 
+111             setattr(self, 'num_401_calls', num_401_calls + 1)
+112             pat = re.compile(r'digest ', flags=re.IGNORECASE)
+113             self.chal = parse_dict_header(pat.sub('', s_auth, count=1))
+114 
+115             r.content
+116             r.raw.release_conn()
+117             prep = r.request.copy()
+118             prep.prepare_cookies(r.cookies)
+119 
+120             prep.headers['Authorization'] = self.build_digest_header(
+121                 prep.method, prep.url)
+122             _r = r.connection.send(prep, **kwargs)
+123             _r.history.append(r)
+124             _r.request = prep
+125 
+126             return _r
+127 
+128         setattr(self, 'num_401_calls', 1)
+129         return r
+130 
+131     def __call__(self, r):
+132         if self.last_nonce:
+133             r.headers['Authorization'] = self.build_digest_header(r.method, r.url)
+134         try:
+135             self.pos = r.body.tell()
+136         except AttributeError:
+137             pass
+138         r.register_hook('response', self.handle_401)
+139         return r
+140 
+[/ANSWER]

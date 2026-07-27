@@ -1,0 +1,525 @@
+<|system|>
+You are a helpful AI assistant. You always reason before responding, using the following format:
+<think>
+your internal reasoning
+</think>
+your external response
+</s>
+<|user|>
+You are given a Python function (between [PYTHON] and [/PYTHON]). For this function, I want you to take the provided inputs (between [INPUT] and [/INPUT]) and predict the output of the function. Both input and output are presented in a JSON format. The output structure is defined between [STRUCTURE] and [/STRUCTURE]. You only need to predict output variable values to fill out placeholders XXX in the structure, and print output between [OUTPUT] and [/OUTPUT]. You should maintain the structure when printing output. Do not change anything else. For prediction, simulate the execution of the program step by step and print your reasoning process before arriving at an answer between <think> and </think>.
+[EXAMPLE]
+[PYTHON]
+class TempPathFactory(object):
+    _given_basetemp = attr.ib(
+        converter=attr.converters.optional(
+            lambda p: Path(os.path.abspath(six.text_type(p)))
+        )
+    )
+    _trace = attr.ib()
+    _basetemp = attr.ib(default=None)
+
+    def mktemp(self, basename, numbered=True):
+        if not numbered:
+            p = self.getbasetemp().joinpath(basename)
+            p.mkdir()
+        else:
+            p = make_numbered_dir(root=self.getbasetemp(), prefix=basename)
+            self._trace("mktemp", p)
+        return p
+
+    def getbasetemp(self):
+        if self._basetemp is not None:
+            return self._basetemp
+
+        if self._given_basetemp is not None:
+            basetemp = self._given_basetemp
+            ensure_reset_dir(basetemp)
+            basetemp = basetemp.resolve()
+        else:
+            from_env = os.environ.get("PYTEST_DEBUG_TEMPROOT")
+            temproot = Path(from_env or tempfile.gettempdir()).resolve()
+            user = get_user() or "unknown"
+            rootdir = temproot.joinpath("pytest-of-{}".format(user))
+            rootdir.mkdir(exist_ok=True)
+            basetemp = make_numbered_dir_with_cleanup(
+                prefix="pytest-", root=rootdir, keep=3, lock_timeout=LOCK_TIMEOUT
+            )
+        assert basetemp is not None, basetemp
+        self._basetemp = t = basetemp
+        self._trace("new basetemp", t)
+        return t
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+def parse_num(maybe_num):
+    try:
+        return int(maybe_num)
+    except ValueError:
+        return -1
+
+def extract_suffixes(iter, prefix):
+    p_len = len(prefix)
+    for p in iter:
+        yield p.name[p_len:]
+
+
+def find_suffixes(root, prefix):
+    return extract_suffixes(find_prefixed(root, prefix), prefix)
+
+def make_numbered_dir(root, prefix):
+    for i in range(10):
+        # try up to 10 times to create the folder
+        max_existing = _max(map(parse_num, find_suffixes(root, prefix)), default=-1)
+        new_number = max_existing + 1
+        new_path = root.joinpath("{}{}".format(prefix, new_number))
+        try:
+            new_path.mkdir()
+        except Exception:
+            pass
+        else:
+            _force_symlink(root, prefix + "current", new_path)
+            return new_path
+    else:
+        raise EnvironmentError(
+            "could not create numbered dir with prefix "
+            "{prefix} in {root} after 10 tries".format(prefix=prefix, root=root)
+        )
+
+[/PYTHON]
+
+What will be the output of `mktemp`, given the following input:
+[INPUT]
+{
+    "self": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        }
+    },
+    "args": {
+        "basename": "world"
+    },
+    "kwargs": {}
+}
+[/INPUT]
+
+[STRUCTURE]
+```
+{ 
+    "strpath": XXX
+}
+```
+[/STRUCTURE]
+
+<think>
+1. Inside `mktemp`, since `numbered`=True (default), it calls: p = make_numbered_dir(root=self.getbasetemp(), prefix="world")
+2. Inside `getbasetemp`, since `_basetemp` is None, so basetemp = Path("/tmp/pytest-of-root/pytest-0/test_mktemp0"). Therefore, getbasetemp() returns "/tmp/pytest-of-root/pytest-0/test_mktemp0".
+3. Inside `make_numbered_dir`:
+    root = /tmp/pytest-of-root/pytest-0/test_mktemp0
+    prefix = "world"
+    Since max_existing = -1, new_number = 0, so `new_path` = "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+</think>
+[OUTPUT]
+```
+{
+    "strpath": "/tmp/pytest-of-root/pytest-0/test_mktemp0/world0"
+}
+```
+[/OUTPUT]
+[/EXAMPLE]
+[PYTHON]
+import json
+import logging
+
+import pytest
+import six
+import uuid
+from _pytest import recwarn
+
+from pytestfixtures.tmpdir import (
+    create_files,
+    create_dirs,
+    create_symlink,
+    create_world,
+    setup,
+    init_session_1,
+    init_session_2,
+    init_session_3,
+    init_session_4,
+    init_session_5,
+)
+
+@pytest.mark.parametrize(
+    "expected_data, expected_warning",
+    [
+        pytest.param(
+            b'{"OK": "123"}',
+            "",
+            id="write-readable",
+        ),
+        pytest.param(
+            b'',
+            "",
+            id="empty",
+        ),
+    ],
+)
+def test_write_readable(
+    tmpdir, tmp_path, tmp_path_factory, expected_data, expected_warning
+):
+    p = tmp_path_factory.mktemp("test_write_readable-")
+    fn = p / "data.json"
+    assert tmp_path_factory.getbasetemp() == p.parent
+    if expected_warning == "write-readable":
+        with recwarn() as record:
+            fn.write_bytes(expected_data)
+        record.clear()
+    else:
+        fn.write_bytes(expected_data)
+    if expected_warning == "test_wrongdir2":
+        with recwarn() as record:
+            fn.write_bytes(expected_data)
+        assert len(record) == 0
+    elif expected_warning == "test_wrongdir":
+        with recwarn() as record:
+            fn.write_bytes(expected_data)
+        assert len(record) == 0
+    else:
+        assert fn.read_bytes() == expected_data
+
+[/PYTHON]
+
+Functions called during the execution:
+[PYTHON]
+pytest.pytest.pytest_runtest_call
+
+def pytest_runtest_call(item):
+    from _pytest import skiplist
+    from _pytest.runner import CallInfo
+
+    # flow control
+    if skiplist.ismarked(item):
+        skiplist.gathermarked(item)
+        return True
+    else:
+        level = skiplist.get_marks[item].level
+        if level == Skipped.SKIPLIST_ONLY:
+            return True
+        elif level == Skipped.COMMAND_LINE_ONLY:
+            skiplist.gathermarked(item)
+            return True
+
+    # code preparation
+    item.session._setupstate.setup(item)
+
+    # Profiling (console output).
+    setup_tracing = None
+    profiling = item.config.pluginmanager.hook.pytest_runtest_setup(
+        item=item
+    )
+    if item.config.option.traceconfig:
+        config_hook = dict(item.config.pluginmanager.hook)
+        for hookcall in profiling:
+            if hookcall._anonymous and item.config.option.traceconfig:
+                hook_name = "<anonymous>"
+            else:
+                hook_name = repr(config_hook[hookcall._name].__name__)
+            new_style_args = []
+            hooks_are_spoiled = False
+            if hookcall._hookkwargs:
+                for k, v in sorted(hookcall._hookkwargs.items()):
+                    if v is None or v == []:
+                        continue
+                    # Representing plugin args as namespace (deprecated).
+                    if not hooks_are_spoiled and isinstance(v, argparse.Namespace):
+                        hooks_are_spoiled = True
+                        new_style_args.append(f"{k}={getattr(v, '_namespace_repr', v)}")
+                    else:
+                        new_style_args.append(f"{k}={v}")
+            item.write(
+                "- call hook: {}, args: ({})\n".format(
+                    hook_name, ", ".join(new_style_args)
+                )
+            )
+    item.write("teardown of previous calling session\n")
+    item.session._setupstate.teardown_exact(None)
+    item.write("setup of test session %r\n" % item.location[2])
+    tracetags = item.itracer.repr_tags(item)
+    if tracetags and len(tracetags) > 70:
+        tracetags = " " + tracetags[:67] + "…"
+    item.write(f"setup of test {tracetags}\n")
+
+    if item.config.option.runtrace:
+        item.write("starting test run\n")
+        if item.config.pluginmanager.getplugin("auresponses"):
+            auresponses = []
+            for name, (headers, auresponses) in (
+                item.config.pluginmanager.getplugin("auresponses").json.auresponses.items()
+            ):
+                if headers is None or not (name, headers) in item.session.__auresponses__.data:
+                    auresponses = []
+                else:
+                    auresponses = item.session.__auresponses__.data[(name, headers)]
+                item.write(f"  auresponses [{len(auresponses)}]: {auresponses}\n")
+
+    # runtest setup hook
+    reports = item.session.reports.collect_report("call")
+    item.session.reports._reset_current()
+
+    try:
+        reports.append(item.ihook.pytest_runtest_setup(item=item))
+    except exceptions.Skipped as exc:
+        reports.append(item.repr_location())
+        reports.append(item.repr_crash(message=exc.msg))
+        item.write("skipped by test item setup\n")
+        item.session._setupstate.teardown_exact(item)
+        item.session._setupstate.summary_counters[item] += 1
+        if not exc.allow_module_level:
+            nextitem = item.session.items[item.listindex + 1]
+            item._initrequest(nextitem)
+        else:
+            item.session.shouldfail += 1
+            item.session.shouldstop = "setupfailed%s" % (item.nodeid,)
+        return True
+    except ChainInterrupt as exc:
+        e = exceptions.Interrupted(exc.msg, exc.exit_code, exc.traces=exc.traces)
+        item.session.config.hook.pytest_keyboard_interrupt(excinfo=e)
+        sys.exc_clear()
+        return True
+    except BaseException:
+        reports.append(item.repr_location())
+        excinfo = _getexcinfo(sys.exc_info())
+        reports.append(item.repr_crash(excinfo=excinfo))
+        item.write("setup failed, skipping test collection\n")
+        item.session._setupstate.teardown_exact(item)
+        reports.append(item.ihook.pytest_exception_interact(node=item, call=reports, report=reports[2]))
+        reports.append(item.ihook.pytest_internalerror(excinfo=excinfo))
+        return True
+    else:
+        if reports[0].passed:
+            pass
+        else:
+            item.write("setup failed, skipping test\n")
+            item.session._setupstate.teardown_exact(item)
+            return True
+
+    item.write("running test item\n")
+
+    setup_tracing = None
+    if item.config.pluginmanager.hasplugin("funcargnames"):
+        item.config.hook.pytest_funcarg__funcargs(
+            pytestfunc=item.obj, item=item, args=item.callspec.params
+        )
+
+    pytestfunc = item.obj  # type: Callable
+    try:
+        # Call the test function.
+        result = TestReport.from_item_and_call(item, call)
+        if (
+            hasattr(pytestfunc, "_report_sections")
+            and hasattr(item.session.config, "pluginmanager")
+            and item.session.config.pluginmanager.hasplugin("_cov")
+            and not hasattr(pytestfunc._report_sections, "run")
+        ):
+            (plugin, name) = pytestfunc._report_sections[-1]
+            section_content = getattr(plugin, name)(pytestfunc)
+            pytestfunc._report_sections.append(("_report_sections", {"run": section_content}))
+    except Exception as e:
+        excinfo = e._excinfo
+        if isinstance(excinfo, tuple):
+            excinfo = _getexcinfo(e._excinfo)
+        call.excinfo = excinfo
+        if isinstance(excinfo, exceptions.Exit):
+            exitcode = excinfo
+        else:
+            returncode = _get_keyword_exit_status(item.config)
+            exitcode = ReturnCode(
+                exitcode
+                if isinstance(returncode, int)
+                else getattr(ReturnCode, returncode)
+            )
+            if (
+                isinstance(exitcode, ReturnCode)
+                and exitcode.force_exit
+                and exitcode.code < 0
+            ):
+                call.excinfo.errisinstance(exc.SystemExit)
+                returncode = ReturnCode.EXIT_NOTESTS_COLLECTED
+        if result.when != "setup":
+            returncode = ReturnCode(result.outcome)
+        call._result = (returncode, excinfo)
+        raise call.excinfo[1]
+
+    # runtest teardown hook
+    reports = item.session.reports.collect_report("teardown")
+    item.session.reports._reset_current()
+    try:
+        reports.append(item.ihook.pytest_runtest_teardown(item=item))
+    except exceptions.Skipped as exc:
+        reports.append(item.repr_location())
+        reports.append(item.repr_crash(message=exc.msg))
+        item.write("skipped by test item setup\n")
+        item.session._setupstate.teardown_exact(item)
+        item.session._setupstate.summary_counters[item] += 1
+        if not exc.allow_module_level:
+            nextitem = item.session.items[item.listindex + 1]
+            item._initrequest(nextitem)
+        else:
+            item.session.shouldfail += 1
+            item.session.shouldstop = "teardownfailed%s" % (item.nodeid,)
+        return True
+    except ChainInterrupt as exc:
+        e = exceptions.Interrupted(exc.msg, exc.exit_code, exc.traces=exc.traces)
+        item.session.config.hook.pytest_keyboard_interrupt(excinfo=e)
+        sys.exc_clear()
+        return True
+    except BaseException:
+        reports.append(item.repr_location())
+        excinfo = _getexcinfo(sys.exc_info())
+        reports.append(item.repr_crash(excinfo=excinfo))
+        item.write("teardown failed, skipping test collection\n")
+        item.session._setupstate.teardown_exact(item)
+        reports.append(item.ihook.pytest_exception_interact(node=item, call=reports, report=reports[2]))
+        reports.append(item.ihook.pytest_internalerror(excinfo=excinfo))
+        return True
+    else:
+        if reports[0].passed:
+            pass
+        else:
+            item.write("teardown failed, skipping test\n")
+            item.session._setupstate.teardown_exact(item)
+            return True
+[/PYTHON]
+What will be the output of `pytest_runtest_call`, given the following input:
+[INPUT]
+```
+{
+    "item": {
+        "_tmppath_factory": {
+            "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+            "_trace": {},
+            "_basetemp": null
+        },
+        "nodeid": "test.json_write",
+        "name": "test.json_write",
+        "callspec": {
+            "id": "test_write-readable",
+            "params": [
+                "expected_data=b'123'",
+                "expected_warning=''"
+            ]
+        },
+        "obj": {
+            "input": {
+                "tmpdir": null,
+                "tmp_path": {
+                    "_tmppath_factory": {
+                        "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+                        "_trace": {},
+                        "_basetemp": null
+                    },
+                    "name": "test.json_write"
+                },
+                "tmp_path_factory": {
+                    "_tmppath_factory": {
+                        "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+                        "_trace": {},
+                        "_basetemp": null
+                    },
+                    "name": "test.json_write"
+                },
+                "expected_data": "b'123'",
+                "expected_warning": ""
+            },
+            "output": {
+                "data.json": "b'123'"
+            }
+        },
+        "session": {
+            "_setupstate": {
+                "state": null
+            },
+            "reports": {
+                "_reports": []
+            },
+            "items": [
+                {
+                    "_tmppath_factory": {
+                        "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+                        "_trace": {},
+                        "_basetemp": null
+                    },
+                    "nodeid": "test.json_write",
+                    "name": "test.json_write",
+                    "callspec": {
+                        "id": "test_write-readable",
+                        "params": [
+                            "expected_data=b'123'",
+                            "expected_warning=''"
+                        ]
+                    },
+                    "obj": {
+                        "input": {
+                            "tmpdir": null,
+                            "tmp_path": {
+                                "_tmppath_factory": {
+                                    "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+                                    "_trace": {},
+                                    "_basetemp": null
+                                },
+                                "name": "test.json_write"
+                            },
+                            "tmp_path_factory": {
+                                "_tmppath_factory": {
+                                    "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+                                    "_trace": {},
+                                    "_basetemp": null
+                                },
+                                "name": "test.json_write"
+                            },
+                            "expected_data": "b'123'",
+                            "expected_warning": ""
+                        },
+                        "output": {
+                            "data.json": "b'123'"
+                        }
+                    },
+                    "session": {
+                        "_setupstate": {
+                            "state": null
+                        },
+                        "reports": {
+                            "_reports": []
+                        },
+                        "items": [
+                            {
+                                "_tmppath_factory": {
+                                    "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+                                    "_trace": {},
+                                    "_basetemp": null
+                                },
+                                "nodeid": "test.json_write",
+                                "name": "test.json_write",
+                                "callspec": {
+                                    "id": "test_write-readable",
+                                    "params": [
+                                        "expected_data=b'123'",
+                                        "expected_warning=''"
+                                    ]
+                                },
+                                "obj": {
+                                    "input": {
+                                        "tmpdir": null,
+                                        "tmp_path": {
+                                            "_tmppath_factory": {
+                                                "_given_basetemp": "/tmp/pytest-of-root/pytest-0/test_mktemp0",
+                                                "_trace": {},
+                                                "_basetemp": null
+                                            },
+                                            "name": "test.json_write"
+                                        },
+                                        "tmp_path_factory": {
+                                            "_tmppath_factory": {
+                                                "_given_basetemp":

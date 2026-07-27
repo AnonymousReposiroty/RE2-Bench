@@ -1,0 +1,122 @@
+from __future__ import annotations
+import contextlib
+import inspect
+from collections.abc import Callable, Mapping
+from typing import Any, NamedTuple, TypeVar
+from . import _compat, _config, setters
+
+class _ClassBuilder:
+    """
+    Iteratively build *one* class.
+    """
+    __slots__ = ('_add_method_dunders', '_attr_names', '_attrs', '_base_attr_map', '_base_names', '_cache_hash', '_cls', '_cls_dict', '_delete_attribs', '_frozen', '_has_custom_setattr', '_has_post_init', '_has_pre_init', '_is_exc', '_on_setattr', '_pre_init_has_args', '_repr_added', '_script_snippets', '_slots', '_weakref_slot', '_wrote_own_setattr')
+
+    def __init__(self, cls: type, these, auto_attribs: bool, props: ClassProps, has_custom_setattr: bool):
+        attrs, base_attrs, base_map = _transform_attrs(cls, these, auto_attribs, props.kw_only, props.collected_fields_by_mro, props.field_transformer)
+        self._cls = cls
+        self._cls_dict = dict(cls.__dict__) if props.is_slotted else {}
+        self._attrs = attrs
+        self._base_names = {a.name for a in base_attrs}
+        self._base_attr_map = base_map
+        self._attr_names = tuple((a.name for a in attrs))
+        self._slots = props.is_slotted
+        self._frozen = props.is_frozen
+        self._weakref_slot = props.has_weakref_slot
+        self._cache_hash = props.hashability is ClassProps.Hashability.HASHABLE_CACHED
+        self._has_pre_init = bool(getattr(cls, '__attrs_pre_init__', False))
+        self._pre_init_has_args = False
+        if self._has_pre_init:
+            pre_init_func = cls.__attrs_pre_init__
+            pre_init_signature = inspect.signature(pre_init_func)
+            self._pre_init_has_args = len(pre_init_signature.parameters) > 1
+        self._has_post_init = bool(getattr(cls, '__attrs_post_init__', False))
+        self._delete_attribs = not bool(these)
+        self._is_exc = props.is_exception
+        self._on_setattr = props.on_setattr_hook
+        self._has_custom_setattr = has_custom_setattr
+        self._wrote_own_setattr = False
+        self._cls_dict['__attrs_attrs__'] = self._attrs
+        self._cls_dict['__attrs_props__'] = props
+        if props.is_frozen:
+            self._cls_dict['__setattr__'] = _frozen_setattrs
+            self._cls_dict['__delattr__'] = _frozen_delattrs
+            self._wrote_own_setattr = True
+        elif self._on_setattr in (_DEFAULT_ON_SETATTR, setters.validate, setters.convert):
+            has_validator = has_converter = False
+            for a in attrs:
+                if a.validator is not None:
+                    has_validator = True
+                if a.converter is not None:
+                    has_converter = True
+                if has_validator and has_converter:
+                    break
+            if self._on_setattr == _DEFAULT_ON_SETATTR and (not (has_validator or has_converter)) or (self._on_setattr == setters.validate and (not has_validator)) or (self._on_setattr == setters.convert and (not has_converter)):
+                self._on_setattr = None
+        if props.added_pickling:
+            self._cls_dict['__getstate__'], self._cls_dict['__setstate__'] = self._make_getstate_setstate()
+        self._script_snippets: list[tuple[str, dict, Callable[[dict, dict], Any]]] = []
+        self._repr_added = False
+        if not hasattr(self._cls, '__module__') or not hasattr(self._cls, '__qualname__'):
+            self._add_method_dunders = self._add_method_dunders_safe
+        else:
+            self._add_method_dunders = self._add_method_dunders_unsafe
+
+    def _make_getstate_setstate(self):
+        """
+        Create custom __setstate__ and __getstate__ methods.
+        """
+        state_attr_names = tuple((an for an in self._attr_names if an != '__weakref__'))
+
+        def slots_getstate(self):
+            """
+            Automatically created by attrs.
+            """
+            return {name: getattr(self, name) for name in state_attr_names}
+        hash_caching_enabled = self._cache_hash
+
+        def slots_setstate(self, state):
+            """
+            Automatically created by attrs.
+            """
+            __bound_setattr = _OBJ_SETATTR.__get__(self)
+            if isinstance(state, tuple):
+                for name, value in zip(state_attr_names, state):
+                    __bound_setattr(name, value)
+            else:
+                for name in state_attr_names:
+                    if name in state:
+                        __bound_setattr(name, state[name])
+            if hash_caching_enabled:
+                __bound_setattr(_HASH_CACHE_FIELD, None)
+        return (slots_getstate, slots_setstate)
+
+    def add_init(self):
+        script, globs, annotations = _make_init_script(self._cls, self._attrs, self._has_pre_init, self._pre_init_has_args, self._has_post_init, self._frozen, self._slots, self._cache_hash, self._base_attr_map, self._is_exc, self._on_setattr, attrs_init=False)
+
+        def _attach_init(cls_dict, globs):
+            init = globs['__init__']
+            init.__annotations__ = annotations
+            cls_dict['__init__'] = self._add_method_dunders(init)
+        self._script_snippets.append((script, globs, _attach_init))
+        return self
+
+    def _add_method_dunders_unsafe(self, method: Callable) -> Callable:
+        """
+        Add __module__ and __qualname__ to a *method*.
+        """
+        method.__module__ = self._cls.__module__
+        method.__qualname__ = f'{self._cls.__qualname__}.{method.__name__}'
+        method.__doc__ = f'Method generated by attrs for class {self._cls.__qualname__}.'
+        return method
+
+    def _add_method_dunders_safe(self, method: Callable) -> Callable:
+        """
+        Add __module__ and __qualname__ to a *method* if possible.
+        """
+        with contextlib.suppress(AttributeError):
+            method.__module__ = self._cls.__module__
+        with contextlib.suppress(AttributeError):
+            method.__qualname__ = f'{self._cls.__qualname__}.{method.__name__}'
+        with contextlib.suppress(AttributeError):
+            method.__doc__ = f'Method generated by attrs for class {self._cls.__qualname__}.'
+        return method
