@@ -1,3 +1,9 @@
+## Dataset
+We have released our constructed benchmark under `dataset/re2-bench`.
+## Prompts
+We provided the prompt on different code reasoning tasks in `parompts/{TASK}`.
+## Flase Negatives in Input Prediction
+We discussed false negatives in the input prediction in the paper, and we released all such cases under `false_negative_input_prediction`.
 ## Installation
 Please visit OpenRouter (https://openrouter.ai/) and create a `open router key`, then set it in your local environment:
 ```
